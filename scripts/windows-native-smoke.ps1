@@ -68,15 +68,23 @@ $settings = @{
 }
 $settings | ConvertTo-Json | Set-Content -Path (Join-Path $dataRoot "settings.json")
 
-$env:SUNSETZ_HOME = $dataRoot
-$env:SUNSETZ_ACP = "mock"
 $stdoutPath = Join-Path $OutputDirectory "sunsetz.stdout.log"
 $stderrPath = Join-Path $OutputDirectory "sunsetz.stderr.log"
-$process = Start-Process `
-  -FilePath $resolvedExecutable `
-  -PassThru `
-  -RedirectStandardOutput $stdoutPath `
-  -RedirectStandardError $stderrPath
+$startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+$startInfo.FileName = $resolvedExecutable
+$startInfo.UseShellExecute = $false
+$startInfo.RedirectStandardOutput = $true
+$startInfo.RedirectStandardError = $true
+$startInfo.Environment["SUNSETZ_HOME"] = $dataRoot
+$startInfo.Environment["SUNSETZ_ACP"] = "mock"
+
+$process = [System.Diagnostics.Process]::new()
+$process.StartInfo = $startInfo
+if (-not $process.Start()) {
+  throw "Failed to start Sunsetz"
+}
+$stdoutTask = $process.StandardOutput.ReadToEndAsync()
+$stderrTask = $process.StandardError.ReadToEndAsync()
 
 try {
   $root = [System.Windows.Automation.AutomationElement]::RootElement
@@ -122,5 +130,9 @@ catch {
 finally {
   if (-not $process.HasExited) {
     Stop-Process -Id $process.Id -Force
+    $process.WaitForExit()
   }
+  $stdoutTask.GetAwaiter().GetResult() | Set-Content -Path $stdoutPath
+  $stderrTask.GetAwaiter().GetResult() | Set-Content -Path $stderrPath
+  $process.Dispose()
 }
