@@ -1,10 +1,11 @@
 {
   "name": "sunsetz",
   "private": true,
-  "version": "0.1.6",
+  "version": "1.0.0",
   "description": "Sunsetz local desktop agent workbench",
   "author": "Sunsetz contributors",
   "license": "MIT",
+  "packageManager": "pnpm@9.15.9",
   "type": "module",
   "scripts": {
     "dev": "tauri dev",

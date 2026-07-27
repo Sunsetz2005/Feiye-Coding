@@ -1,25 +1,12 @@
 # Changelog
 
-All notable Sunsetz changes are documented here.
+## [UNRELEASED] — 2026-07-27 11:55
 
-The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+## [1.0.0] — 2026-07-27 11:55
 
-## [Unreleased]
-
-### Added
-
-- `HostCapabilities v2` with versioned capability states and unknown-capability hiding.
-- Extracted workbench shell, sidebar navigator, top bar, focus restoration, and responsive resource-pane lifecycle.
-- Automated three-theme, three-viewport visual baselines and 200% geometry checks.
-- Stable Istanbul coverage baseline with enforced changed-code thresholds.
-
-### Changed
-
-- Rebuilt the project README and repository metadata around the Sunsetz product identity.
-- Removed obsolete reference-product screenshots, personal links, QR assets, and superseded planning documents.
-
-### Fixed
-
-- Project and task selection now use neutral states without a coral/orange selection border.
-- Sidebar disclosures and task actions use native button semantics with visible keyboard focus.
-- Closing a workbench pane restores focus to its trigger and unmounts hidden resource content.
+- 建立 Sunsetz 私有远程仓库并重写中英文项目说明。
+- 完成工作台侧栏、顶部栏、响应式资源面板和焦点恢复基础重构。
+- 引入 HostCapabilities v2，隐藏未实现或不可用的功能入口。
+- 建立前端覆盖率、契约检查、视觉回归和三平台 Rust 持续集成。
+- 清理与 Sunsetz 品牌无关的截图、二维码、链接和过期文档。
+- 修复 Windows 上技能目录原子保存失败的问题。

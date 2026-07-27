@@ -1,6 +1,6 @@
 [package]
 name = "sunsetz"
-version = "0.1.6"
+version = "1.0.0"
 description = "Sunsetz local desktop agent workbench"
 authors = ["Sunsetz contributors"]
 edition = "2021"

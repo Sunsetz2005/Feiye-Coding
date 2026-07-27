@@ -134,7 +134,7 @@ cp src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/rpm/* dist-installer
 
 1. **推送版本 tag**（推荐、稳定）  
    ```bash
-   # 1) 先在 CHANGELOG.md 写好 ## [X.Y.Z] - YYYY-MM-DD
+   # 1) 先在 CHANGELOG.md 写好 ## [X.Y.Z] — YYYY-MM-DD HH:mm
    # 2) 提交干净 main 后：
    ./scripts/release-tag.sh 0.1.1
    # 或直接推送：
@@ -193,7 +193,7 @@ Tag 格式：`v0.1.1`（前缀 `v` + semver）。
 | 现象 | 处理 |
 |------|------|
 | CI “Resource not accessible by integration” | 打开 workflow 写权限 |
-| release job：no CHANGELOG section | 补 `## [X.Y.Z]` 后再 tag |
+| release job：no CHANGELOG section | 补 `## [X.Y.Z] — YYYY-MM-DD HH:mm` 后再 tag |
 | macOS Intel build 缺 target | 确认 rustup 安装了 `x86_64-apple-darwin` |
 | Windows 交叉缺 makensis / clang-cl | `brew install makensis llvm`；`export PATH="$(brew --prefix llvm)/bin:$PATH"` |
 | cargo-xwin 首次很慢 | 正常：在拉 CRT/SDK；缓存目录 `~/.cache/cargo-xwin` |

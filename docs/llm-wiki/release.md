@@ -27,45 +27,25 @@
 
 ## CHANGELOG 写法（强制）
 
-文件：`CHANGELOG.md`（[Keep a Changelog](https://keepachangelog.com/) + SemVer）。
-
-每个正式版在 tag **之前**必须有：
+文件：`CHANGELOG.md`。第一条版本标题固定为空的 `UNRELEASED`，每个正式版在 tag **之前**必须紧接其后按新到旧排列：
 
 ```markdown
-## [X.Y.Z] - YYYY-MM-DD
+# Changelog
 
-> 中英文对照。English first，再写 **中文 · …** 摘要。
->
-> **Highlight:** 一句话亮点。
+## [UNRELEASED] — YYYY-MM-DD HH:mm
 
-### Added
-- …
+## [X.Y.Z] — YYYY-MM-DD HH:mm
 
-### Changed
-- …
-
-### Fixed
-- …
-
-### Notes
-- 非官方、CLI 依赖等说明
-
-**中文 · 新增**
-- …
-
-**中文 · 变更**
-- …
-
-**中文 · 修复**
-- …
+- 一句话说明实际完成的改动。
 ```
 
 规则：
 
 1. **没有对应 `## [X.Y.Z]` 章节 → 禁止 tag**（`release-tag.sh` 与 CI 都会 fail）。  
-2. 列表要**可验收**：用户/AI 读完知道本版改了什么，不要空话。  
-3. 发版当天把 `[Unreleased]` 里准备进本版的条目**挪进** `## [X.Y.Z]`。  
-4. 后续每次功能合并，Agent 应在 PR/提交中**同步改 Unreleased 或即将发的版本节**。  
+2. `## [UNRELEASED] — YYYY-MM-DD HH:mm` 永远位于最上方且保持空白。
+3. 每个新版本直接插入 `UNRELEASED` 下方，旧版本依次下移。
+4. 每个列表项只写一句结果，不写实现过程、宣传语或无关技术细节。
+5. 标题使用长破折号 `—`，时间使用本地 `YYYY-MM-DD HH:mm`。
 
 生成 Release 预览（本地）：
 
@@ -81,7 +61,7 @@ git checkout main
 git pull origin main   # 若已有远程历史
 git status             # 必须 clean
 
-# 1) 写好 CHANGELOG.md → ## [X.Y.Z] - 日期
+# 1) 写好 CHANGELOG.md → ## [X.Y.Z] — YYYY-MM-DD HH:mm
 # 2) 自测（至少）：
 pnpm typecheck && pnpm test
 # 可选本地装包：pnpm build:mac-arm / pnpm build:win

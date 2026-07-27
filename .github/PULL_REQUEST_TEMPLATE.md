@@ -13,4 +13,5 @@
 - [ ] User-facing strings go through `src/i18n/messages.ts` (en + zh)
 - [ ] No `window.confirm` / `prompt` / `alert` for product dialogs
 - [ ] Docs / `docs/llm-wiki` updated if behavior changed
+- [ ] `CHANGELOG.md` keeps an empty `UNRELEASED` section first and uses concise one-sentence release entries
 - [ ] No secrets (`secrets.json`, tokens, `auth.json`) included

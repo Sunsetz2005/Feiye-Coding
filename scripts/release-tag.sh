@@ -9,8 +9,8 @@
 # Release notes (GitHub Release body) are generated from CHANGELOG.md by CI:
 #   scripts/changelog-for-release.py → releaseBody for tauri-action
 # Before tagging, ensure CHANGELOG has a section:
-#   ## [X.Y.Z] - YYYY-MM-DD
-# with bilingual (EN + 中文) notes under Added/Fixed/Changed as needed.
+#   ## [X.Y.Z] — YYYY-MM-DD HH:mm
+# with concise one-sentence change bullets.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -47,7 +47,7 @@ fi
 
 # Fail early if CHANGELOG section is missing (CI would fail the same way).
 if ! python3 scripts/changelog-for-release.py "$VERSION" >/dev/null; then
-  echo "error: add bilingual release notes under ## [$VERSION] in CHANGELOG.md first." >&2
+  echo "error: add concise release notes under ## [$VERSION] in CHANGELOG.md first." >&2
   exit 1
 fi
 echo "==> CHANGELOG section for $VERSION OK (will become GitHub Release body)"

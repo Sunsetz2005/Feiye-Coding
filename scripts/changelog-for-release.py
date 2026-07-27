@@ -18,6 +18,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 CHANGELOG = ROOT / "CHANGELOG.md"
+TOP_RE = re.compile(
+    r"\A# Changelog\n\n"
+    r"## \[UNRELEASED\] — \d{4}-\d{2}-\d{2} \d{2}:\d{2}\n\n"
+    r"(?=## \[)",
+)
 
 # One short footer (no full download table / install essay every release).
 FOOTER = """
@@ -35,9 +40,11 @@ def normalize_version(raw: str) -> str:
 
 
 def extract_section(text: str, version: str) -> str | None:
-    """Return body under ## [version] ... until next ## [ or EOF."""
+    """Return body under the exact release heading until the next release."""
     pat = re.compile(
-        rf"^## \[{re.escape(version)}\][^\n]*\n(.*?)(?=^## \[|\Z)",
+        rf"^## \[{re.escape(version)}\] — "
+        rf"\d{{4}}-\d{{2}}-\d{{2}} \d{{2}}:\d{{2}}\n"
+        rf"(.*?)(?=^## \[|\Z)",
         re.MULTILINE | re.DOTALL,
     )
     m = pat.search(text)
@@ -55,11 +62,18 @@ def main() -> int:
         print(f"error: missing {CHANGELOG}", file=sys.stderr)
         return 1
     text = CHANGELOG.read_text(encoding="utf-8")
+    if not TOP_RE.search(text):
+        print(
+            "error: CHANGELOG must start with an empty "
+            "`## [UNRELEASED] — YYYY-MM-DD HH:mm` section.",
+            file=sys.stderr,
+        )
+        return 1
     section = extract_section(text, version)
     if not section:
         print(
             f"error: no CHANGELOG section for [{version}]. "
-            f"Add `## [{version}] - YYYY-MM-DD` before tagging.",
+            f"Add `## [{version}] — YYYY-MM-DD HH:mm` before tagging.",
             file=sys.stderr,
         )
         return 1

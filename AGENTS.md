@@ -22,3 +22,10 @@
 Run `pnpm typecheck`, `pnpm test`, `pnpm build:ui`, `pnpm verify:contracts`, `pnpm test:visual`, and `cargo test` before release work. Use `SUNSETZ_ACP=mock pnpm dev` for UI-only smoke tests. Only update Playwright snapshots after manually confirming the visual change.
 
 Coverage policy is versioned in `coverage-policy.json`. Run `pnpm test:coverage`, `pnpm coverage:audit`, and `pnpm coverage:changed` for the current frontend baseline and enforced changed-code gate. Rust coverage remains audit-only; do not describe the final 80% line / 70% branch targets as achieved until the corresponding final audits pass.
+
+## Changelog
+
+- Keep `## [UNRELEASED] — YYYY-MM-DD HH:mm` as the first and empty version section in `CHANGELOG.md`.
+- Add each release immediately below it as `## [X.Y.Z] — YYYY-MM-DD HH:mm`, newest first.
+- Write every change as one short sentence describing the delivered result; omit implementation detail and promotional copy.
+- Keep the SemVer value synchronized across the frontend manifest, Tauri manifest, Cargo manifest, lockfile, and localized version footer.

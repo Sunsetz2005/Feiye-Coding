@@ -104,7 +104,7 @@ New Issue
 - **#1** locale-aware session titles — **merge** (correct i18n for LLM rename)  
 - **#2** Grok Build underscore permission optionIds — **merge** (fixes shell tool allow failures)
 
-After merge: thank author on PR; close linked Issues; mention in CHANGELOG under next version.
+After merge: thank the author on the PR and close linked Issues; add a concise CHANGELOG sentence when preparing the next version.
 
 ---
 
@@ -132,7 +132,7 @@ After merge: thank author on PR; close linked Issues; mention in CHANGELOG under
 1. `gh issue list --label priority:p0` — empty or owned  
 2. `gh pr list` — review open community PRs  
 3. Scan X launch thread for new bugs → Issues  
-4. Bump CHANGELOG unreleased notes if fixing on main  
+4. Prepare a concise version section below the empty `UNRELEASED` heading when releasing
 5. When enough P0/P1 landed → [release.md](./release.md)  
 
 ---
