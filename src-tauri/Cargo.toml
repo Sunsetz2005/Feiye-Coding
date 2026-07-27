@@ -54,6 +54,12 @@ arboard = "3"
 image = { version = "0.25", default-features = false, features = ["png"] }
 fs2 = "0.4"
 
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+] }
+
 [profile.release]
 codegen-units = 1
 lto = true

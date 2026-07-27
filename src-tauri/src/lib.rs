@@ -49,6 +49,46 @@ use std::sync::Arc;
 
 use session_manager::SessionManager;
 
+#[cfg(target_os = "windows")]
+fn constrain_windows_window_to_work_area(window: &tauri::WebviewWindow) {
+    use windows::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    };
+
+    let Ok(hwnd) = window.hwnd() else {
+        return;
+    };
+    let monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
+    if monitor.is_invalid() {
+        return;
+    }
+
+    let mut monitor_info = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    if !unsafe { GetMonitorInfoW(monitor, &mut monitor_info) }.as_bool() {
+        return;
+    }
+
+    let work = monitor_info.rcWork;
+    let work_width = (work.right - work.left).max(1) as u32;
+    let work_height = (work.bottom - work.top).max(1) as u32;
+    let Ok(current_size) = window.outer_size() else {
+        return;
+    };
+    let width = current_size.width.min(work_width);
+    let height = current_size.height.min(work_height);
+
+    if width != current_size.width || height != current_size.height {
+        let _ = window.set_size(tauri::PhysicalSize::new(width, height));
+    }
+
+    let x = work.left + ((work_width - width) / 2) as i32;
+    let y = work.top + ((work_height - height) / 2) as i32;
+    let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let _ = paths::ensure_app_dirs();
@@ -108,6 +148,8 @@ pub fn run() {
                         tracing::warn!("window vibrancy: {e}");
                     }
                 }
+                #[cfg(target_os = "windows")]
+                constrain_windows_window_to_work_area(&window);
                 // Windows / others: solid base matching dark theme (avoids white flash / WebView2 glitches).
                 #[cfg(not(target_os = "macos"))]
                 {
