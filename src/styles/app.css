@@ -3150,12 +3150,25 @@ html.platform-mac[data-theme="light"] .settings-page__content {
   font-size: 13px;
 }
 
+.settings-page__search:focus-within {
+  border-color: color-mix(in srgb, var(--text-primary) 22%, var(--border-subtle));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--text-primary) 5%, transparent);
+}
+
 .settings-page__group-label {
   margin: 10px 8px 4px;
   font-size: 11px;
   font-weight: 600;
   color: var(--text-tertiary);
   letter-spacing: 0.02em;
+}
+
+.settings-page__nav-empty {
+  margin: 20px 10px 0;
+  color: var(--text-tertiary);
+  font-size: 12.5px;
+  line-height: 1.45;
+  text-wrap: pretty;
 }
 
 .settings-page__nav-item {
@@ -3169,6 +3182,10 @@ html.platform-mac[data-theme="light"] .settings-page__content {
   color: var(--text-secondary);
   font-size: 13px;
   text-align: left;
+  transition:
+    background-color 140ms ease,
+    color 140ms ease,
+    transform 100ms ease;
 }
 
 .settings-page__nav-item:hover {
@@ -3180,6 +3197,10 @@ html.platform-mac[data-theme="light"] .settings-page__content {
   background: var(--bg-active);
   color: var(--text-primary);
   font-weight: 600;
+}
+
+.settings-page__nav-item:active {
+  transform: translateY(1px);
 }
 
 /*
@@ -3233,6 +3254,7 @@ html.platform-mac[data-theme="light"] .settings-page__content {
   font-weight: 600;
   color: var(--text-primary);
   letter-spacing: -0.02em;
+  text-wrap: balance;
 }
 
 .settings-page__h2 {
@@ -3518,6 +3540,7 @@ html[data-theme="light"] .ui-check.is-mixed .ui-check__box {
   font-size: 12.5px;
   line-height: 1.45;
   color: var(--text-tertiary);
+  text-wrap: pretty;
 }
 
 .settings-row__hint.is-danger {

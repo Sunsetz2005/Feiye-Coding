@@ -528,6 +528,7 @@ export const zhTW: Record<MessageKey, string> = {
   "settings.title": "設定",
   "settings.backToApp": "返回應用程式",
   "settings.searchPlaceholder": "搜尋設定…",
+  "settings.searchEmpty": "沒有符合的設定",
   "settings.group.personal": "個人",
   "settings.group.system": "系統",
   "settings.nav.general": "一般",

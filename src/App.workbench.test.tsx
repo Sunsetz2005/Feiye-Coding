@@ -3,6 +3,7 @@
 import {
   act,
   cleanup,
+  fireEvent,
   render,
   screen,
   within,
@@ -208,6 +209,15 @@ describe("App workbench integration", () => {
       });
 
       expect(window.location.hash).toMatch(/^#\/settings\/(account|general)$/);
+      const settingsSearch = await screen.findByRole("textbox", {
+        name: /Search settings|搜索设置/,
+      });
+      fireEvent.change(settingsSearch, {
+        target: { value: "setting-that-does-not-exist" },
+      });
+      expect(screen.getByRole("status").textContent).toMatch(
+        /No matching settings|没有匹配的设置/,
+      );
     },
     20_000,
   );

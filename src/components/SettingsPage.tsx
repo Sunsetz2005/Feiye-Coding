@@ -50,15 +50,14 @@ import {
   type MessageKey,
   type Vars,
 } from "@/i18n";
+import {
+  filterSettingsRegistry,
+  SETTINGS_REGISTRY,
+  type SettingsSectionIcon,
+  type SettingsSectionId,
+} from "@/lib/settingsRegistry";
 
-export type SettingsSectionId =
-  | "general"
-  | "appearance"
-  | "account"
-  | "archived"
-  | "extensions"
-  | "runtime"
-  | "about";
+export type { SettingsSectionId } from "@/lib/settingsRegistry";
 
 export type ArchivedSessionRow = {
   id: string;
@@ -157,38 +156,11 @@ export interface SettingsPageProps {
   onSkillsPrefsChanged?: () => void;
 }
 
-const NAV: {
-  id: SettingsSectionId;
-  icon:
-    | "settings"
-    | "appearance"
-    | "user"
-    | "archive"
-    | "extensions"
-    | "doctor"
-    | "info";
-  labelKey: string;
-  group: "personal" | "system";
-}[] = [
-  { id: "general", icon: "settings", labelKey: "settings.nav.general", group: "personal" },
-  { id: "appearance", icon: "appearance", labelKey: "settings.nav.appearance", group: "personal" },
-  { id: "account", icon: "user", labelKey: "settings.nav.account", group: "personal" },
-  { id: "archived", icon: "archive", labelKey: "settings.nav.archived", group: "personal" },
-  {
-    id: "extensions",
-    icon: "extensions",
-    labelKey: "settings.nav.extensions",
-    group: "system",
-  },
-  { id: "runtime", icon: "doctor", labelKey: "settings.nav.runtime", group: "system" },
-  { id: "about", icon: "info", labelKey: "settings.nav.about", group: "system" },
-];
-
 function NavIcon({
   name,
   size = 18,
 }: {
-  name: (typeof NAV)[number]["icon"];
+  name: SettingsSectionIcon;
   size?: number;
 }) {
   if (name === "appearance") return <IconAppearance size={size} />;
@@ -476,9 +448,7 @@ export function SettingsPage({
   }, []);
 
   const nav = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    if (!q) return NAV;
-    return NAV.filter((n) => t(n.labelKey).toLowerCase().includes(q));
+    return filterSettingsRegistry(query, t);
   }, [query, t]);
 
   const archivedAllIds = useMemo(
@@ -656,20 +626,12 @@ export function SettingsPage({
     setMarquee(null);
   };
 
-  const title =
-    section === "general"
-      ? t("settings.nav.general")
-      : section === "appearance"
-        ? t("settings.nav.appearance")
-        : section === "account"
-          ? t("settings.nav.account")
-          : section === "archived"
-            ? t("settings.nav.archived")
-            : section === "extensions"
-              ? t("settings.nav.extensions")
-              : section === "runtime"
-                ? t("settings.nav.runtime")
-                : t("settings.nav.about");
+  const title = t(
+    SETTINGS_REGISTRY.find((item) => item.id === section)?.labelKey ??
+      "settings.title",
+  );
+  const personalNav = nav.filter((item) => item.group === "personal");
+  const systemNav = nav.filter((item) => item.group === "system");
 
   return (
     <div className="settings-page" data-testid="settings-page">
@@ -684,7 +646,10 @@ export function SettingsPage({
             .catch(() => {});
         }}
       />
-      <aside className="settings-page__nav">
+      <aside
+        className="settings-page__nav"
+        aria-label={t("settings.title")}
+      >
         <div className="settings-page__nav-inner">
         <button
           type="button"
@@ -701,15 +666,16 @@ export function SettingsPage({
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder={t("settings.searchPlaceholder")}
+            aria-label={t("settings.searchPlaceholder")}
           />
         </div>
 
-        <div className="settings-page__group-label">
-          {t("settings.group.personal")}
-        </div>
-        {nav
-          .filter((n) => n.group === "personal")
-          .map((n) => (
+        {personalNav.length > 0 ? (
+          <div className="settings-page__group-label">
+            {t("settings.group.personal")}
+          </div>
+        ) : null}
+        {personalNav.map((n) => (
             <button
               key={n.id}
               type="button"
@@ -717,6 +683,7 @@ export function SettingsPage({
                 "settings-page__nav-item" +
                 (section === n.id ? " is-active" : "")
               }
+              aria-current={section === n.id ? "page" : undefined}
               onClick={() => onSection(n.id)}
             >
               <NavIcon name={n.icon} />
@@ -724,12 +691,12 @@ export function SettingsPage({
             </button>
           ))}
 
-        <div className="settings-page__group-label">
-          {t("settings.group.system")}
-        </div>
-        {nav
-          .filter((n) => n.group === "system")
-          .map((n) => (
+        {systemNav.length > 0 ? (
+          <div className="settings-page__group-label">
+            {t("settings.group.system")}
+          </div>
+        ) : null}
+        {systemNav.map((n) => (
             <button
               key={n.id}
               type="button"
@@ -737,12 +704,18 @@ export function SettingsPage({
                 "settings-page__nav-item" +
                 (section === n.id ? " is-active" : "")
               }
+              aria-current={section === n.id ? "page" : undefined}
               onClick={() => onSection(n.id)}
             >
               <NavIcon name={n.icon} />
               <span>{t(n.labelKey)}</span>
             </button>
           ))}
+        {nav.length === 0 ? (
+          <p className="settings-page__nav-empty" role="status">
+            {t("settings.searchEmpty")}
+          </p>
+        ) : null}
         </div>
       </aside>
 

@@ -5,6 +5,7 @@ Agent 与贡献者的**可执行知识库**。改产品行为或 UI 文案前，
 | 文档 | 用途 |
 |------|------|
 | [workbench-conversation.md](./workbench-conversation.md) | **当前工作台权威说明**：输入器、浮层、活动顺序、提问/计划、附件与能力边界 |
+| [settings-center.md](./settings-center.md) | **设置中心权威说明**：真实栏目注册表、搜索、能力门控和视觉层级 |
 | [i18n.md](./i18n.md) | **多语言强制规则**：所有 UI 文案、增改键、双语同步 |
 | [dialogs.md](./dialogs.md) | **禁止 `window.confirm` / `prompt` / `alert`**；应用内弹窗；复用现有面板样式（不强制毛玻璃） |
 | [catalog.md](./catalog.md) | 与 Grok Build CLI 对齐的模型 / 推理强度 / 权限（含 YOLO） |
