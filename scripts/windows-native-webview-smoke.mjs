@@ -9,7 +9,7 @@ const endpoint = await waitForEndpoint("http://127.0.0.1:9222/json/version");
 const browser = await chromium.connectOverCDP(endpoint.webSocketDebuggerUrl);
 
 try {
-  const page = await waitForTauriPage(browser);
+  const page = await waitForAppPage(browser);
   await page.getByRole("button", { name: "New session" }).waitFor({
     state: "visible",
     timeout: 30_000,
@@ -112,18 +112,30 @@ async function waitForEndpoint(url) {
   throw new Error(`WebView2 CDP endpoint unavailable: ${lastError}`);
 }
 
-async function waitForTauriPage(browser) {
+async function waitForAppPage(browser) {
   const deadline = Date.now() + 30_000;
+  let observedUrls = [];
   while (Date.now() < deadline) {
     for (const context of browser.contexts()) {
-      const page = context
-        .pages()
-        .find((candidate) => candidate.url().startsWith("tauri://"));
+      const pages = context.pages();
+      observedUrls = pages.map((candidate) => candidate.url());
+      const page = pages.find((candidate) => {
+        const url = candidate.url();
+        return (
+          url.startsWith("tauri://") ||
+          url.startsWith("http://tauri.localhost") ||
+          url.startsWith("https://tauri.localhost")
+        );
+      });
       if (page) return page;
     }
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
-  throw new Error("No tauri:// page appeared in the native WebView");
+  throw new Error(
+    `No Tauri application page appeared in the native WebView; observed: ${
+      observedUrls.join(", ") || "(none)"
+    }`,
+  );
 }
 
 function assert(condition, message) {
