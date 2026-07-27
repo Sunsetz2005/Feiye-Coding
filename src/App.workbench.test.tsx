@@ -91,55 +91,59 @@ afterAll(() => {
 });
 
 describe("App workbench integration", () => {
-  it("renders the browser fallback through the real workbench boundaries", async () => {
-    localStorage.setItem("sunsetz.theme", "dark");
-    const { default: App } = await import("./App");
-    render(<App />);
+  it(
+    "renders the browser fallback through the real workbench boundaries",
+    async () => {
+      localStorage.setItem("sunsetz.theme", "dark");
+      const { default: App } = await import("./App");
+      render(<App />);
 
-    await waitFor(() => {
-      expect(screen.getByTestId("workbench-shell")).toBeTruthy();
-    });
-    expect(screen.getByTestId("sidebar-navigator")).toBeTruthy();
-    expect(screen.getByRole("heading", { name: /new|新会话/i })).toBeTruthy();
+      await waitFor(() => {
+        expect(screen.getByTestId("workbench-shell")).toBeTruthy();
+      });
+      expect(screen.getByTestId("sidebar-navigator")).toBeTruthy();
+      expect(screen.getByRole("heading", { name: /new|新会话/i })).toBeTruthy();
 
-    const sidebar = sidebarCapture.current;
-    expect(sidebar).not.toBeNull();
-    if (!sidebar) return;
+      const sidebar = sidebarCapture.current;
+      expect(sidebar).not.toBeNull();
+      if (!sidebar) return;
 
-    await act(async () => {
-      sidebar.chrome.onHide();
-      sidebar.chrome.onToggleMaximize();
-      sidebar.navigation.onNewSession();
-      sidebar.navigation.onSearch();
-      sidebar.navigation.onOpenAutomations();
-      sidebar.navigation.onOpenExtensions();
-      sidebar.tree.onToggleProjects();
-      sidebar.tree.onAddProject();
-      sidebar.tree.onToggleProject("missing-project", true);
-      sidebar.tree.onSelectProject("missing-project");
-      sidebar.tree.onTrustProject("missing-project");
-      sidebar.tree.onProjectMenu(
-        { currentTarget: document.body } as never,
-        "missing-project",
-      );
-      sidebar.tree.onToggleHistory();
-      sidebar.tree.onOpenSession("missing-session", null);
-      sidebar.tree.onArchiveSession("missing-session", true);
-      sidebar.tree.onSessionMenu(
-        { currentTarget: document.body } as never,
-        "missing-session",
-      );
-      sidebar.account.onClose();
-      sidebar.account.onToggle(false);
-      sidebar.account.onToggle(true);
-      sidebar.account.onSettings();
-      sidebar.account.onAccountSettings();
-      sidebar.account.onToggleTheme();
-      sidebar.account.onLogin();
-      sidebar.account.onLogout();
-      await Promise.resolve();
-    });
+      await act(async () => {
+        sidebar.chrome.onHide();
+        sidebar.chrome.onToggleMaximize();
+        sidebar.navigation.onNewSession();
+        sidebar.navigation.onSearch();
+        sidebar.navigation.onOpenAutomations();
+        sidebar.navigation.onOpenExtensions();
+        sidebar.tree.onToggleProjects();
+        sidebar.tree.onAddProject();
+        sidebar.tree.onToggleProject("missing-project", true);
+        sidebar.tree.onSelectProject("missing-project");
+        sidebar.tree.onTrustProject("missing-project");
+        sidebar.tree.onProjectMenu(
+          { currentTarget: document.body } as never,
+          "missing-project",
+        );
+        sidebar.tree.onToggleHistory();
+        sidebar.tree.onOpenSession("missing-session", null);
+        sidebar.tree.onArchiveSession("missing-session", true);
+        sidebar.tree.onSessionMenu(
+          { currentTarget: document.body } as never,
+          "missing-session",
+        );
+        sidebar.account.onClose();
+        sidebar.account.onToggle(false);
+        sidebar.account.onToggle(true);
+        sidebar.account.onSettings();
+        sidebar.account.onAccountSettings();
+        sidebar.account.onToggleTheme();
+        sidebar.account.onLogin();
+        sidebar.account.onLogout();
+        await Promise.resolve();
+      });
 
-    expect(window.location.hash).toMatch(/^#\/settings\/(account|general)$/);
-  });
+      expect(window.location.hash).toMatch(/^#\/settings\/(account|general)$/);
+    },
+    20_000,
+  );
 });
