@@ -13,121 +13,6 @@ Add-Type -AssemblyName UIAutomationTypes
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Windows.Forms
 
-function Find-NamedElement {
-  param(
-    [Parameter(Mandatory = $true)]
-    [System.Windows.Automation.AutomationElement]$Root,
-
-    [Parameter(Mandatory = $true)]
-    [string[]]$Names,
-
-    [int]$TimeoutSeconds = 20
-  )
-
-  $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
-  do {
-    foreach ($name in $Names) {
-      $condition = [System.Windows.Automation.PropertyCondition]::new(
-        [System.Windows.Automation.AutomationElement]::NameProperty,
-        $name
-      )
-      $element = $Root.FindFirst(
-        [System.Windows.Automation.TreeScope]::Descendants,
-        $condition
-      )
-      if ($null -ne $element -and -not $element.Current.IsOffscreen) {
-        return $element
-      }
-    }
-    Start-Sleep -Milliseconds 250
-  } while ([DateTime]::UtcNow -lt $deadline)
-
-  throw "Timed out waiting for UI element: $($Names -join ' | ')"
-}
-
-function Wait-NamedElementAbsent {
-  param(
-    [Parameter(Mandatory = $true)]
-    [System.Windows.Automation.AutomationElement]$Root,
-
-    [Parameter(Mandatory = $true)]
-    [string[]]$Names,
-
-    [int]$TimeoutSeconds = 10
-  )
-
-  $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
-  do {
-    $visible = $false
-    foreach ($name in $Names) {
-      $condition = [System.Windows.Automation.PropertyCondition]::new(
-        [System.Windows.Automation.AutomationElement]::NameProperty,
-        $name
-      )
-      $element = $Root.FindFirst(
-        [System.Windows.Automation.TreeScope]::Descendants,
-        $condition
-      )
-      if ($null -ne $element -and -not $element.Current.IsOffscreen) {
-        $visible = $true
-        break
-      }
-    }
-    if (-not $visible) {
-      return
-    }
-    Start-Sleep -Milliseconds 200
-  } while ([DateTime]::UtcNow -lt $deadline)
-
-  throw "UI element remained visible: $($Names -join ' | ')"
-}
-
-function Invoke-Element {
-  param(
-    [Parameter(Mandatory = $true)]
-    [System.Windows.Automation.AutomationElement]$Element
-  )
-
-  $pattern = $null
-  if ($Element.TryGetCurrentPattern(
-      [System.Windows.Automation.InvokePattern]::Pattern,
-      [ref]$pattern
-    )) {
-    ([System.Windows.Automation.InvokePattern]$pattern).Invoke()
-    return
-  }
-  if ($Element.TryGetCurrentPattern(
-      [System.Windows.Automation.TogglePattern]::Pattern,
-      [ref]$pattern
-    )) {
-    ([System.Windows.Automation.TogglePattern]$pattern).Toggle()
-    return
-  }
-  throw "Element '$($Element.Current.Name)' exposes no invoke or toggle pattern"
-}
-
-function Wait-FocusedName {
-  param(
-    [Parameter(Mandatory = $true)]
-    [string[]]$Names,
-
-    [int]$TimeoutSeconds = 10
-  )
-
-  $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
-  do {
-    $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
-    if ($null -ne $focused -and $Names -contains $focused.Current.Name) {
-      return
-    }
-    Start-Sleep -Milliseconds 200
-  } while ([DateTime]::UtcNow -lt $deadline)
-
-  $actual = [System.Windows.Automation.AutomationElement]::FocusedElement
-  $actualName = if ($null -eq $actual) { "<none>" } else { $actual.Current.Name }
-  throw "Focus was '$actualName'; expected one of: $($Names -join ' | ')"
-}
-
 function Save-DesktopScreenshot {
   param(
     [Parameter(Mandatory = $true)]
@@ -151,26 +36,6 @@ function Save-DesktopScreenshot {
     $graphics.Dispose()
     $bitmap.Dispose()
   }
-}
-
-function Save-AutomationTree {
-  param(
-    [Parameter(Mandatory = $true)]
-    [System.Windows.Automation.AutomationElement]$Root,
-
-    [Parameter(Mandatory = $true)]
-    [string]$Path
-  )
-
-  $rows = foreach ($element in $Root.FindAll(
-      [System.Windows.Automation.TreeScope]::Descendants,
-      [System.Windows.Automation.Condition]::TrueCondition
-    )) {
-    $controlType = $element.Current.ControlType.ProgrammaticName
-    $name = $element.Current.Name.Replace("`r", " ").Replace("`n", " ")
-    "$controlType`t$name`tOffscreen=$($element.Current.IsOffscreen)"
-  }
-  $rows | Set-Content -Path $Path -Encoding UTF8
 }
 
 $resolvedExecutable = (Resolve-Path $Executable).Path
@@ -205,7 +70,14 @@ $settings | ConvertTo-Json | Set-Content -Path (Join-Path $dataRoot "settings.js
 
 $env:SUNSETZ_HOME = $dataRoot
 $env:SUNSETZ_ACP = "mock"
-$process = Start-Process -FilePath $resolvedExecutable -PassThru
+$env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--disable-gpu --remote-debugging-port=9222"
+$stdoutPath = Join-Path $OutputDirectory "sunsetz.stdout.log"
+$stderrPath = Join-Path $OutputDirectory "sunsetz.stderr.log"
+$process = Start-Process `
+  -FilePath $resolvedExecutable `
+  -PassThru `
+  -RedirectStandardOutput $stdoutPath `
+  -RedirectStandardError $stderrPath
 
 try {
   $root = [System.Windows.Automation.AutomationElement]::RootElement
@@ -215,6 +87,9 @@ try {
   )
   $deadline = [DateTime]::UtcNow.AddSeconds(30)
   do {
+    if ($process.HasExited) {
+      throw "Sunsetz exited before exposing its native window"
+    }
     $window = $root.FindFirst(
       [System.Windows.Automation.TreeScope]::Children,
       $windowCondition
@@ -233,51 +108,12 @@ try {
     throw "Unexpected native window size: $($bounds.Width)x$($bounds.Height)"
   }
 
-  Save-DesktopScreenshot -Path (Join-Path $OutputDirectory "initial-window.png")
-  Save-AutomationTree `
-    -Root $window `
-    -Path (Join-Path $OutputDirectory "uia-tree.txt")
+  & node ./scripts/windows-native-webview-smoke.mjs $OutputDirectory
+  if ($LASTEXITCODE -ne 0) {
+    throw "Native WebView smoke failed with exit code $LASTEXITCODE"
+  }
 
-  Find-NamedElement -Root $window -Names @("New session", "新建会话") | Out-Null
-
-  $resourceToggle = Find-NamedElement -Root $window -Names @(
-    "Show files",
-    "显示文件"
-  )
-  Invoke-Element $resourceToggle
-  Find-NamedElement -Root $window -Names @("Hide files", "隐藏文件") | Out-Null
-  Find-NamedElement -Root $window -Names @(
-    "No file open",
-    "尚未打开文件"
-  ) | Out-Null
-  Save-DesktopScreenshot -Path (Join-Path $OutputDirectory "resources-open.png")
-
-  $resourceToggle = Find-NamedElement -Root $window -Names @(
-    "Hide files",
-    "隐藏文件"
-  )
-  Invoke-Element $resourceToggle
-  Wait-NamedElementAbsent -Root $window -Names @(
-    "No file open",
-    "尚未打开文件"
-  )
-  Wait-FocusedName -Names @("Show files", "显示文件")
-
-  $sidebarToggle = Find-NamedElement -Root $window -Names @(
-    "Hide sidebar",
-    "隐藏侧栏"
-  )
-  Invoke-Element $sidebarToggle
-  Find-NamedElement -Root $window -Names @(
-    "Show sidebar",
-    "显示侧栏"
-  ) | Out-Null
-  Wait-NamedElementAbsent -Root $window -Names @(
-    "New session",
-    "新建会话"
-  )
-  Wait-FocusedName -Names @("Show sidebar", "显示侧栏")
-
+  Save-DesktopScreenshot -Path (Join-Path $OutputDirectory "native-window.png")
   Write-Host "Windows native smoke passed at $($bounds.Width)x$($bounds.Height)."
 }
 finally {
