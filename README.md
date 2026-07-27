@@ -2,7 +2,7 @@
 
 [English](README_EN.md)
 
-![CI](https://github.com/Sunsetz2005/Sunsetz/actions/workflows/ci.yml/badge.svg)
+![CI](https://github.com/Sunsetz2005/Feiye-Coding/actions/workflows/ci.yml/badge.svg)
 
 Sunsetz 是一款本地优先的桌面 Agent 工作台。它把项目、会话、权限、计划、文件审阅、扩展和自动化集中在一个由 Tauri 驱动的原生应用中。
 

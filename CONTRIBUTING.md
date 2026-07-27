@@ -77,6 +77,8 @@ cd src-tauri && cargo test
 
 文档专用改动至少检查 Markdown 链接和 `git diff --check`。只有人工确认视觉变化正确后才能更新 Playwright 截图基线。
 
+涉及 Windows 工作台窗口、键盘或焦点时，除 CI 外还要按 `docs/验收/windows-stage1-manual.md` 在物理 Windows 设备留存实机证据。
+
 ## Pull Request
 
 - 说明改动目的、实际结果、验证方式和仍未覆盖的风险。

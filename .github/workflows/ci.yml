@@ -125,6 +125,30 @@ jobs:
         with:
           workspaces: "./src-tauri -> target"
           shared-key: ci-Windows-native
+      - name: Parse Windows acceptance scripts
+        shell: pwsh
+        run: |
+          $failed = $false
+          foreach ($script in @(
+            "./scripts/windows-native-smoke.ps1",
+            "./scripts/windows-stage1-manual.ps1"
+          )) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $script),
+              [ref]$tokens,
+              [ref]$errors
+            ) | Out-Null
+            if ($null -ne $errors -and $errors.Count -gt 0) {
+              $errors | ForEach-Object { Write-Error "$script`: $_" }
+              $failed = $true
+            }
+          }
+          if ($failed) { exit 1 }
+      - name: Validate Windows manual acceptance prerequisites
+        shell: pwsh
+        run: ./scripts/windows-stage1-manual.ps1 -ValidateOnly
       - name: Build Windows native smoke application
         run: pnpm exec tauri build --debug --no-bundle --config src-tauri/tauri.windows-smoke.conf.json
       - name: Run Windows native workbench smoke

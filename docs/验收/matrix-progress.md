@@ -37,5 +37,5 @@
 - 200% 下的完整内容状态矩阵与中栏 520px / 380px；
 - 减少动态、减少透明度组合；
 - 长会话、附件、菜单、计划、提问和设置页面；
-- macOS Finder，以及 Windows 原生窗口的 200% 缩放、键盘、焦点与面板生命周期实机手测；
+- macOS Finder，以及按 [`windows-stage1-manual.md`](./windows-stage1-manual.md)执行的 Windows 原生窗口 200% 缩放、键盘、焦点与面板生命周期实机手测；
 - P0 矩阵其余条目仍以各自专项记录为准，本文件不因一次 browser smoke 批量改写状态。

@@ -2,7 +2,7 @@
 
 [简体中文](README.md)
 
-![CI](https://github.com/Sunsetz2005/Sunsetz/actions/workflows/ci.yml/badge.svg)
+![CI](https://github.com/Sunsetz2005/Feiye-Coding/actions/workflows/ci.yml/badge.svg)
 
 Sunsetz is a local-first desktop agent workbench. It brings projects, sessions, permissions, plans, file review, extensions, and automations into one native Tauri application.
 

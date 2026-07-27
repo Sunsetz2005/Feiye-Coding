@@ -141,7 +141,7 @@ After merge: thank the author on the PR and close linked Issues; add a concise C
 
 When an agent maintains this repo:
 
-1. Read this file + `Agents.md` + relevant llm-wiki pages  
+1. Read this file + `AGENTS.md` + relevant llm-wiki pages
 2. Prefer **Issues first**, then code  
 3. Prefer **merging good community PRs** over reimplementing  
 4. Never force-push `main`; never tag without CHANGELOG section  

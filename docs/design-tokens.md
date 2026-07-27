@@ -45,7 +45,7 @@
 
 ## 3. 色板 · Dark（主视觉）
 
-主底使用 `#0d0d0d`–`#151515`，不使用大面积高饱和色；行动强调使用冷灰白与低饱和蓝，警告、信任和权限使用语义橙色，避免金色与赛博霓虹。
+主底使用 `#0d0d0d`–`#151515`，不使用大面积高饱和色；行动强调使用 Sunsetz coral，警告、信任和权限使用独立语义橙色，避免金色与赛博霓虹。
 
 | Token | Dark 值 | 用途 |
 |-------|---------|------|
@@ -66,9 +66,9 @@
 | `--text-secondary` | `rgba(255,255,255,0.58)` | 次文、时间戳 |
 | `--text-tertiary` | `rgba(255,255,255,0.38)` | 占位、禁用 |
 | `--text-inverse` | `#0d0d0d` | 浅底按钮上的字 |
-| `--accent` | `#8aa4ff` | 主行动（链接、主按钮弱填充） |
+| `--accent` | `#f2785c` | Sunsetz coral 主行动（链接、主按钮弱填充） |
 | `--accent-muted` | `rgba(138,164,255,0.14)` | 主按钮浅底 / chip |
-| `--accent-hover` | `#a0b6ff` | hover |
+| `--accent-hover` | `#f58a70` | hover |
 | `--success` | `#3ecf8e` | 成功、已连接 |
 | `--success-muted` | `rgba(62,207,142,0.14)` | |
 | `--warning` | `#f0993d` | 警告、信任、权限待批（橙，非金） |
@@ -108,9 +108,9 @@
 | `--text-secondary` | `rgba(0,0,0,0.55)` | |
 | `--text-tertiary` | `rgba(0,0,0,0.36)` | |
 | `--text-inverse` | `#ffffff` | |
-| `--accent` | `#3d5fd9` | |
+| `--accent` | `#d85c42` | Sunsetz coral |
 | `--accent-muted` | `rgba(61,95,217,0.10)` | |
-| `--accent-hover` | `#2f4fc4` | |
+| `--accent-hover` | `#c74f38` | |
 | `--success` | `#1a9f63` | |
 | `--success-muted` | `rgba(26,159,99,0.12)` | |
 | `--warning` | `#e07020` | 橙（非金） |

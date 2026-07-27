@@ -50,6 +50,8 @@ pnpm setup:cross   # rust targets + (macOS) cargo-xwin / nsis / llvm 检查
 
 CI 的 `windows-native-smoke` 作业使用 `tauri.windows-smoke.conf.json` 构建测试专用调试窗口，再由 `scripts/windows-native-smoke.ps1` 和 `scripts/windows-native-webview-smoke.mjs` 检查系统工作区边界、面板卸载、焦点恢复与键盘路径。测试配置使用隔离的数据目录并启用 WebView2 调试参数，不参与发行构建。作业会上传原生窗口、资源面板和 Host 日志；它是自动诊断，不替代 Windows 实机缩放与辅助功能手测。
 
+阶段一的物理 Windows 门禁按[实机验收说明](./验收/windows-stage1-manual.md)执行。`scripts/windows-stage1-manual.ps1` 会记录系统 DPI、显示器工作区、逐项 PASS/FAIL 和经操作者确认无敏感信息的桌面截图；产物默认留在被 Git 忽略的 `test-results/`，不会自动上传。
+
 ### Linux（含 Arch / Ubuntu / Debian）
 
 ```bash
@@ -177,7 +179,7 @@ cp src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/rpm/* dist-installer
 - macOS x64  
 - Windows x64  
 
-Release body = 下载表 + 该版本 CHANGELOG + 安装说明（含 `xattr`）。
+Release body 只取该版本的 CHANGELOG 章节；安装包由 GitHub 作为 Release assets 单独展示，安装说明保留在 README。
 
 ## 4. 版本号约定
 

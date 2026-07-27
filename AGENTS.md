@@ -23,6 +23,8 @@ Run `pnpm typecheck`, `pnpm test`, `pnpm build:ui`, `pnpm verify:contracts`, `pn
 
 Coverage policy is versioned in `coverage-policy.json`. Run `pnpm test:coverage`, `pnpm coverage:audit`, and `pnpm coverage:changed` for the current frontend baseline and enforced changed-code gate. Rust coverage remains audit-only; do not describe the final 80% line / 70% branch targets as achieved until the corresponding final audits pass.
 
+Physical Windows stage-one evidence uses `scripts/windows-stage1-manual.ps1`; CI native smoke is additional evidence, not a substitute.
+
 ## Changelog
 
 - Keep `## [UNRELEASED] — YYYY-MM-DD HH:mm` as the first and empty version section in `CHANGELOG.md`.

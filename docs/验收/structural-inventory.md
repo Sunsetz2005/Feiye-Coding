@@ -63,4 +63,4 @@
 | 200% 基本几何 | 三个 viewport 均检查无横向溢出、标题与侧栏可见、composer 位于 viewport 内 |
 | 命令 | `pnpm test:visual` |
 
-macOS 调试 `.app` 已人工确认侧栏和资源面板关闭后的触发器焦点恢复、资源内容卸载，以及项目选中态无 coral/orange 边框。200% 证据仍只覆盖浏览器空工作台的基本可操作几何，不代表长会话、各浮层和所有内容状态均已通过。减少动态/透明度、中栏 520px / 380px、macOS 原生 200% 与 Windows 原生窗口仍未完成验收。
+当前提交重新构建的 macOS 调试 `.app` 已在 Retina 2× 下人工确认侧栏和资源面板关闭后的触发器焦点恢复、资源内容卸载、侧栏 Space 重开，以及项目选中态无 coral/orange 边框。Windows CI 原生窗口自动诊断也已覆盖工作区边界和面板生命周期，但物理 Windows 的 200% 缩放、完整键盘与焦点仍须按 [`windows-stage1-manual.md`](./windows-stage1-manual.md)验收。减少动态/透明度、中栏 520px / 380px 和完整内容状态矩阵仍未完成。
