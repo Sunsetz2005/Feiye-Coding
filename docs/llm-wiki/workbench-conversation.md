@@ -16,6 +16,7 @@
 
 - `src/components/WorkbenchShell.tsx`
 - `src/components/WorkbenchTopbar.tsx`
+- `src/components/SidebarNavigator.tsx`
 - `src/components/lobe-chat/ConversationThread.tsx`
 - `src/components/lobe-chat/ActivityTimeline.tsx`
 - `src/components/lobe-chat/AskUserDock.tsx`
@@ -24,7 +25,7 @@
 - `src/components/ComposerModelMenu.tsx`
 - `src/components/FloatingSurfaceProvider.tsx`
 
-`WorkbenchShell` 当前只拥有三栏布局根节点；侧栏和资源区的状态、Host 协调仍在 `App.tsx`。不要把尚不存在的 `ConversationSurface`、`ComposerDock` 或完整 `SidebarNavigator` 当成当前模块边界。
+`SidebarNavigator` 拥有侧栏渲染、项目/任务披露语义、当前项语义、虚拟任务行和账户入口；数据加载、菜单动作与 Host 协调仍由 `App.tsx` 提供。`WorkbenchShell` 拥有三栏布局根节点，并在侧栏或资源面板关闭后把焦点恢复到对应顶部栏按钮。会话中栏在面板切换时保持挂载，因此原生滚动位置不被重建。不要把尚不存在的 `ConversationSurface` 或 `ComposerDock` 当成当前模块边界。
 
 ## 2. 三层输入器
 
@@ -40,7 +41,7 @@
 - 运行中仍可编辑和排队；等待权限、Agent 提问或计划确认时按对应锁定规则处理。
 - 附件元数据随 `session_send` 写入已有 `ChatMessageStored.attachments`，重载后恢复名称、目录类型和可用缩略图。
 - 旧消息若没有附件元数据，只保留可证明的信息，不猜测回填。
-- 当前 Host 没有语音识别适配器，`speechRecognition` 固定为 `false`，输入器不渲染麦克风。
+- 当前 Host 没有语音识别适配器；`HostCapabilities v2` 将 `speechRecognition` / `nativeSpeech` 声明为 `unavailable`，兼容布尔值仍为 `false`，输入器不渲染麦克风。
 
 ## 3. 加号菜单与斜杠面板
 
@@ -52,8 +53,8 @@
 所有入口必须由能力或真实命令支撑：
 
 - 文件和文件夹：`pick_attach_files`、`pick_attach_folder`。
-- Finder 所选项：仅 `host_capabilities.finderSelection` 为真时展示；`finder_selected_paths` 会规范化、去重并验证路径。
-- Record a skill：仅存在可用会话材料且 `skillDraftSave` 为真时启用。
+- Finder 所选项：仅 `HostCapabilities v2.capabilities.finderSelection.state` 为 `available` 时展示；`finder_selected_paths` 会规范化、去重并验证路径。
+- Record a skill：仅存在可用会话材料且 `skillDraftSave` 能力为 `available` 时启用。
 - 不支持的平台或能力直接隐藏，不显示装饰性禁用按钮。
 
 ## 4. 单一浮层
@@ -141,31 +142,38 @@ Host 校验名称、frontmatter、相对路径、体积、路径穿越、符号�
 
 ## 9. 能力与命令边界
 
+`host_capabilities` 当前返回版本 2 的能力表。`available`、`unavailable`、`needs_permission`、`needs_install` 和 `unsupported_platform` 是入口门控的唯一状态；版本 2 中未声明的能力按未知处理，不得通过旧布尔值或调用方默认值放行，也不得进入 DOM、Tab 顺序或无障碍树。旧布尔字段只用于读取版本 1 或无版本响应时的兼容迁移。
+
 | 能力 | 当前状态 | 对应命令/数据 |
 |------|----------|---------------|
 | 附件持久化 | 已实现 | `session_send.attachments` |
-| Finder 所选项 | 仅 macOS | `host_capabilities`、`finder_selected_paths` |
-| 会话技能保存 | 已实现 | `skill_draft_save` |
+| Finder 所选项 | macOS 为 `available`；其他平台为 `unsupported_platform` | `host_capabilities`、`finder_selected_paths` |
+| 会话技能保存 | `available` | `host_capabilities`、`skill_draft_save` |
 | 全会话待回答查询 | Agent 进程存活期间可恢复 | `session_pending_interactions` |
 | 模型/推理切换 | 按声明能力 | `models_list_available`、`session_set_model` |
 | 精确上下文 | 仅有可靠遥测时展示 | Runtime usage + 已知 capacity |
-| 原生语音 | 未实现 | `speechRecognition: false`；无 speech 命令 |
+| 原生语音 | `unavailable` | v2 能力表 + `speechRecognition: false`；无 speech 命令 |
+| 会话/项目预览、资源审阅、智能快照、电脑控制、后台调度 | `unavailable` | v2 能力表中明确声明原因；尚无对应适配器 |
 
 不得据此声称以下项目已经完成：
 
 - macOS/Windows 原生语音识别。
 - 独立速度参数。
 - 未知模型的上下文百分比。
-- 规划中的完整 Playwright 多尺寸、缩放和辅助功能截图矩阵。
+- 完整的缩放、辅助偏好、内容状态与原生窗口 Playwright / 实机矩阵；当前只具备空工作台、资源面板和 200% 基本几何证据。
 
 ## 10. 维护检查
 
 修改工作台行为时至少核对：
 
-1. `FloatingSurfaceProvider` 的单一浮层测试。
-2. `ComposerModelMenu`、上下文用量和加号菜单测试。
-3. `ActivityTimeline` 的顺序、归并及旧历史降级测试。
-4. `AskUserDock` 的逐题、跳过、取消和失败恢复测试。
-5. Rust 的 ask_user、附件、Finder、技能保存和 compact phase golden 测试。
+1. `SidebarNavigator` 的披露、当前项、原生按钮键盘语义和 `inert` 测试。
+2. `WorkbenchShell` 的面板焦点恢复与会话滚动保持测试。
+3. `HostCapabilities v2` 的显式状态、旧版兼容和未知能力隐藏测试。
+4. `FloatingSurfaceProvider` 的单一浮层测试。
+5. `ComposerModelMenu`、上下文用量和加号菜单测试。
+6. `ActivityTimeline` 的顺序、归并及旧历史降级测试。
+7. `AskUserDock` 的逐题、跳过、取消和失败恢复测试。
+8. Rust 的 ask_user、附件、Finder、技能保存、能力表和 compact phase golden 测试。
+9. `pnpm test:visual` 的空工作台、资源面板、焦点恢复和 200% 基本几何矩阵。
 
 若接口或行为变化，同步更新本文、`session-continuity.md` 和 `docs/SPIKE-ACP.md`。

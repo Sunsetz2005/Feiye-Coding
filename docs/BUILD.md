@@ -40,7 +40,7 @@ pnpm setup:cross   # rust targets + (macOS) cargo-xwin / nsis / llvm 检查
   # 建议把 clang-cl 放进 PATH（Apple Silicon）：
   export PATH="/opt/homebrew/opt/llvm/bin:$PATH"
   ```
-- 首次 Windows 构建会下载 MSVC CRT/SDK 到 `~/.cache/cargo-xwin`（与 GrokGo 可共用缓存）
+- 首次 Windows 交叉构建会下载 MSVC CRT/SDK 到 `~/.cache/cargo-xwin`
 
 ### Windows（原生）
 

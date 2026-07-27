@@ -41,17 +41,70 @@ const BROWSER_HOST_CAPABILITIES: HostCapabilities = {
   finderSelection: false,
   speechRecognition: false,
   skillDraftSave: false,
-  version: 1,
-  capabilities: {},
+  version: 2,
+  capabilities: {
+    finderSelection: {
+      state: "unsupported_platform",
+      reason: "Finder selection is available only on macOS",
+    },
+    speechRecognition: {
+      state: "unavailable",
+      reason: "No native speech adapter is registered",
+    },
+    skillDraftSave: {
+      state: "unavailable",
+      reason: "Skill drafts require the desktop Host",
+    },
+  },
 };
+
+function legacyCapabilityValue(
+  host: HostCapabilities,
+  id: string,
+  legacyValue?: boolean,
+): boolean | undefined {
+  if (legacyValue !== undefined) return legacyValue;
+  if (id === "finderSelection") return host.finderSelection;
+  if (id === "speechRecognition") return host.speechRecognition;
+  if (id === "skillDraftSave") return host.skillDraftSave;
+  return undefined;
+}
+
+export function hostCapability(
+  host: HostCapabilities,
+  id: string,
+  legacyValue?: boolean,
+): HostCapability | undefined {
+  const declared = host.capabilities?.[id];
+  if (declared) return declared;
+  if ((host.version ?? 1) >= 2) return undefined;
+  const fallback = legacyCapabilityValue(host, id, legacyValue);
+  if (fallback === undefined) return undefined;
+  return { state: fallback ? "available" : "unavailable" };
+}
+
+export function capabilityState(
+  host: HostCapabilities,
+  id: string,
+  legacyValue?: boolean,
+): CapabilityState | undefined {
+  return hostCapability(host, id, legacyValue)?.state;
+}
+
+export function capabilityReason(
+  host: HostCapabilities,
+  id: string,
+  legacyValue?: boolean,
+): string | undefined {
+  return hostCapability(host, id, legacyValue)?.reason;
+}
 
 export function capabilityAvailable(
   host: HostCapabilities,
   id: string,
-  legacyValue = false,
+  legacyValue?: boolean,
 ): boolean {
-  const declared = host.capabilities?.[id];
-  return declared ? declared.state === "available" : legacyValue;
+  return capabilityState(host, id, legacyValue) === "available";
 }
 
 async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
@@ -950,7 +1003,7 @@ export async function importGrokCli() {
   return invoke("import_grok_cli_config");
 }
 
-export async function importGrokGo() {
+export async function importLegacyProviderConfig() {
   return invoke("import_grok_go_config");
 }
 

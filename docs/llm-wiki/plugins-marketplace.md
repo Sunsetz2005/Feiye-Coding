@@ -47,4 +47,4 @@ Skills / MCP enable toggles are App-side (`extensions.json` + ACP inject); plugi
 
 - **Short term:** keep install CLI-only; document in Extensions footnote (already).  
 - **Next:** open Issue when CLI has stable `plugin search` / `plugin install --json` for a clean Host wrapper.  
-- **Do not** invent a second plugin store under `~/.grok-app`.
+- **Do not** invent a second plugin store under the Sunsetz application data directory.

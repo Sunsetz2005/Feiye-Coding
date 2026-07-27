@@ -1,5 +1,5 @@
 /*
- * Sunsetz workbench refinement.
+ * Sunsetz workbench system.
  * Loaded after the legacy and Apple layers so the workbench can be migrated
  * without changing Runtime state or persistence contracts.
  */
@@ -20,6 +20,7 @@
   --wb-control-size: 32px;
   --wb-pop-duration: 200ms;
   --sidebar-session-row-height: 34px;
+  --sidebar-session-row-gap: 2px;
 }
 
 [data-theme="light"] {

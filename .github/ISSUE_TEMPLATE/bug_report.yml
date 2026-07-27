@@ -1,5 +1,5 @@
 name: Bug report
-description: Report a Grok App bug
+description: Report a Sunsetz bug
 title: "[Bug]: "
 labels: ["bug"]
 body:
@@ -20,7 +20,7 @@ body:
     attributes:
       label: Steps to reproduce
       placeholder: |
-        1. Start Grok App
+        1. Start Sunsetz
         2. ...
         3. ...
     validations:
@@ -39,8 +39,8 @@ body:
   - type: input
     id: cli
     attributes:
-      label: Grok Build CLI version (if known)
-      placeholder: output of `grok --version`
+      label: Sunsetz Runtime version (if known)
+      placeholder: Shown in Settings → Runtime
   - type: dropdown
     id: os
     attributes:

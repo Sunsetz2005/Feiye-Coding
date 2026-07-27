@@ -26,7 +26,7 @@ CLI auth is shared with Grok Build TUI (hot-reload of `auth.json` is CLI-side).
 | Step | Path |
 |------|------|
 | `grok login` / App login | writes `~/.grok/auth.json` |
-| Agent spawn (`session_data_mode=independent`) | `GROK_HOME=~/.grok-app/agent-home` |
+| Agent spawn (`session_data_mode=independent`) | `GROK_HOME=<Sunsetz app data>/agent-home` |
 
 Host **must** sync `auth.json` into agent-home on login and before each ACP spawn; otherwise the UI shows signed-in while the agent reports `auth_kind=none` → HTTP 401. Logout clears both copies.
 
@@ -38,8 +38,8 @@ Host **must** sync `auth.json` into agent-home on login and before each ACP spaw
 | `account_login` | Spawn `grok login --oauth` or `--device-auth` |
 | `account_logout` | Spawn `grok logout` (fallback: remove auth.json) |
 | `account_open_usage` | Open `https://grok.com/?_s=usage` |
-| `account_open_subscribe` | Open SuperGrok / subscription manage URL |
-| `accounts_list` / `account_save_current` / `account_switch` / `account_remove` | Multi-account snapshots under `~/.grok-app/accounts/` |
+| `account_open_subscribe` | Open the upstream subscription management URL |
+| `accounts_list` / `account_save_current` / `account_switch` / `account_remove` | Multi-account snapshots under the Sunsetz application data directory |
 | `session_import_transcript(_file)` | Import markdown/JSON chat into a new local session |
 
 ### Multi-account
@@ -66,12 +66,12 @@ Grok Build CLI does **not** expose grok.com web history. Supported migration:
 
 ## Settings IA
 
-- **Account** (`settings.nav.account`): profile, SuperGrok quota, heatmap, call logs only.
+- **Account** (`settings.nav.account`): profile, Sunsetz Pro quota, heatmap, and call logs.
 - **CLI / Runtime** (`settings.nav.runtime`): binary path + Doctor — **not** mixed into Account.
 
-## Billing / quota (aligned with grok-go)
+## Billing / quota
 
-Primary path (same as grok-go `quota.rs`):
+Primary path:
 
 - `POST https://grok.com/grok_api_v2.GrokBuildBilling/GetGrokCreditsConfig`
 - Body: empty gRPC-web frame `00 00 00 00 00`
@@ -82,31 +82,22 @@ Fallback (confirmed live JSON):
 - `GET https://cli-chat-proxy.grok.com/v1/billing?format=credits` with `x-grok-client-mode: cli`
 - Nested `config.creditUsagePercent`, `productUsage[]`, period start/end
 
-### Subscription tier (brand-facing)
+### Subscription tier
 
-Quota endpoints **do not** return SuperGrok vs SuperGrok Heavy. Fetch in parallel with quota:
+Quota endpoints return upstream membership values. `runtimeCompat.ts` recognizes those raw values, while `accountUi.ts` maps them to the product-owned `Sunsetz Pro` or `Sunsetz Pro Heavy` labels. Raw upstream membership branding must not render in ordinary Sunsetz UI.
 
-| Source | Field | Example |
-|--------|-------|---------|
-| `GET …/v1/settings` | `subscription_tier_display` | `"SuperGrok Heavy"` (preferred UI string) |
-| `GET …/v1/user?include=subscription` | `subscriptionTier` | `"SuperGrokPro"` (API enum → Heavy) |
-| JWT claim `tier` | numeric | soft fallback only (`≥5` → Heavy, `≥2` → SuperGrok) |
+- `subscriptionTier` → `BillingSnapshot.subscriptionTier` → `SunsetzProBrandKind`;
+- the empty-session mark uses `SunsetzProMark`;
+- a custom relay always uses the standard `Sunsetz Pro` mark.
 
-Never invent `"SuperGrok"` for paywall bodies (GrowthBook whitelist uses official enums). Map enums only for **display** / brand SVG selection.
+UI shows **remaining %** (100 − used), product tags, and reset time.
 
-- `subscriptionTier` → `BillingSnapshot.subscriptionTier` (display label)
-- Empty-session brand: `SuperGrokMark` (`supergrok` \| `heavy`) above the floating composer
-- **Custom relay active** (`providers` `activeSource === "custom"`): always show plain **SuperGrok**, never Heavy (Heavy is official membership branding only)
-- Assets: `docs/svg/SuperGrok.svg`, `docs/svg/SuperGrokHeavy.svg` (Heavy badge via CSS `data-theme`, not Tailwind `dark:`)
-
-UI shows **remaining %** (100 − used), product tags, reset time — same semantics as grok-go Accounts.
-
-Cache successes under `~/.grok-app/account_billing_cache.json`.
+Cache successes under the Sunsetz application data directory.
 
 ## Heatmap & call logs
 
-- Heatmap UI ported from grok-go `components/heatmap.tsx` (GitHub green levels, month labels, tooltip).
-- Data: local `~/.grok/sessions/**/signals.json` → `requests` / `tokens` for ~371 days (not SuperGrok billing).
+- Heatmap uses discrete activity levels, month labels, and accessible tooltips.
+- Data: local Runtime session signals → `requests` / `tokens` for roughly 371 days; this is separate from subscription billing.
 - Call logs: recent sessions with model, turns, context tokens, duration, mtime.
 
 ## UI copy

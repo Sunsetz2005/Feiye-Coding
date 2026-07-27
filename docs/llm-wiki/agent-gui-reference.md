@@ -7,7 +7,7 @@ Codex 截图用于校准信息层级、空间来源与交互密度，不复制�
 | 来源 | 借鉴点 | Sunsetz 落地 |
 |------|--------|--------------|
 | Codex 工作台参考图 | 低噪声消息轨、底部停靠输入器、加号菜单、模型级联菜单、Agent 提问卡 | `ConversationThread`、`AskUserDock`、`ComposerModelMenu`、`ComposerPlusPanel` |
-| Apple 交互原则 | 控件从触发点展开、按下即时反馈、减少动态/透明度 | `codex-workbench.css`、`composer-surfaces.css`、`FloatingSurfaceProvider` |
+| Apple 交互原则 | 控件从触发点展开、按下即时反馈、减少动态/透明度 | `workbench.css`、`composer-surfaces.css`、`FloatingSurfaceProvider` |
 | AiderDesk 文件浏览 | 项目文件树、文件预览、搜索与刷新 | `ResourceViewer` + `fs_list_dir` / `fs_read_file` |
 | Runtime 权限协议 | optionId、scopeKey、会话放行和高风险二次确认 | `PERMISSION_POLICIES` + Host `PermissionPolicy` |
 | 三栏工作台 | 左项目/任务、中会话、右资源；面板可真正移出交互树 | `sidebar--hidden`、`aside--hidden`、`inert` |
@@ -30,8 +30,8 @@ Codex 截图用于校准信息层级、空间来源与交互密度，不复制�
 - **Changes**：右栏提供 Session / Workspace 两类真实变更；优先工具 payload，再回退到 git diff 或当前文件。保留打开编辑器、Reveal 和复制路径，不提供危险的静默 discard。
 - **Plan**：线程内显示紧凑计划卡，右栏显示 Markdown 全文；批准、请求修改和放弃均调用现有 `sessionResolvePlan`。
 
-## 已完成的浏览器 smoke
+## 当前视觉与原生证据
 
-在 1280×720 的本地浏览器工作台中，主栏实测宽 1008px，composer 外框 644×90px，页面横向 overflow 为 0。加号、模型和上下文浮层完成键盘访问、单浮层所有权、Escape 后焦点恢复检查；控制台错误为 0。
+Playwright 覆盖空工作台和资源面板的 900×600、1200×800、1600×1000 × 深色、浅色、高对比度矩阵，并在每个 viewport 执行 200% 基本几何检查。Linux CI 会断言主题属性和布局行为；Darwin 本地像素基线仍是视觉差异的权威。
 
-这只是浏览器 smoke，不等同于 Playwright 多尺寸截图矩阵，也不代表 macOS / Windows 原生平台手测已经完成。
+macOS 调试 `.app` 已人工确认侧栏与资源面板关闭后的触发器焦点恢复、资源内容卸载和中性项目选中态。该证据不包含原生 200% 缩放，也不能替代 Windows 实机验收。

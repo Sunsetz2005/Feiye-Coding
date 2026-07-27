@@ -3,7 +3,7 @@
  * Zero-deps — used by VirtualList; safe to unit-test without DOM.
  *
  * Matches `.tree-l3` CSS: height 34px, list gap 2px
- * (see `--sidebar-session-row-height` in codex-workbench.css).
+ * (see `--sidebar-session-row-height` in workbench.css).
  */
 
 /** Fixed session row height in the project tree (`.tree-l3`). */

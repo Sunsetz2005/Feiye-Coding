@@ -19,7 +19,7 @@ Desktop never reimplements tools/sampling. It is an ACP client + UI shell.
 
 | Session data mode | `GROK_HOME` for spawned agent |
 |-------------------|-------------------------------|
-| `independent` (default) | `~/.grok-app/agent-home` (or `$GROK_APP_HOME/agent-home`) |
+| `independent` (default) | Sunsetz application data directory `agent-home/` (or `$SUNSETZ_HOME/agent-home`) |
 | `shared` | `~/.grok` (CLI default) |
 
 Custom providers are written to **`$GROK_HOME/config.toml`** as `[model.<id>]` sections so the agent can use `base_url` + `api_key` without OAuth fallback.
@@ -36,7 +36,7 @@ Custom providers are written to **`$GROK_HOME/config.toml`** as `[model.<id>]` s
 | `apiBackend` | Message format: `responses` (default) \| `chat_completions` \| `messages` |
 | `isDefault` | Maps to `[models].default` |
 
-CPA / sub2api / grok-go are **not special-cased** — any compatible base URL works.
+Provider brands are **not special-cased** — any compatible base URL works.
 No bundled third-party presets (e.g. yunyi) ship with the app; users add relays themselves.
 
 ## Settings UI (Account → Custom providers)
@@ -86,4 +86,4 @@ Host must rebind both sides on every switch and before each ACP spawn (`prepare_
 
 ## Sponsorship (L3, future)
 
-Recommended catalog / paid naming sits **above** L2 as templates only. Keys always user-owned. See `docs/分析-Grok-Desktop对照报告.md` §7.
+Recommended catalog and paid naming sit **above** L2 as templates only. Keys always remain user-owned.

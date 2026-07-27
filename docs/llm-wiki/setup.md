@@ -36,7 +36,7 @@ Each mirror is tried multiple times before failing over.
 
 ### Step 2 — Account (skippable)
 
-OAuth, official key, relay, import CLI / grok-go. No `window.prompt`.
+OAuth, official key, relay, and compatible CLI or legacy provider import. No `window.prompt`.
 
 ### Step 3 — Ready → Enter
 

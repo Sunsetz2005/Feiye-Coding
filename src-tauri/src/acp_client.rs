@@ -1321,7 +1321,7 @@ pub enum AskUserOutcome {
 pub fn wire_initialize_params() -> Value {
     json!({
         "protocolVersion": 1,
-        "clientInfo": { "name": "grok-app", "version": "0.1.0" },
+        "clientInfo": { "name": "sunsetz", "version": "0.1.0" },
         "capabilities": {}
     })
 }
@@ -2214,7 +2214,7 @@ pub async fn probe_acp_server(addr: &str) -> AcpProbeResult {
     let _ = stream.set_nodelay(true);
     let (rd, mut wr) = stream.into_split();
 
-    let req = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientInfo":{"name":"grok-app-probe","version":"0"},"capabilities":{}}}"#;
+    let req = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientInfo":{"name":"sunsetz-probe","version":"0"},"capabilities":{}}}"#;
     let write = async {
         wr.write_all(req.as_bytes()).await?;
         wr.write_all(b"\n").await?;

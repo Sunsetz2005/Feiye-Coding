@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { filterSessionSearch } from "./sessionSearch";
 
 const projects = [
-  { id: "p1", name: "grok-app", path: "/Users/me/Code/oss/grok-app" },
+  { id: "p1", name: "sunsetz", path: "/Users/me/Code/sunsetz" },
   { id: "p2", name: "notes", path: "/Users/me/notes" },
 ];
 
@@ -26,13 +26,13 @@ describe("filterSessionSearch", () => {
   });
 
   it("matches project name and pulls related sessions", () => {
-    const hits = filterSessionSearch("grok-app", sessions, projects);
+    const hits = filterSessionSearch("sunsetz", sessions, projects);
     expect(hits.matchedProjects.map((p) => p.id)).toEqual(["p1"]);
     expect(hits.matchedSessions.map((s) => s.id)).toContain("s1");
   });
 
   it("matches project path segments", () => {
-    const hits = filterSessionSearch("Code/oss", sessions, projects);
+    const hits = filterSessionSearch("Code/sunsetz", sessions, projects);
     expect(hits.matchedProjects[0]?.id).toBe("p1");
   });
 

@@ -1,5 +1,5 @@
 /**
- * Contribution-style activity heatmap — adapted from sister project grok-go.
+ * Contribution-style activity heatmap for Sunsetz usage.
  * Levels use GitHub-green palette; layout stretches cells to fill width.
  * Day detail tip is portaled (fixed) so overflow parents cannot clip it.
  */

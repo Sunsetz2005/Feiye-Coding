@@ -1033,7 +1033,7 @@ pub async fn import_grok_cli_config() -> Result<serde_json::Value, String> {
 
 #[tauri::command]
 pub async fn import_grok_go_config() -> Result<serde_json::Value, String> {
-    // Common grok-go config locations (read-only)
+    // Legacy provider config locations (read-only compatibility import).
     let home = crate::process_util::user_home();
     let home_s = home.to_string_lossy();
     let mut candidates: Vec<String> = vec![
@@ -1076,11 +1076,11 @@ pub async fn import_grok_go_config() -> Result<serde_json::Value, String> {
             return Ok(serde_json::json!({
                 "ok": true,
                 "path": c,
-                "message": "Imported grok-go config (keys stored, not logged)."
+                "message": "Imported legacy provider config (keys stored, not logged)."
             }));
         }
     }
-    Err("grok-go config not found in known locations".into())
+    Err("legacy provider config not found in known locations".into())
 }
 
 /// Structured Doctor check row (UI consumes `checks`; `raw` is for copy/export).

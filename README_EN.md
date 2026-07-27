@@ -1,45 +1,92 @@
 # Sunsetz
 
-Sunsetz is a local-first desktop agent workbench for projects, sessions, permissions, file and media previews, extensions, accounts, and automations.
+[简体中文](README.md)
+
+![CI](https://github.com/Sunsetz2005/Sunsetz/actions/workflows/ci.yml/badge.svg)
+
+Sunsetz is a local-first desktop agent workbench. It brings projects, sessions, permissions, plans, file review, extensions, and automations into one native Tauri application.
 
 ![Sunsetz icon](assets/logo.png)
 
-## Highlights
+> Sunsetz is under active reconstruction. The interface exposes only capabilities explicitly declared available by the Host and Runtime; roadmap items are not presented as shipped features.
 
-- Multi-project session management, search, pinning, archiving, forks, and rewind
-- A Sunsetz three-layer composer for project/goal status, attachments and growing editor content, then access/context/model/send controls
-- An in-conversation activity timeline that preserves and groups skill, compaction, file, command, image, browser, and subtask activity in its real order
-- Recoverable Agent questions with one-at-a-time navigation, distinct skip/cancel semantics, reload and task-switch recovery, and pending badges for background tasks
-- Message-persisted attachment metadata with real native pickers for files, folders, and the current macOS Finder selection
-- Ask, one-time, session, deny, and unattended permission policies
-- Markdown, code, image, video, PDF, Office, and embedded web previews
-- Bottom-docked plan confirmation, execution-step progress, resource-pane plan documents, conversation-to-skill drafts, MCP, plugins, custom providers, and scheduled tasks
-- Accounts, quota, activity heatmaps, and profile switching
-- English, Simplified Chinese, and Traditional Chinese
-- Light, dark, and high-contrast themes
+## Current capabilities
 
-## Development
+- Multi-project and multi-session management with search, archive, fork, and rewind.
+- Runtime-backed streaming sessions, ordered tool activity, stop, and send queues.
+- Ask, allow-once, allow-for-session, deny, and controlled unattended permission policies.
+- A three-layer composer with persistent attachments, exact context telemetry, and Runtime-provided models.
+- Recoverable Agent questions and a bottom-docked plan review flow.
+- Files, Changes, and Plan resources with code, Markdown, image, media, PDF, and Office previews.
+- Existing management surfaces for custom providers, MCP, skills, plugins, accounts, and scheduled tasks.
+- English, Simplified Chinese, Traditional Chinese, light, dark, and high-contrast themes.
+- `HostCapabilities v2` gating: unknown, unsupported, or uninstalled features stay out of the DOM and keyboard path.
 
-Requires Node.js 22+, pnpm 9, Rust stable, and Xcode Command Line Tools on macOS.
+See the [long-running reconstruction status](docs/长期重构-执行状态.md) for verified evidence and remaining gates.
+
+## Architecture
+
+| Layer | Technology and responsibility |
+|-------|-------------------------------|
+| Desktop Host | Rust and Tauri 2; windows, files, permissions, persistence, and Runtime lifecycle |
+| Workbench UI | React 19, TypeScript, and Vite; conversations, composer, resources, and settings |
+| Runtime boundary | Versioned capabilities and DTOs with compatibility isolated behind a private adapter |
+| Verification | Vitest, Playwright, Rust tests, and Tauri command/event contract scans |
+
+## Local development
+
+Requires Node.js 22+, pnpm 9, and Rust stable. macOS builds also need Xcode Command Line Tools; Windows builds need Visual Studio Build Tools and WebView2.
 
 ```bash
 pnpm install
 pnpm dev
 ```
 
-Use `SUNSETZ_ACP=mock pnpm dev` for UI development without a live runtime. Set `SUNSETZ_HOME` to override the application data directory.
+Run only the Web UI:
 
 ```bash
+pnpm dev:ui
+```
+
+Use the local mock Runtime:
+
+```bash
+SUNSETZ_ACP=mock pnpm dev
+```
+
+Set `SUNSETZ_HOME` to override the application data directory.
+
+## Verification
+
+```bash
+pnpm verify:contracts
 pnpm typecheck
 pnpm test
+pnpm test:coverage
+pnpm coverage:audit
+pnpm coverage:changed
 pnpm build:ui
-pnpm verify:contracts
 pnpm test:visual
 cd src-tauri && cargo test
 ```
 
-The private runtime compatibility boundary is documented in [docs/runtime-compatibility.md](docs/runtime-compatibility.md). Workbench and conversation invariants are documented in [docs/llm-wiki/workbench-conversation.md](docs/llm-wiki/workbench-conversation.md).
+See [`coverage-policy.json`](coverage-policy.json) for coverage gates and [`docs/BUILD.md`](docs/BUILD.md) for packaging instructions.
+
+## Security and data
+
+- Never commit tokens, API keys, authentication files, support bundles, or private project contents.
+- Project trust and Ask permissions remain enabled by default; unattended operation requires explicit configuration.
+- Secrets belong in secure system storage and must not enter journals, previews, skills, logs, or diagnostics.
+- Report vulnerabilities privately according to [`SECURITY.md`](SECURITY.md).
+
+## Documentation
+
+- [Workbench and conversation behavior](docs/llm-wiki/workbench-conversation.md)
+- [Runtime compatibility boundary](docs/runtime-compatibility.md)
+- [Design tokens](docs/design-tokens.md)
+- [Long-running reconstruction status](docs/长期重构-执行状态.md)
+- [Contributing](CONTRIBUTING.md)
 
 ## License and brand
 
-This codebase is adapted from RongleCat's MIT-licensed desktop workbench snapshot. The original copyright and license remain in [LICENSE](LICENSE). The Sunsetz name and brand assets are not granted under the MIT trademark rights; see [TRADEMARKS.md](TRADEMARKS.md).
+Source code is released under the MIT terms in [`LICENSE`](LICENSE), including the required third-party copyright notice. The Sunsetz name, icon, and brand assets are not granted as trademark rights by the source license; see [`TRADEMARKS.md`](TRADEMARKS.md).

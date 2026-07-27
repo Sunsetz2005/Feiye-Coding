@@ -45,7 +45,7 @@ describe("sunsetzProBrandKind", () => {
     ).toBeNull();
   });
 
-  it("maps SuperGrok Heavy display and SuperGrokPro enum", () => {
+  it("maps upstream heavy membership values", () => {
     expect(
       sunsetzProBrandKind(billing({ subscriptionTier: "SuperGrok Heavy" }), true),
     ).toBe("heavy");
@@ -54,7 +54,7 @@ describe("sunsetzProBrandKind", () => {
     ).toBe("heavy");
   });
 
-  it("maps SuperGrok standard", () => {
+  it("maps upstream standard membership values", () => {
     expect(
       sunsetzProBrandKind(billing({ subscriptionTier: "SuperGrok" }), true),
     ).toBe("sunsetz-pro");
@@ -85,7 +85,7 @@ describe("resolveWelcomeBrandKind", () => {
     ).toBeNull();
   });
 
-  it("forces SuperGrok (not Heavy) on custom relay route", () => {
+  it("forces the standard Sunsetz Pro mark on a custom relay route", () => {
     expect(
       resolveWelcomeBrandKind("heavy", "heavy", {
         accountReady: true,
@@ -99,7 +99,7 @@ describe("resolveWelcomeBrandKind", () => {
   });
 });
 
-describe("cached SuperGrok brand", () => {
+describe("cached Sunsetz Pro brand", () => {
   const mem = new Map<string, string>();
   const storage = {
     getItem: (k: string) => mem.get(k) ?? null,
@@ -129,10 +129,16 @@ describe("cached SuperGrok brand", () => {
 });
 
 describe("tierLabel", () => {
-  it("prefers subscriptionTier string", () => {
+  it("maps an upstream membership label to Sunsetz branding", () => {
     expect(
       tierLabel(billing({ subscriptionTier: "SuperGrok Heavy" }), "official_oauth"),
-    ).toBe("SuperGrok Heavy");
+    ).toBe("Sunsetz Pro Heavy");
+    expect(
+      tierLabel(billing({ subscriptionTier: "SuperGrok" }), "official_oauth"),
+    ).toBe("Sunsetz Pro");
+    expect(
+      tierLabel(billing({ subscriptionTier: "unknown" }), "official_oauth"),
+    ).toBe("Sunsetz Runtime");
   });
 });
 

@@ -1,0 +1,77 @@
+{
+  "schemaVersion": 1,
+  "reports": {
+    "summary": ".cache/coverage/coverage-summary.json",
+    "detail": ".cache/coverage/coverage-final.json"
+  },
+  "baseline": {
+    "capturedAt": "2026-07-27",
+    "sourceCommit": null,
+    "basedOnCommit": "9439e5b42d2a3c3905284a781ad3abe9437c6e7d",
+    "provider": "@vitest/coverage-istanbul 3.2.7",
+    "note": "Captured from the Stage 1 working tree before its commit. Istanbul instrumentation keeps the executable denominator stable when integration tests import additional modules.",
+    "scope": "src/**/*.{ts,tsx}, excluding tests, specs, and declarations",
+    "metrics": {
+      "lines": {
+        "total": 11449,
+        "covered": 3971,
+        "pct": 34.68
+      },
+      "statements": {
+        "total": 13088,
+        "covered": 4432,
+        "pct": 33.86
+      },
+      "functions": {
+        "total": 2961,
+        "covered": 847,
+        "pct": 28.6
+      },
+      "branches": {
+        "total": 11908,
+        "covered": 3241,
+        "pct": 27.21
+      }
+    }
+  },
+  "baselineGate": {
+    "maxRegressionPercentagePoints": 0.25
+  },
+  "changedCodeGate": {
+    "lines": 80,
+    "branches": 70
+  },
+  "finalTarget": {
+    "lines": 80,
+    "statements": 80,
+    "functions": 80,
+    "branches": 70
+  },
+  "rust": {
+    "gate": "audit-only",
+    "baseline": {
+      "capturedAt": "2026-07-27",
+      "tool": "cargo-llvm-cov 0.8.7 on stable",
+      "lines": {
+        "total": 22599,
+        "covered": 8559,
+        "pct": 37.87
+      },
+      "functions": {
+        "total": 2595,
+        "covered": 861,
+        "pct": 33.18
+      },
+      "regions": {
+        "total": 34660,
+        "covered": 13728,
+        "pct": 39.61
+      }
+    },
+    "branchCollection": "Requires Rust nightly; the Stage 1 stable audit does not collect branch data.",
+    "finalTarget": {
+      "lines": 80,
+      "branches": 70
+    }
+  }
+}

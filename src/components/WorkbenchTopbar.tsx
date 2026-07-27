@@ -1,4 +1,7 @@
-import type { MouseEvent as ReactMouseEvent } from "react";
+import type {
+  MouseEvent as ReactMouseEvent,
+  Ref,
+} from "react";
 import {
   IconClock,
   IconMore,
@@ -18,10 +21,12 @@ export interface WorkbenchTopbarProps {
   sidebarCollapsed: boolean;
   showSidebarLabel: string;
   onShowSidebar: () => void;
+  sidebarToggleRef?: Ref<HTMLButtonElement>;
   asideCollapsed: boolean;
   showAsideLabel: string;
   hideAsideLabel: string;
   onToggleAside: () => void;
+  asideToggleRef?: Ref<HTMLButtonElement>;
   connection?: {
     pill: ConnPill;
     label: string;
@@ -43,10 +48,12 @@ export function WorkbenchTopbar({
   sidebarCollapsed,
   showSidebarLabel,
   onShowSidebar,
+  sidebarToggleRef,
   asideCollapsed,
   showAsideLabel,
   hideAsideLabel,
   onToggleAside,
+  asideToggleRef,
   connection = null,
   retry = null,
   onTitlebarDoubleClick,
@@ -64,6 +71,7 @@ export function WorkbenchTopbar({
         {sidebarCollapsed ? (
           <Tip label={showSidebarLabel}>
             <button
+              ref={sidebarToggleRef}
               type="button"
               className="chrome-btn chrome-btn--traffic main__pane-toggle"
               aria-label={showSidebarLabel}
@@ -134,6 +142,7 @@ export function WorkbenchTopbar({
 
         <Tip label={asideLabel}>
           <button
+            ref={asideToggleRef}
             type="button"
             className={
               "chrome-btn main__pane-toggle" +

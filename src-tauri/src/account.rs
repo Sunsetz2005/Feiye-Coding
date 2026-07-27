@@ -93,7 +93,7 @@ pub struct BillingSnapshot {
     pub source: String,
     pub message: Option<String>,
     pub subscription_tier: Option<String>,
-    /// SuperGrok weekly used % (0–100+). Same as grok-go `usedPercent`.
+    /// Upstream weekly used percentage (0–100+).
     pub credit_usage_percent: Option<f64>,
     /// SuperGrok weekly remaining % (max 0, 100 - used).
     pub remaining_percent: Option<f64>,
@@ -118,7 +118,7 @@ pub struct BillingSnapshot {
 #[serde(rename_all = "camelCase")]
 pub struct HeatmapDay {
     pub date: String,
-    /// Session / turn activity count (maps to grok-go `requests`).
+    /// Session / turn activity count.
     pub requests: u64,
     pub tokens: u64,
     pub cost_usd: f64,
@@ -192,7 +192,7 @@ fn agent_home_auth_json_path() -> PathBuf {
 }
 
 /// Copy official OAuth credentials into App agent-home so independent-mode
-/// agents (`GROK_HOME=~/.grok-app/agent-home`) can authenticate.
+/// agents using the Sunsetz-owned `GROK_HOME` can authenticate.
 ///
 /// Without this, UI shows "signed in" (reads `~/.grok/auth.json`) while the
 /// agent process sees `auth_kind=none` and fails with 401.
@@ -926,7 +926,7 @@ async fn fetch_billing_remote(token: &str) -> BillingSnapshot {
 }
 
 /// Aggregate local CLI session signals into a heatmap and recent call log.
-/// `days` defaults to ~371 like grok-go contribution graph.
+/// `days` defaults to roughly one year of activity.
 pub fn local_usage(days: u32, log_limit: usize) -> (Vec<HeatmapDay>, Vec<CallLogEntry>) {
     local_usage_from_roots(days, log_limit, &session_roots())
 }
@@ -1231,7 +1231,7 @@ pub async fn account_status(manual_cli: Option<&str>, refresh_billing: bool) -> 
         }
     };
 
-    // 371 days ≈ GitHub contribution year (matches grok-go heatmap).
+    // 371 days provides a complete rolling-year grid.
     let (heatmap, call_logs) = local_usage(371, 40);
 
     AccountStatus {
@@ -1634,7 +1634,7 @@ mod tests {
     #[test]
     fn local_usage_combines_cli_and_agent_home_sessions() {
         let temp = std::env::temp_dir().join(format!(
-            "grok-app-account-usage-{}-{}",
+            "sunsetz-account-usage-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

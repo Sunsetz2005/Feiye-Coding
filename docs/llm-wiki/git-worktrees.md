@@ -1,6 +1,6 @@
 # Git worktrees
 
-Community request: [issue #42](https://github.com/RongleCat/grok-app/issues/42).
+Worktree behavior is tracked as part of the Sunsetz project lifecycle.
 
 ## Behavior
 

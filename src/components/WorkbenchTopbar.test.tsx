@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 
+import { createRef } from "react";
 import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -46,17 +47,25 @@ describe("WorkbenchTopbar", () => {
     const user = userEvent.setup();
     const onShowSidebar = vi.fn();
     const onToggleAside = vi.fn();
+    const sidebarToggleRef = createRef<HTMLButtonElement>();
+    const asideToggleRef = createRef<HTMLButtonElement>();
     renderTopbar({
       sidebarCollapsed: true,
       onShowSidebar,
+      sidebarToggleRef,
       asideCollapsed: false,
       onToggleAside,
+      asideToggleRef,
     });
 
     await user.click(screen.getByRole("button", { name: "Show sidebar" }));
     expect(onShowSidebar).toHaveBeenCalledTimes(1);
+    expect(sidebarToggleRef.current).toBe(
+      screen.getByRole("button", { name: "Show sidebar" }),
+    );
 
     const asideButton = screen.getByRole("button", { name: "Hide files" });
+    expect(asideToggleRef.current).toBe(asideButton);
     expect(asideButton.getAttribute("aria-pressed")).toBe("true");
     await user.click(asideButton);
     expect(onToggleAside).toHaveBeenCalledTimes(1);

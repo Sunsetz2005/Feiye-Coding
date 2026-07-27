@@ -153,12 +153,6 @@ import {
 import type { MessageKey } from "@/i18n";
 import { AttachmentCard } from "@/components/AttachmentCard";
 import { ImageViewerProvider } from "@/components/ImageViewer";
-import { OverlayScroll } from "@/components/OverlayScroll";
-import { VirtualList } from "@/components/VirtualList";
-import {
-  SIDEBAR_SESSION_ROW_GAP,
-  SIDEBAR_SESSION_ROW_HEIGHT,
-} from "@/lib/virtualList";
 import { SunsetzLogo } from "@/components/SunsetzLogo";
 import { SetupWizard, type SetupCliInfo } from "@/components/SetupWizard";
 import { ComposerEditor } from "@/components/ComposerEditor";
@@ -173,23 +167,16 @@ import {
 import { StatusModal } from "@/components/StatusModal";
 import { McpStatusModal } from "@/components/McpStatusModal";
 import {
-  IconChevronDown,
-  IconChevronRight,
-  IconMore,
   IconPlus,
   IconSearch,
   IconAttach,
   IconSend,
   IconStop,
   IconFolder,
-  IconFolderPlus,
   IconClock,
   IconClose,
   IconNewChat as IconSquarePen,
-  IconNewChat,
   IconImagine,
-  IconScheduled,
-  IconPanel,
   IconArchive,
   IconPin,
   IconPinOff,
@@ -201,11 +188,15 @@ import {
   IconRewind,
   IconShield,
   IconCheck,
-  IconPuzzle,
 } from "@/components/icons";
 import { AutomationsPage } from "@/components/AutomationsPage";
 import { WorkbenchTopbar } from "@/components/WorkbenchTopbar";
 import { WorkbenchShell } from "@/components/WorkbenchShell";
+import {
+  SidebarNavigator,
+  type SidebarProjectItem,
+  type SidebarSessionItem,
+} from "@/components/SidebarNavigator";
 import {
   ContextMenu,
   type ContextMenuAnchor,
@@ -242,14 +233,11 @@ import {
   trapTabKey,
 } from "@/lib/a11yFocus";
 import { Spinner } from "@/components/ui/spinner";
-import { UserMenu, remainingPercent } from "@/components/UserMenu";
 import {
   SettingsPage,
   type SettingsSectionId,
 } from "@/components/SettingsPage";
 import {
-  accountDisplayName,
-  accountInitials,
   isAccountConnected,
   loadCachedSunsetzProBrand,
   resolveWelcomeBrandKind,
@@ -444,6 +432,8 @@ export default function App() {
   const composerPlusTriggerRef = useRef<HTMLButtonElement>(null);
   const composerPlusPanelRef = useRef<HTMLDivElement>(null);
   const composerInputRef = useRef<HTMLDivElement>(null);
+  const sidebarToggleRef = useRef<HTMLButtonElement>(null);
+  const asideToggleRef = useRef<HTMLButtonElement>(null);
   /** Actual input card (.composer) — command panel anchors here. */
   const composerShellRef = useRef<HTMLDivElement>(null);
   /** Floating composer shell — height drives chat bottom padding. */
@@ -2268,13 +2258,45 @@ export default function App() {
     requestComposerFocus();
   };
 
-  const sessionsForProject = (projectId: string) =>
-    sessions.filter((s) => s.projectId === projectId && !s.archived);
+  const sidebarProjects = useMemo<SidebarProjectItem[]>(
+    () =>
+      projects.map((project) => ({
+        id: project.id,
+        name: project.name,
+        path: project.path,
+        trusted: project.trusted,
+        pinned: !!project.pinned,
+        open: expandedProjects[project.id] !== false,
+        sessions: sessions
+          .filter(
+            (item) => item.projectId === project.id && !item.archived,
+          )
+          .map((item) => ({
+            id: item.id,
+            title: item.title,
+            archived: !!item.archived,
+            scheduled: !!item.scheduled,
+          })),
+      })),
+    [expandedProjects, projects, sessions],
+  );
 
-  const orphanSessions = sessions.filter(
-    (s) =>
-      (!s.projectId || !projects.some((p) => p.id === s.projectId)) &&
-      !s.archived,
+  const sidebarOrphanSessions = useMemo<SidebarSessionItem[]>(
+    () =>
+      sessions
+        .filter(
+          (item) =>
+            (!item.projectId ||
+              !projects.some((project) => project.id === item.projectId)) &&
+            !item.archived,
+        )
+        .map((item) => ({
+          id: item.id,
+          title: item.title,
+          archived: !!item.archived,
+          scheduled: !!item.scheduled,
+        })),
+    [projects, sessions],
   );
 
   /** Archived chats grouped by project for Settings → Archived. */
@@ -6660,498 +6682,50 @@ export default function App() {
           }}
         />
       ) : (
-      <WorkbenchShell>
-        {/* LEFT — fully hideable (not icon-rail); open via top-bar icon when closed */}
-        <aside
-          className={
-            "sidebar" +
-            (layout.sidebarCollapsed ? " sidebar--hidden" : "") +
-            (dragZone === "sidebar" ? " is-drop-target" : "") +
-            (dragZone === "main" ? " is-drop-idle" : "")
-          }
-          aria-hidden={layout.sidebarCollapsed}
-          inert={layout.sidebarCollapsed ? true : undefined}
-        >
-          {dragZone === "sidebar" && (
-            <div className="drop-overlay drop-overlay--project" aria-hidden>
-              <div className="drop-overlay__card">
-                <span className="drop-overlay__icon">
-                  <IconFolderPlus size={22} />
-                </span>
-                <strong>{tr("composer.dropProjectTitle")}</strong>
-                <span>{tr("composer.dropProjectHint")}</span>
-              </div>
-            </div>
-          )}
-          {/* Row 1: traffic-light height — panel toggle sits just right of traffic lights */}
-          <div
-            className="sidebar-chrome"
-            data-tauri-drag-region
-            onDoubleClick={() => {
-              if (useCustomWindowChrome) void toggleMaximizeFromTitlebar();
-            }}
-          >
-            <Tip label={tr("main.leftPaneHide")}>
-              <button
-                type="button"
-                className="chrome-btn chrome-btn--traffic main__pane-toggle is-on"
-                aria-label={tr("main.leftPaneHide")}
-                onClick={() =>
-                  setLayout((l) => {
-                    const n = { ...l, sidebarCollapsed: true };
-                    saveLayout(localStorage, n);
-                    return n;
-                  })
-                }
-              >
-                <IconPanel size={16} />
-              </button>
-            </Tip>
-            <div className="sidebar-chrome__drag" data-tauri-drag-region />
-          </div>
-
-          {/* Row 2: quiet product identity. Navigation lives below. */}
-          <div className="sidebar-brand-row">
-            <div className="sidebar-brand-row__left">
-              <SunsetzLogo size={20} />
-              <span>Sunsetz</span>
-            </div>
-          </div>
-
-          {/* Primary nav contains only working product destinations. */}
-          <div className="sidebar-nav">
-            <button
-              type="button"
-              className="nav-new"
-              onClick={() => void newChat(null)}
-            >
-              <span className="nav-item__icon">
-                <IconNewChat size={16} />
-              </span>
-              {tr("sidebar.newSession")}
-            </button>
-            <button
-              type="button"
-              className="nav-item"
-              onClick={() => {
-                setShowSearch(true);
-                setSearchQuery("");
-              }}
-            >
-              <span className="nav-item__icon">
-                <IconSearch size={16} />
-              </span>
-              {tr("sidebar.search")}
-            </button>
-            <button
-              type="button"
-              className={
-                "nav-item" +
-                (mainPane === "automations" ? " nav-item--active" : "")
-              }
-              onClick={() => navigateAutomations()}
-            >
-              <span className="nav-item__icon">
-                <IconScheduled size={16} />
-              </span>
-              {tr("sidebar.scheduled")}
-            </button>
-            <button
-              type="button"
-              className="nav-item"
-              onClick={() => navigateSettings("extensions")}
-            >
-              <span className="nav-item__icon">
-                <IconPuzzle size={16} />
-              </span>
-              {tr("sidebar.plugins")}
-            </button>
-          </div>
-
-          <OverlayScroll className="sidebar__scroll" viewportClassName="sidebar__scroll-inner">
-            {/* L1 — Projects section */}
-            <div className="tree-l1">
-              <button
-                type="button"
-                className="tree-l1__head"
-                onClick={() => setProjectsOpen((v) => !v)}
-              >
-                {projectsOpen ? (
-                  <IconChevronDown size={14} />
-                ) : (
-                  <IconChevronRight size={14} />
-                )}
-                <span className="tree-l1__label">
-                  {tr("sidebar.projects")}
-                </span>
-              </button>
-              <Tip label={tr("sidebar.addProject")}>
-                <button
-                  type="button"
-                  className="tree-l1__action"
-                  aria-label={tr("sidebar.addProject")}
-                  onClick={() => void addProject(false)}
-                >
-                  <IconPlus size={15} />
-                </button>
-              </Tip>
-            </div>
-
-            {projectsOpen && projects.length === 0 && (
-              <div className="sidebar-empty">
-                {tr("sidebar.noProjects")}
-              </div>
-            )}
-
-            {projectsOpen &&
-              projects.map((proj) => {
-                const open = expandedProjects[proj.id] !== false;
-                const projSessions = sessionsForProject(proj.id);
-                return (
-                  <div key={proj.id} className="tree-project">
-                    {/* L2 project selection is visually distinct from L3 task selection. */}
-                    <div
-                      className={
-                        "tree-l2" +
-                        (!session.sessionId && activeProject?.id === proj.id
-                          ? " tree-l2--active"
-                          : "")
-                      }
-                      onContextMenu={(e) => openProjectMenu(e, proj)}
-                    >
-                      <button
-                        type="button"
-                        className="tree-l2__disclosure"
-                        aria-label={
-                          open
-                            ? tr("sidebar.collapseProject")
-                            : tr("sidebar.expandProject")
-                        }
-                        aria-expanded={open}
-                        onClick={() => {
-                          setExpandedProjects((ex) => ({
-                            ...ex,
-                            [proj.id]: !open,
-                          }));
-                        }}
-                      >
-                        {open ? (
-                          <IconChevronDown size={13} />
-                        ) : (
-                          <IconChevronRight size={13} />
-                        )}
-                      </button>
-                      <Tip label={proj.path}>
-                        <button
-                          type="button"
-                          className="tree-l2__select"
-                          aria-current={
-                            !session.sessionId && activeProject?.id === proj.id
-                              ? "page"
-                              : undefined
-                          }
-                          disabled={!proj.trusted}
-                          onClick={() => void newChat(proj)}
-                        >
-                          <span className="tree-l2__icon" aria-hidden>
-                            <IconFolder size={15} />
-                          </span>
-                          <span className="tree-l2__name">
-                            {proj.pinned ? (
-                              <IconPin size={12} className="tree-l2__pin" />
-                            ) : null}
-                            {proj.name}
-                          </span>
-                        </button>
-                      </Tip>
-                      {!proj.trusted && (
-                        <span className="project-row__badge">
-                          {tr("sidebar.untrusted")}
-                        </span>
-                      )}
-                      <span className="tree-l2__actions">
-                        <Tip label={tr("sidebar.menu")}>
-                          <button
-                            type="button"
-                            className="tree-icon-btn"
-                            aria-label={tr("sidebar.menu")}
-                            onClick={(e) => openProjectMenu(e, proj)}
-                          >
-                            <IconMore size={14} />
-                          </button>
-                        </Tip>
-                      </span>
-                    </div>
-
-                    {open && (
-                      <div className="tree-l3-list-wrap">
-                        {!proj.trusted && (
-                          <button
-                            type="button"
-                            className="tree-l3 tree-l3--hint"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              void trustProject(proj);
-                            }}
-                          >
-                            {tr("sidebar.trustProject")}
-                          </button>
-                        )}
-                        {projSessions.length > 0 ? (
-                          <VirtualList
-                            className="tree-l3-list"
-                            items={projSessions}
-                            getKey={(s) => s.id}
-                            rowHeight={SIDEBAR_SESSION_ROW_HEIGHT}
-                            gap={SIDEBAR_SESSION_ROW_GAP}
-                            scrollToKey={
-                              session.sessionId &&
-                              projSessions.some((x) => x.id === session.sessionId)
-                                ? session.sessionId
-                                : null
-                            }
-                            renderItem={(s) => {
-                              const working = busySessionId === s.id;
-                              const needsAnswer = pendingAskSessionIds.has(s.id);
-                              return (
-                                <div
-                                  className={
-                                    "tree-l3" +
-                                    (session.sessionId === s.id
-                                      ? " tree-l3--active"
-                                      : "") +
-                                    (s.archived ? " tree-l3--archived" : "") +
-                                    (working ? " tree-l3--working" : "")
-                                  }
-                                  role="button"
-                                  tabIndex={0}
-                                  onClick={() => void openSession(s, proj)}
-                                  onContextMenu={(e) => openSessionMenu(e, s)}
-                                  onKeyDown={(e) => {
-                                    if (e.key === "Enter")
-                                      void openSession(s, proj);
-                                  }}
-                                >
-                                  <span className="tree-l3__title">
-                                    {s.scheduled ? (
-                                      <span
-                                        className="tree-l3__kind"
-                                        title={tr("automations.msgTag")}
-                                        aria-label={tr("automations.msgTag")}
-                                      >
-                                        <IconClock size={13} />
-                                      </span>
-                                    ) : null}
-                                    <span className="tree-l3__name">
-                                      {s.title || tr("session.untitled")}
-                                    </span>
-                                  </span>
-                                  {needsAnswer ? (
-                                    <Tip label={tr("sidebar.answerNeeded")}>
-                                      <span
-                                        className="tree-l3__status tree-l3__status--question"
-                                        aria-label={tr("sidebar.answerNeeded")}
-                                      >
-                                        ?
-                                      </span>
-                                    </Tip>
-                                  ) : working ? (
-                                    <Tip label={tr("sidebar.sessionWorking")}>
-                                      <span
-                                        className="tree-l3__status"
-                                        aria-label={tr(
-                                          "sidebar.sessionWorking",
-                                        )}
-                                      >
-                                        <Spinner
-                                          size={14}
-                                          className="tree-l3__spinner"
-                                        />
-                                      </span>
-                                    </Tip>
-                                  ) : (
-                                    <span className="tree-l3__actions">
-                                      <Tip
-                                        label={
-                                          s.archived
-                                            ? tr("sidebar.unarchive")
-                                            : tr("sidebar.archive")
-                                        }
-                                      >
-                                        <button
-                                          type="button"
-                                          className="tree-icon-btn"
-                                          aria-label={
-                                            s.archived
-                                              ? tr("sidebar.unarchive")
-                                              : tr("sidebar.archive")
-                                          }
-                                          onClick={(e) => {
-                                            e.stopPropagation();
-                                            void archiveSession(
-                                              s,
-                                              !s.archived,
-                                            );
-                                          }}
-                                        >
-                                          <IconArchive size={13} />
-                                        </button>
-                                      </Tip>
-                                      <Tip label={tr("sidebar.menu")}>
-                                        <button
-                                          type="button"
-                                          className="tree-icon-btn"
-                                          aria-label={tr("sidebar.menu")}
-                                          onClick={(e) =>
-                                            openSessionMenu(e, s)
-                                          }
-                                        >
-                                          <IconMore size={13} />
-                                        </button>
-                                      </Tip>
-                                    </span>
-                                  )}
-                                </div>
-                              );
-                            }}
-                          />
-                        ) : null}
-                        {projSessions.length === 0 && proj.trusted && (
-                          <div className="sidebar-empty" style={{ padding: "4px 10px" }}>
-                            {tr("sidebar.noChats")}
-                          </div>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-
-            {/* Orphans / history */}
-            <div className="tree-l1" style={{ marginTop: 8 }}>
-              <button
-                type="button"
-                className="tree-l1__head"
-                onClick={() => setHistoryOpen((v) => !v)}
-              >
-                {historyOpen ? (
-                  <IconChevronDown size={14} />
-                ) : (
-                  <IconChevronRight size={14} />
-                )}
-                <span className="tree-l1__label">
-                  {tr("sidebar.otherSessions")}
-                </span>
-              </button>
-            </div>
-            {historyOpen && orphanSessions.length > 0 ? (
-              <VirtualList
-                className="tree-orphan-list"
-                items={orphanSessions}
-                getKey={(s) => s.id}
-                rowHeight={SIDEBAR_SESSION_ROW_HEIGHT}
-                gap={SIDEBAR_SESSION_ROW_GAP}
-                scrollToKey={
-                  session.sessionId &&
-                  orphanSessions.some((x) => x.id === session.sessionId)
-                    ? session.sessionId
-                    : null
-                }
-                renderItem={(s) => {
-                  const working = busySessionId === s.id;
-                  const needsAnswer = pendingAskSessionIds.has(s.id);
-                  return (
-                    <div
-                      className={
-                        "tree-l3 tree-l3--orphan" +
-                        (session.sessionId === s.id
-                          ? " tree-l3--active"
-                          : "") +
-                        (working ? " tree-l3--working" : "")
-                      }
-                      role="button"
-                      tabIndex={0}
-                      onClick={() => void openSession(s)}
-                      onContextMenu={(e) => openSessionMenu(e, s)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") void openSession(s);
-                      }}
-                    >
-                      <span className="tree-l3__title">
-                        {s.scheduled ? (
-                          <span
-                            className="tree-l3__kind"
-                            title={tr("automations.msgTag")}
-                            aria-label={tr("automations.msgTag")}
-                          >
-                            <IconClock size={13} />
-                          </span>
-                        ) : null}
-                        <span className="tree-l3__name">
-                          {s.title || tr("session.untitled")}
-                        </span>
-                      </span>
-                      {needsAnswer ? (
-                        <Tip label={tr("sidebar.answerNeeded")}>
-                          <span
-                            className="tree-l3__status tree-l3__status--question"
-                            aria-label={tr("sidebar.answerNeeded")}
-                          >
-                            ?
-                          </span>
-                        </Tip>
-                      ) : working ? (
-                        <Tip label={tr("sidebar.sessionWorking")}>
-                          <span
-                            className="tree-l3__status"
-                            aria-label={tr("sidebar.sessionWorking")}
-                          >
-                            <Spinner
-                              size={14}
-                              className="tree-l3__spinner"
-                            />
-                          </span>
-                        </Tip>
-                      ) : (
-                        <span className="tree-l3__actions">
-                          <Tip label={tr("sidebar.archive")}>
-                            <button
-                              type="button"
-                              className="tree-icon-btn"
-                              aria-label={tr("sidebar.archive")}
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                void archiveSession(s, !s.archived);
-                              }}
-                            >
-                              <IconArchive size={13} />
-                            </button>
-                          </Tip>
-                          <button
-                            type="button"
-                            className="tree-icon-btn"
-                            aria-label={tr("sidebar.menu")}
-                            onClick={(e) => openSessionMenu(e, s)}
-                          >
-                            <IconMore size={13} />
-                          </button>
-                        </span>
-                      )}
-                    </div>
-                  );
-                }}
-              />
-            ) : null}
-          </OverlayScroll>
-
-          <UserMenu
-            open={showUserMenu}
-            onClose={() => setShowUserMenu(false)}
-            theme={theme}
-            account={account}
-            activeProvider={activeCustomProvider}
-            accountBusy={accountBusy}
-            labels={{
+      <WorkbenchShell
+        sidebarCollapsed={layout.sidebarCollapsed}
+        asideCollapsed={layout.asideCollapsed}
+        sidebarToggleRef={sidebarToggleRef}
+        asideToggleRef={asideToggleRef}
+      >
+        <SidebarNavigator
+          collapsed={layout.sidebarCollapsed}
+          dragZone={dragZone}
+          labels={{
+            chrome: {
+              hide: tr("main.leftPaneHide"),
+            },
+            drag: {
+              addProjectTitle: tr("composer.dropProjectTitle"),
+              addProjectHint: tr("composer.dropProjectHint"),
+            },
+            navigation: {
+              label: tr("sidebar.projects"),
+              newSession: tr("sidebar.newSession"),
+              search: tr("sidebar.search"),
+              scheduled: tr("sidebar.scheduled"),
+              plugins: tr("sidebar.plugins"),
+            },
+            tree: {
+              projects: tr("sidebar.projects"),
+              addProject: tr("sidebar.addProject"),
+              noProjects: tr("sidebar.noProjects"),
+              collapseProject: tr("sidebar.collapseProject"),
+              expandProject: tr("sidebar.expandProject"),
+              untrusted: tr("sidebar.untrusted"),
+              menu: tr("sidebar.menu"),
+              trustProject: tr("sidebar.trustProject"),
+              noChats: tr("sidebar.noChats"),
+              otherSessions: tr("sidebar.otherSessions"),
+              untitled: tr("session.untitled"),
+              scheduledTag: tr("automations.msgTag"),
+              answerNeeded: tr("sidebar.answerNeeded"),
+              sessionWorking: tr("sidebar.sessionWorking"),
+              unarchive: tr("sidebar.unarchive"),
+              archive: tr("sidebar.archive"),
+            },
+            account: {
+              trigger: tr("user.menu"),
               settings: tr("sidebar.settings"),
               theme: tr("user.theme"),
               themeLight: tr("user.themeLight"),
@@ -7164,59 +6738,96 @@ export default function App() {
               remaining: tr("account.quotaRemaining"),
               customProvider: tr("prov.customProvider"),
               resetsAt: tr("account.resetsAt"),
-            }}
-            onSettings={() => navigateSettings("general")}
-            onAccountSettings={() => navigateSettings("account")}
-            onToggleTheme={toggleThemeBtn}
-            onLogin={() => void runAccountLogin("oauth")}
-            onLogout={() => void runAccountLogout()}
-          >
-            <Tip label={tr("user.menu")}>
-            <button
-              type="button"
-              className={
-                "sidebar__footer" + (showUserMenu ? " is-open" : "")
+            },
+          }}
+          chrome={{
+            useCustomWindowChrome,
+            onHide: () =>
+              setLayout((current) => {
+                const next = { ...current, sidebarCollapsed: true };
+                saveLayout(localStorage, next);
+                return next;
+              }),
+            onToggleMaximize: () => void toggleMaximizeFromTitlebar(),
+          }}
+          navigation={{
+            activePane: mainPane,
+            onNewSession: () => void newChat(null),
+            onSearch: () => {
+              setShowSearch(true);
+              setSearchQuery("");
+            },
+            onOpenAutomations: navigateAutomations,
+            onOpenExtensions: () => navigateSettings("extensions"),
+          }}
+          tree={{
+            projectsOpen,
+            historyOpen,
+            activeProjectId: activeProject?.id ?? null,
+            activeSessionId: session.sessionId,
+            busySessionId,
+            pendingAskSessionIds,
+            projects: sidebarProjects,
+            orphanSessions: sidebarOrphanSessions,
+            onToggleProjects: () => setProjectsOpen((open) => !open),
+            onAddProject: () => void addProject(false),
+            onToggleProject: (projectId, open) =>
+              setExpandedProjects((current) => ({
+                ...current,
+                [projectId]: open,
+              })),
+            onSelectProject: (projectId) => {
+              const project = projects.find((item) => item.id === projectId);
+              if (project) void newChat(project);
+            },
+            onTrustProject: (projectId) => {
+              const project = projects.find((item) => item.id === projectId);
+              if (project) void trustProject(project);
+            },
+            onProjectMenu: (event, projectId) => {
+              const project = projects.find((item) => item.id === projectId);
+              if (project) openProjectMenu(event, project);
+            },
+            onToggleHistory: () => setHistoryOpen((open) => !open),
+            onOpenSession: (sessionId, projectId) => {
+              const row = sessions.find((item) => item.id === sessionId);
+              const project = projectId
+                ? projects.find((item) => item.id === projectId)
+                : undefined;
+              if (row) void openSession(row, project);
+            },
+            onArchiveSession: (sessionId, archived) => {
+              const row = sessions.find((item) => item.id === sessionId);
+              if (row) void archiveSession(row, archived);
+            },
+            onSessionMenu: (event, sessionId) => {
+              const row = sessions.find((item) => item.id === sessionId);
+              if (row) openSessionMenu(event, row);
+            },
+          }}
+          account={{
+            open: showUserMenu,
+            theme,
+            account,
+            activeProvider: activeCustomProvider,
+            busy: accountBusy,
+            customRouteActive,
+            onClose: () => setShowUserMenu(false),
+            onToggle: (open) => {
+              setShowUserMenu(open);
+              if (open) {
+                void refreshAccount({
+                  refreshBilling: !customRouteActive,
+                });
               }
-              aria-haspopup="menu"
-              aria-expanded={showUserMenu}
-              aria-label={tr("user.menu")}
-              onClick={() => {
-                setShowUserMenu((v) => !v);
-                if (!showUserMenu) {
-                  void refreshAccount({ refreshBilling: !customRouteActive });
-                }
-              }}
-            >
-              <div className="user-avatar" aria-hidden>
-                {activeCustomProvider
-                  ? Array.from(
-                      activeCustomProvider.name.trim() || activeCustomProvider.id,
-                    )[0]?.toUpperCase() || "P"
-                  : account?.profile
-                    ? accountInitials(account.profile)
-                    : "G"}
-              </div>
-              <div className="user-meta">
-                <span className="user-meta__name">
-                  {activeCustomProvider
-                    ? activeCustomProvider.name.trim() || activeCustomProvider.id
-                    : account?.profile
-                      ? accountDisplayName(account.profile, tr("common.local"))
-                      : tr("common.local")}
-                </span>
-                {(() => {
-                  // Only show Sunsetz Pro remaining when officially signed in.
-                  if (customRouteActive || !account?.profile?.signedIn) return null;
-                  const rem = remainingPercent(account);
-                  return rem != null ? (
-                    <span className="user-meta__quota">{rem.toFixed(0)}%</span>
-                  ) : null;
-                })()}
-              </div>
-            </button>
-            </Tip>
-          </UserMenu>
-        </aside>
+            },
+            onSettings: () => navigateSettings("general"),
+            onAccountSettings: () => navigateSettings("account"),
+            onToggleTheme: toggleThemeBtn,
+            onLogin: () => void runAccountLogin("oauth"),
+            onLogout: () => void runAccountLogout(),
+          }}
+        />
 
         {/* CENTER — solid pane; top icons fully toggle L/R columns */}
         <main
@@ -7299,6 +6910,7 @@ export default function App() {
                 }
                 sidebarCollapsed={layout.sidebarCollapsed}
                 showSidebarLabel={tr("main.leftPaneShow")}
+                sidebarToggleRef={sidebarToggleRef}
                 onShowSidebar={() =>
                   setLayout((current) => {
                     const next = { ...current, sidebarCollapsed: false };
@@ -7309,6 +6921,7 @@ export default function App() {
                 asideCollapsed={layout.asideCollapsed}
                 showAsideLabel={tr("main.rightPaneShow")}
                 hideAsideLabel={tr("main.rightPaneHide")}
+                asideToggleRef={asideToggleRef}
                 onToggleAside={() =>
                   setLayout((current) => {
                     const next = {

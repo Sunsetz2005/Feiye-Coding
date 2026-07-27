@@ -107,7 +107,7 @@ git push origin vX.Y.Z
 
 | 工作流 | 触发 | 作用 |
 |--------|------|------|
-| `.github/workflows/ci.yml` | push/PR → main | typecheck、test、`build:ui`、mac/win `cargo test` |
+| `.github/workflows/ci.yml` | push/PR → main | 契约、前端覆盖率基线、`build:ui`、Linux Playwright 行为矩阵、macOS/Windows/Linux `cargo test`；Rust 覆盖率暂为 audit-only |
 | `.github/workflows/release.yml` | tag `v*` 或手动 | 矩阵：mac×2 + win（setup+portable）+ linux（AppImage/deb/rpm）→ 同一 Release |
 
 Release job 关键：

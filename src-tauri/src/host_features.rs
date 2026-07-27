@@ -24,6 +24,32 @@ pub struct HostCapability {
     pub version: Option<String>,
 }
 
+impl HostCapability {
+    fn available(version: &str) -> Self {
+        Self {
+            state: CapabilityState::Available,
+            reason: None,
+            version: Some(version.to_string()),
+        }
+    }
+
+    fn unavailable(reason: &str) -> Self {
+        Self {
+            state: CapabilityState::Unavailable,
+            reason: Some(reason.to_string()),
+            version: None,
+        }
+    }
+
+    fn unsupported_platform(reason: &str) -> Self {
+        Self {
+            state: CapabilityState::UnsupportedPlatform,
+            reason: Some(reason.to_string()),
+            version: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct HostCapabilities {
@@ -40,34 +66,56 @@ pub fn capabilities() -> HostCapabilities {
     let mut capability_map = BTreeMap::new();
     capability_map.insert(
         "finderSelection".to_string(),
-        HostCapability {
-            state: if finder_selection {
-                CapabilityState::Available
-            } else {
-                CapabilityState::UnsupportedPlatform
-            },
-            reason: None,
-            version: Some("1".to_string()),
+        if finder_selection {
+            HostCapability::available("1")
+        } else {
+            HostCapability::unsupported_platform(
+                "Finder selection is available only on macOS",
+            )
         },
     );
     capability_map.insert(
         "speechRecognition".to_string(),
-        HostCapability {
-            state: CapabilityState::Unavailable,
-            reason: Some("No native speech adapter is registered".to_string()),
-            version: None,
-        },
+        HostCapability::unavailable("No native speech adapter is registered"),
     );
     capability_map.insert(
         "skillDraftSave".to_string(),
-        HostCapability {
-            state: CapabilityState::Available,
-            reason: None,
-            version: Some("1".to_string()),
-        },
+        HostCapability::available("1"),
+    );
+    capability_map.insert(
+        "sessionPreview".to_string(),
+        HostCapability::unavailable("No bounded session preview command is registered"),
+    );
+    capability_map.insert(
+        "projectPreview".to_string(),
+        HostCapability::unavailable("No bounded project preview command is registered"),
+    );
+    capability_map.insert(
+        "projectGitSummary".to_string(),
+        HostCapability::unavailable("No bounded project Git summary command is registered"),
+    );
+    capability_map.insert(
+        "resourceReview".to_string(),
+        HostCapability::unavailable("No resource review adapter is registered"),
+    );
+    capability_map.insert(
+        "nativeSpeech".to_string(),
+        HostCapability::unavailable("No native speech adapter is registered"),
+    );
+    capability_map.insert(
+        "smartCapture".to_string(),
+        HostCapability::unavailable("No smart capture adapter is registered"),
+    );
+    capability_map.insert(
+        "computerControl".to_string(),
+        HostCapability::unavailable("No computer control adapter is registered"),
+    );
+    capability_map.insert(
+        "backgroundScheduler".to_string(),
+        HostCapability::unavailable("No persistent background scheduler is registered"),
     );
     HostCapabilities {
-        version: 1,
+        version: 2,
         platform: if cfg!(target_os = "macos") {
             "macos"
         } else if cfg!(target_os = "windows") {
@@ -168,13 +216,51 @@ mod tests {
     #[test]
     fn capabilities_never_advertise_unimplemented_speech() {
         let caps = capabilities();
-        assert_eq!(caps.version, 1);
+        assert_eq!(caps.version, 2);
         assert!(!caps.speech_recognition);
         assert!(caps.skill_draft_save);
         assert_eq!(
             caps.capabilities["speechRecognition"].state,
             CapabilityState::Unavailable
         );
+    }
+
+    #[test]
+    fn capabilities_serialize_v2_map_and_legacy_booleans() {
+        let value = serde_json::to_value(capabilities()).unwrap();
+        assert_eq!(value["version"], 2);
+        assert!(value["finderSelection"].is_boolean());
+        assert_eq!(value["speechRecognition"], false);
+        assert_eq!(value["skillDraftSave"], true);
+        assert!(value["capabilities"]["finderSelection"]["state"].is_string());
+        assert_eq!(
+            value["capabilities"]["speechRecognition"]["state"],
+            "unavailable"
+        );
+        assert_eq!(
+            value["capabilities"]["backgroundScheduler"]["state"],
+            "unavailable"
+        );
+        assert!(value["capabilities"]["backgroundScheduler"]["reason"].is_string());
+    }
+
+    #[test]
+    fn future_capabilities_stay_declared_but_unavailable() {
+        let caps = capabilities();
+        for id in [
+            "sessionPreview",
+            "projectPreview",
+            "projectGitSummary",
+            "resourceReview",
+            "nativeSpeech",
+            "smartCapture",
+            "computerControl",
+            "backgroundScheduler",
+        ] {
+            let capability = caps.capabilities.get(id).unwrap();
+            assert_eq!(capability.state, CapabilityState::Unavailable, "{id}");
+            assert!(capability.reason.is_some(), "{id}");
+        }
     }
 
     #[test]

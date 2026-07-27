@@ -20,3 +20,5 @@
 ## Verification
 
 Run `pnpm typecheck`, `pnpm test`, `pnpm build:ui`, `pnpm verify:contracts`, `pnpm test:visual`, and `cargo test` before release work. Use `SUNSETZ_ACP=mock pnpm dev` for UI-only smoke tests. Only update Playwright snapshots after manually confirming the visual change.
+
+Coverage policy is versioned in `coverage-policy.json`. Run `pnpm test:coverage`, `pnpm coverage:audit`, and `pnpm coverage:changed` for the current frontend baseline and enforced changed-code gate. Rust coverage remains audit-only; do not describe the final 80% line / 70% branch targets as achieved until the corresponding final audits pass.

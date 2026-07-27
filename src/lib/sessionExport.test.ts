@@ -5,8 +5,8 @@ describe("sessionToMarkdown", () => {
   it("builds a title, meta block, and role sections", () => {
     const md = sessionToMarkdown({
       title: "Doctor reset",
-      projectName: "grok-app",
-      projectPath: "/tmp/grok-app",
+      projectName: "sunsetz",
+      projectPath: "/tmp/sunsetz",
       sessionId: "abc12345-full",
       exportedAt: "2026-07-24T00:00:00.000Z",
       messages: [
@@ -19,7 +19,7 @@ describe("sessionToMarkdown", () => {
       ],
     });
     expect(md).toContain("# Doctor reset");
-    expect(md).toContain("Project: grok-app");
+    expect(md).toContain("Project: sunsetz");
     expect(md).toContain("Session: abc12345-full");
     expect(md).toContain("## User");
     expect(md).toContain("Add reset data");

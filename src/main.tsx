@@ -9,7 +9,7 @@ import "./styles/app.css";
 import "./styles/setup-wizard.css";
 import "./styles/apple.css";
 import "./styles/composer-surfaces.css";
-import "./styles/codex-workbench.css";
+import "./styles/workbench.css";
 import {
   applyNativeWindowTheme,
   applyThemeToDocument,

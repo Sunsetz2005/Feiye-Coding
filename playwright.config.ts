@@ -32,7 +32,7 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: "pnpm dev:ui -- --host 127.0.0.1",
+    command: "pnpm exec vite --host 127.0.0.1",
     url: baseURL,
     reuseExistingServer: !process.env.CI,
     timeout: 30_000,

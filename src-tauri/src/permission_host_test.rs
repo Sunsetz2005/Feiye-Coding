@@ -32,7 +32,7 @@ mod host_permission_e2e {
 
     #[test]
     fn h05_ask_plus_session_cache_auto_then_outside_blocked() {
-        let root = std::env::temp_dir().join("grok-app-host-h05");
+        let root = std::env::temp_dir().join("sunsetz-host-h05");
         let _ = std::fs::create_dir_all(root.join("src"));
         let inside = root.join("src/in.txt");
         let _ = std::fs::write(&inside, "ok");
@@ -55,7 +55,7 @@ mod host_permission_e2e {
             "H05: Ask + session cache + in-project → auto"
         );
 
-        let outside = "/tmp/outside-grok-app-secret.txt";
+        let outside = "/tmp/outside-sunsetz-secret.txt";
         let sk_out = scope_key("write", outside);
         cache.allow(sk_out.clone());
         assert!(
@@ -74,7 +74,7 @@ mod host_permission_e2e {
 
     #[test]
     fn relative_dotdot_escape_outside() {
-        let root = std::env::temp_dir().join("grok-app-host-escape");
+        let root = std::env::temp_dir().join("sunsetz-host-escape");
         let _ = std::fs::create_dir_all(&root);
         assert!(is_outside_project(&root, "../../.ssh/id_rsa"));
         assert!(is_outside_project(

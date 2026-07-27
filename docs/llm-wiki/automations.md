@@ -32,8 +32,8 @@
 
 ## 数据
 
-- 文件：`paths::automations_file()`（macOS 常见：`~/Library/Application Support/com.grokapp.grok-app/automations.json`）
-- 浏览器兜底：`localStorage["grok-app.automations"]`
+- 文件：`paths::automations_file()`（macOS 常见：`~/Library/Application Support/dev.sunsetz.desktop/automations.json`）
+- 浏览器兜底：`localStorage["sunsetz.automations"]`
 - 字段：`title` `prompt` `enabled` `projectId` `modelId` `effort` `frequency` `time` `weekdays` `notify` `lastRunAt` `nextRunAt`
 
 ## 执行
@@ -41,7 +41,7 @@
 1. 壳层每 30s 检查 `enabled` 且 `nextRunAt` 到期的任务。
 2. 不打断 `streaming` / 连接中会话；**busy 时不标记 fired**，空闲后可补跑。
 3. 触发时：`session_create` → 写 session prefs（model/effort）→ `session_connect` → `session_send` prompt。
-4. **connect 失败**：删除空壳 session，避免侧栏「空 SuperGrok」幽灵会话；不 `mark_run`。
+4. **connect 失败**：删除空壳 session，避免侧栏出现幽灵会话；不 `mark_run`。
 5. **send 失败**：在会话内留下 user + error 气泡；不 `mark_run`。
 6. 成功：`lastRunAt` / `nextRunAt`；`once` 跑完后 `enabled=false`。
 
@@ -49,7 +49,7 @@
 
 ## UI 约定
 
-- **欢迎 SuperGrok 态**：仅无 `sessionId` 的草稿空会话。
+- **欢迎态**：仅无 `sessionId` 的草稿空会话。
 - **已有 sessionId 但无消息**：提示「此会话暂无消息…」，不显示新建页大牌。
 - **删除 / 危险操作**：禁止 `window.confirm`；用应用内弹窗（见 [dialogs.md](./dialogs.md)）。`AutomationsPage` 删除确认即范例。
 

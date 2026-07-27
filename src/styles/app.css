@@ -511,29 +511,39 @@ html.platform-mac[data-theme="light"] .settings-page__content {
   border-radius: 8px;
 }
 
-/* Sidebar items: no focus ring (quiet list chrome) */
-.sidebar .tree-l1__head:focus,
-.sidebar .tree-l1__head:focus-visible,
-.sidebar .tree-l1__action:focus,
-.sidebar .tree-l1__action:focus-visible,
-.sidebar .tree-l2:focus,
-.sidebar .tree-l2:focus-visible,
-.sidebar .tree-l2__disclosure:focus,
-.sidebar .tree-l2__disclosure:focus-visible,
-.sidebar .tree-l2__select:focus,
-.sidebar .tree-l2__select:focus-visible,
-.sidebar .tree-l3:focus,
-.sidebar .tree-l3:focus-visible,
-.sidebar .tree-icon-btn:focus,
-.sidebar .tree-icon-btn:focus-visible,
-.sidebar .chrome-btn:focus,
-.sidebar .chrome-btn:focus-visible,
-.sidebar .nav-item:focus,
-.sidebar .nav-item:focus-visible,
-.sidebar .nav-new:focus,
-.sidebar .nav-new:focus-visible {
-  outline: none !important;
-  box-shadow: none !important;
+/* Pointer focus stays quiet; keyboard focus must remain unambiguous. */
+.sidebar
+  :where(
+    .tree-l1__head,
+    .tree-l1__action,
+    .tree-l2__disclosure,
+    .tree-l2__select,
+    .tree-l3__open,
+    .tree-icon-btn,
+    .chrome-btn,
+    .nav-item,
+    .nav-new,
+    .sidebar__footer
+  ):focus:not(:focus-visible) {
+  outline: none;
+}
+
+.sidebar
+  :where(
+    .tree-l1__head,
+    .tree-l1__action,
+    .tree-l2__disclosure,
+    .tree-l2__select,
+    .tree-l3__open,
+    .tree-icon-btn,
+    .chrome-btn,
+    .nav-item,
+    .nav-new,
+    .sidebar__footer
+  ):focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: -2px;
+  box-shadow: 0 0 0 1px var(--bg-sidebar-solid);
 }
 
 /* 3-level project tree — fixed row heights, no hover layout shift */
@@ -730,14 +740,14 @@ html.platform-mac[data-theme="light"] .settings-page__content {
 .tree-l3-list {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: var(--sidebar-session-row-gap);
 }
 
 /* Orphan sessions under “Other sessions” (same row metrics as project L3). */
 .tree-orphan-list {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: var(--sidebar-session-row-gap);
 }
 
 .virtual-list__spacer {
@@ -748,17 +758,15 @@ html.platform-mac[data-theme="light"] .settings-page__content {
 .tree-l3 {
   display: flex;
   align-items: center;
-  gap: 8px;
   width: 100%;
-  height: 30px;
-  min-height: 30px;
-  max-height: 30px;
+  height: var(--sidebar-session-row-height);
+  min-height: var(--sidebar-session-row-height);
+  max-height: var(--sidebar-session-row-height);
   box-sizing: border-box;
-  padding: 0 6px 0 12px;
+  padding: 0 6px 0 0;
   border-radius: 8px;
   color: var(--text-secondary);
   font-size: 13px;
-  cursor: pointer;
   text-align: left;
 }
 
@@ -778,14 +786,29 @@ html.platform-mac[data-theme="light"] .settings-page__content {
 
 .tree-l3--orphan {
   margin-left: 0;
-  padding-left: 8px;
 }
 
 .tree-l3--hint {
+  padding-left: 12px;
   font-size: 12px;
   color: var(--warning);
-  height: 28px;
-  min-height: 28px;
+}
+
+.tree-l3__open {
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 0 0 0 12px;
+  border-radius: 8px;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.tree-l3--orphan .tree-l3__open {
+  padding-left: 8px;
 }
 
 .tree-l3__title {
@@ -795,7 +818,7 @@ html.platform-mac[data-theme="light"] .settings-page__content {
   align-items: center;
   gap: 5px;
   overflow: hidden;
-  line-height: 30px;
+  line-height: var(--sidebar-session-row-height);
 }
 
 .tree-l3__kind {
@@ -2789,7 +2812,7 @@ html.platform-mac[data-theme="light"] .settings-page__content {
   color: var(--text-secondary);
 }
 
-/* GitHub-style heatmap (grok-go port) */
+/* Sunsetz usage heatmap */
 :root,
 [data-theme="light"] {
   --heatmap-0: #ebedf0;

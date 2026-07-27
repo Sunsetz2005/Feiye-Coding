@@ -1,6 +1,6 @@
-//! SuperGrok weekly credit quota — ported from sister project **grok-go** `quota.rs`.
+//! Upstream membership quota adapter.
 //!
-//! Source of truth for the grok.com "Weekly SuperGrok Limit" UI:
+//! Source of truth for the upstream weekly membership limit:
 //! `POST https://grok.com/grok_api_v2.GrokBuildBilling/GetGrokCreditsConfig`
 //! (empty gRPC-web request, Bearer OAuth access token).
 
@@ -82,7 +82,7 @@ pub fn default_unused_quota_snapshot() -> AccountQuotaSnapshot {
 pub async fn fetch_quota_snapshot(access_token: &str) -> Result<AccountQuotaSnapshot, String> {
     let client = reqwest::Client::builder()
         .timeout(SUPERGROK_TIMEOUT)
-        .user_agent("GrokApp/0.1 (desktop; unofficial; sister-of-grok-go)")
+        .user_agent("Sunsetz/0.1 (desktop)")
         .build()
         .map_err(|e| e.to_string())?;
 
@@ -140,7 +140,7 @@ pub async fn fetch_quota_snapshot(access_token: &str) -> Result<AccountQuotaSnap
 pub async fn fetch_quota_via_cli_proxy(access_token: &str) -> Result<AccountQuotaSnapshot, String> {
     let client = reqwest::Client::builder()
         .timeout(SUPERGROK_TIMEOUT)
-        .user_agent("GrokApp/0.1 (desktop; unofficial)")
+        .user_agent("Sunsetz/0.1 (desktop)")
         .build()
         .map_err(|e| e.to_string())?;
 
@@ -225,12 +225,12 @@ pub async fn fetch_quota_via_cli_proxy(access_token: &str) -> Result<AccountQuot
     ))
 }
 
-/// Prefer gRPC-web (same as grok-go), fall back to CLI chat proxy JSON.
+/// Prefer gRPC-web and fall back to the CLI chat proxy JSON endpoint.
 pub async fn fetch_quota_best_effort(access_token: &str) -> AccountQuotaSnapshot {
     match fetch_quota_snapshot(access_token).await {
         Ok(s) => s,
         Err(grpc_err) => {
-            tracing::warn!(target: "quota", error = %grpc_err, "gRPC SuperGrok quota failed; trying cli-proxy");
+            tracing::warn!(target: "quota", error = %grpc_err, "gRPC membership quota failed; trying cli-proxy");
             match fetch_quota_via_cli_proxy(access_token).await {
                 Ok(s) => s,
                 Err(json_err) => {

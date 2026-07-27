@@ -1,7 +1,7 @@
 # SPIKE · Grok Build ACP (`grok agent stdio`)
 
 **Date:** 2026-07-21  
-**CLI:** `grok 0.2.106` (`/Users/ronglecat/.grok/bin/grok`)  
+**CLI used for the original protocol capture:** `grok 0.2.106` (`~/.grok/bin/grok`)
 **Host:** macOS arm64
 
 ## Handshake (proven)
@@ -71,9 +71,9 @@ window from message characters.
 
 - Default transport: real `grok agent stdio`  
 - Mock only if `SUNSETZ_ACP=mock`; the private compatibility adapter also accepts legacy `GROK_APP_ACP`.  
-- Independent data root: `~/.grok-app` (sessions/projects); CLI auth may still live in `~/.grok`
+- Independent data root: the Sunsetz application data directory (or `SUNSETZ_HOME` override); CLI auth may still live in `~/.grok`
 - `session_send` accepts optional attachment metadata and stores it in the existing journal schema.
-- `host_capabilities` gates Finder selection and skill saving. `speechRecognition` is currently `false`; there are no `speech_start`, `speech_stop`, or `speech_cancel` commands.
+- `host_capabilities` returns the version 2 capability map. Only an explicit `available` state may expose an entry; unknown or unavailable capabilities stay out of the DOM. Legacy booleans remain for version 1 compatibility. `speechRecognition` is currently `false`; there are no `speech_start`, `speech_stop`, or `speech_cancel` commands.
 - `finder_selected_paths` is implemented only on macOS and canonicalizes/deduplicates returned paths.
 - `skill_draft_save` validates and atomically writes reviewed project/user skill drafts.
 

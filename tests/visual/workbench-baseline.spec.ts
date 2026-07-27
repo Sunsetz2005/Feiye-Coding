@@ -9,6 +9,7 @@ for (const theme of THEMES) {
     }, theme);
 
     await page.goto("/");
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
     await expect(page.getByRole("heading", { name: "新会话" })).toBeVisible();
     await expect(
       page.getByRole("heading", { name: "我们今天要一起做些什么？" }),

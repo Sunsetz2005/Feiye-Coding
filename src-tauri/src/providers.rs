@@ -48,7 +48,7 @@ pub struct ProvidersListResult {
     pub agent_home: String,
 }
 
-/// Built-in model id used when routing back to official Grok Build / SuperGrok.
+/// Built-in model id used when routing back to the official upstream Runtime.
 pub const OFFICIAL_DEFAULT_MODEL: &str = "grok";
 
 /// Catalog model preferred for composer / official spawn when none is set.
@@ -57,7 +57,7 @@ pub const OFFICIAL_CATALOG_MODEL: &str = "grok-4.5";
 /// Which inference channel the agent should use.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActiveRoute {
-    /// Built-in xAI / SuperGrok (OIDC via auth.json).
+    /// Built-in upstream route (OIDC via auth.json).
     Official,
     /// OpenAI-compatible relay section id in config.toml (`[model.<id>]`).
     Custom { id: String },

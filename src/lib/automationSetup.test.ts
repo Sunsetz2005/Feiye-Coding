@@ -28,8 +28,8 @@ describe("automationSetup", () => {
       "",
       "```grok-automation",
       JSON.stringify({
-        title: "查 cgnot996",
-        prompt: "查询 X 上 @cgnot996 最近动态并摘要",
+        title: "汇总项目状态",
+        prompt: "汇总项目最近状态并生成摘要",
         frequency: "daily",
         time: "09:00",
         weekdays: [],
@@ -41,7 +41,7 @@ describe("automationSetup", () => {
     expect(cleanText).toContain("每天早上 9 点");
     expect(cleanText).not.toContain("grok-automation");
     expect(cleanText).not.toContain('"title"');
-    expect(input?.title).toBe("查 cgnot996");
+    expect(input?.title).toBe("汇总项目状态");
     expect(input?.frequency).toBe("daily");
     expect(input?.time).toBe("09:00");
     expect(input?.nextRunAt).toBeTruthy();

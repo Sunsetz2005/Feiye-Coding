@@ -359,7 +359,7 @@ export function SetupWizard({
     setAccountBusy(true);
     setError(null);
     try {
-      await api.importGrokGo();
+      await api.importLegacyProviderConfig();
       setAuthOk(true);
       setStatusMsg(tr("setup.account.ok"));
       setStep("ready");

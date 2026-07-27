@@ -17,7 +17,7 @@ mod integration {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!("grok-app-itest-{n}"));
+        let dir = std::env::temp_dir().join(format!("sunsetz-itest-{n}"));
         fs::create_dir_all(&dir).unwrap();
         dir
     }

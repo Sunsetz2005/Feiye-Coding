@@ -48,9 +48,9 @@ export function tierLabel(
   billing: BillingSnapshot,
   channel: string,
 ): string {
-  if (billing.subscriptionTier?.trim()) {
-    return billing.subscriptionTier.trim();
-  }
+  const membership = upstreamSubscriptionKind(billing.subscriptionTier ?? "");
+  if (membership === "heavy") return "Sunsetz Pro Heavy";
+  if (membership === "sunsetz-pro") return "Sunsetz Pro";
   if (channel === "official_oauth") return "Sunsetz Runtime";
   if (channel === "official_key") return "API Key";
   if (channel === "relay") return "Relay";
@@ -145,7 +145,7 @@ export function usagePercent(billing: BillingSnapshot): number | null {
     billing.creditUsagePercent != null &&
     Number.isFinite(billing.creditUsagePercent)
   ) {
-    // Allow slight overflow past 100 like grok-go.
+    // Preserve slight upstream overage instead of silently clamping the source.
     return Math.max(0, Math.min(200, billing.creditUsagePercent));
   }
   if (

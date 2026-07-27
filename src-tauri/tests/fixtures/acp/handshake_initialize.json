@@ -6,7 +6,7 @@
     "params": {
       "protocolVersion": 1,
       "clientInfo": {
-        "name": "grok-app",
+        "name": "sunsetz",
         "version": "0.1.0"
       },
       "capabilities": {}
@@ -27,7 +27,7 @@
   },
   "expect": {
     "protocolVersion": 1,
-    "clientName": "grok-app",
+    "clientName": "sunsetz",
     "capabilitiesIsObject": true
   }
 }

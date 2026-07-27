@@ -5,8 +5,9 @@
 ## Shell
 
 - Frameless：`src-tauri/tauri.conf.json` → `decorations: false`
-- Sunsetz 语义令牌：`src/styles/tokens.css` + `src/styles/codex-workbench.css`
+- Sunsetz 语义令牌：`src/styles/tokens.css` + `src/styles/workbench.css`
 - 三栏布局根：`WorkbenchShell`；状态和 Host 协调仍由 `App.tsx` 持有
+- 面板关闭：`WorkbenchShell` 将焦点恢复到对应顶部栏按钮；会话中栏保持挂载，滚动位置不因面板切换重建
 - 顶栏：任务标题、更多菜单、左右面板开关；异常状态按需出现
 - 主消息轨和 composer：`--wb-composer-width: 46rem`
 
@@ -14,12 +15,15 @@
 
 | Item | Source |
 |------|--------|
+| 模块边界 | `SidebarNavigator`；`App.tsx` 提供数据、Host 协调与动作回调 |
 | Sunsetz identity | `.sidebar-brand-row` |
 | 新建、搜索、已安排、插件 | `.sidebar-nav` 真实入口 |
-| 项目与任务 | 项目树；项目/任务分别高亮 |
+| 项目与任务 | 披露按钮使用 `aria-expanded` / `aria-controls`；项目与任务选择分离，当前项使用 `aria-current` |
+| 任务键盘行为 | 原生 `button` 响应 Enter / Space；可见 `:focus-visible` 焦点环 |
+| 虚拟任务行 | CSS 与 `VirtualList` 共用 34px 行高、2px 间距 token |
 | 待回答状态 | `.tree-l3__status--question` |
 | 账户入口 | `.sidebar__footer` |
-| 窄屏覆盖层 | `codex-workbench.css` `@media (max-width: 900px)` |
+| 窄屏覆盖层 | `workbench.css` `@media (max-width: 900px)` |
 | 完全隐藏 | `.sidebar--hidden` + `inert`，不占布局、不进入 Tab 顺序 |
 
 ## 中栏
@@ -42,16 +46,21 @@
 - `ResourceViewer` 提供 Files、Changes 和 Plan。
 - 宽屏可调宽；窄屏为非模态覆盖层。
 - `.aside--hidden` 时从可见性、指针和焦点路径移除。
+- 关闭后 `ResourceViewer` 卸载，焦点返回顶部栏“显示文件”按钮。
 
-## 已完成的自动截图
+## 当前自动视觉证据
 
 | 项目 | 实测 |
 |------|------|
 | viewport | 900×600、1200×800、1600×1000 |
 | 主题 | 深色、浅色、高对比度 |
-| 基线数量 | 9 |
+| 空工作台像素基线 | 9 |
+| 资源面板打开像素基线 | 9 |
+| 像素基线文件总数 | 18 |
+| Playwright 用例实例 | 21：18 个截图实例 + 3 个 200% 几何实例 |
 | horizontal overflow | 0 |
-| composer / main | 分别大于 300px / 360px |
+| 资源面板生命周期 | 打开可见；关闭后卸载；触发按钮恢复焦点 |
+| 200% 基本几何 | 三个 viewport 均检查无横向溢出、标题与侧栏可见、composer 位于 viewport 内 |
 | 命令 | `pnpm test:visual` |
 
-尚未据此宣称 200% 缩放、减少动态/透明度、长会话和各浮层场景完成，也未宣称 Windows 或 macOS 原生平台手测完成。
+macOS 调试 `.app` 已人工确认侧栏和资源面板关闭后的触发器焦点恢复、资源内容卸载，以及项目选中态无 coral/orange 边框。200% 证据仍只覆盖浏览器空工作台的基本可操作几何，不代表长会话、各浮层和所有内容状态均已通过。减少动态/透明度、中栏 520px / 380px、macOS 原生 200% 与 Windows 原生窗口仍未完成验收。

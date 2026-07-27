@@ -82,8 +82,9 @@ New Issue
 
 ### Must pass
 
-- [ ] `pnpm typecheck` && `pnpm test` && `pnpm build:ui`  
-- [ ] `cd src-tauri && cargo test` (or CI green)  
+- [ ] `pnpm typecheck`、`pnpm test:coverage`、`pnpm coverage:audit`、`pnpm build:ui`
+- [ ] `pnpm verify:contracts` && `pnpm test:visual`
+- [ ] `cd src-tauri && cargo test` (or CI green)
 - [ ] User-facing strings via `src/i18n/messages.ts` (**en + zh** same keys)  
 - [ ] No `window.confirm` / `prompt` / `alert`  
 - [ ] No secrets, `auth.json`, local agent homes  
@@ -121,7 +122,7 @@ After merge: thank author on PR; close linked Issues; mention in CHANGELOG under
 
 | Mechanism | Location |
 |-----------|----------|
-| CI (typecheck, vitest, UI build, cargo test mac+win) | `.github/workflows/ci.yml` |
+| CI（契约、前端覆盖率、UI build、Linux 行为视觉矩阵、cargo test macOS/Windows/Linux） | `.github/workflows/ci.yml` |
 | Release builds + notes | `.github/workflows/release.yml` + `scripts/release-tag.sh` |
 | Stale / needs-info (optional) | can add `actions/stale` later |
 | PR template | `.github/PULL_REQUEST_TEMPLATE.md` |

@@ -32,7 +32,7 @@ describe("totalListHeight / itemOffset", () => {
 
   it("matches the sidebar row-height token used by CSS", () => {
     const css = readFileSync(
-      new URL("../styles/codex-workbench.css", import.meta.url),
+      new URL("../styles/workbench.css", import.meta.url),
       "utf8",
     );
 

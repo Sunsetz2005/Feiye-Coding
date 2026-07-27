@@ -116,9 +116,9 @@ jobs:
           python3 scripts/changelog-for-release.py "$VER" | tee release-notes.md
           # Multiline body for tauri-action `releaseBody` (no releaseBodyFile input).
           {
-            echo "RELEASE_BODY<<GROKAPP_EOF"
+            echo "RELEASE_BODY<<SUNSETZ_EOF"
             cat release-notes.md
-            echo "GROKAPP_EOF"
+            echo "SUNSETZ_EOF"
           } >> "$GITHUB_ENV"
 
       # NOTE: Do NOT pass empty APPLE_* / TAURI_SIGNING_* secrets.
@@ -134,7 +134,7 @@ jobs:
           projectPath: .
           # Prefer the pushed git tag; fallback replaces __VERSION__ from tauri.conf.json
           tagName: ${{ github.ref_type == 'tag' && github.ref_name || 'v__VERSION__' }}
-          releaseName: "Grok App v__VERSION__"
+          releaseName: "Sunsetz v__VERSION__"
           releaseBody: ${{ env.RELEASE_BODY }}
           releaseDraft: false
           prerelease: false

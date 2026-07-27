@@ -1,4 +1,4 @@
-# PR / push smoke: typecheck, unit tests, UI build, and Rust tests.
+# PR / push gates: contracts, coverage, UI build, Playwright, and Rust tests.
 name: ci
 
 on:
@@ -15,6 +15,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: pnpm/action-setup@v4
         with:
           version: 9
@@ -23,9 +25,51 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - run: pnpm verify:contracts
       - run: pnpm typecheck
-      - run: pnpm test
+      - run: pnpm test:coverage
+      - run: pnpm coverage:audit
+      - name: Enforce changed-code coverage
+        if: github.event_name == 'pull_request'
+        env:
+          COVERAGE_BASE: ${{ github.event.pull_request.base.sha }}
+        run: pnpm coverage:changed
       - run: pnpm build:ui
+      - name: Upload frontend coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-coverage
+          path: .cache/coverage
+          if-no-files-found: warn
+
+  visual:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Install Chromium and Linux browser dependencies
+        run: pnpm exec playwright install --with-deps chromium
+      # Committed pixel baselines are Darwin-specific. Linux still runs every
+      # viewport/theme assertion; macOS remains the pixel-diff authority.
+      - name: Playwright workbench matrix
+        run: pnpm test:visual:ci
+      - name: Upload Playwright diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-diagnostics
+          path: |
+            playwright-report
+            test-results
+          if-no-files-found: ignore
 
   rust:
     strategy:
@@ -63,3 +107,41 @@ jobs:
       - name: cargo test
         working-directory: src-tauri
         run: cargo test
+
+  rust-coverage:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install Linux WebKit deps
+        run: |
+          # Ayatana only — libappindicator3-dev conflicts with libayatana-appindicator3-dev on Ubuntu.
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            librsvg2-dev \
+            patchelf \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+          shared-key: ci-rust-coverage
+      - name: Audit Rust coverage
+        run: node scripts/run-rust-coverage.mjs
+      - name: Check Rust coverage baseline
+        run: node scripts/audit-rust-coverage.mjs baseline
+      - name: Upload Rust coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-coverage
+          path: .cache/rust-coverage
+          if-no-files-found: warn

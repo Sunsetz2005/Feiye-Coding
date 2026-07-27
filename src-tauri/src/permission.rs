@@ -672,7 +672,7 @@ mod tests {
     fn ask_with_session_cache_auto_allows_in_project() {
         // H05: Allow for session under default Ask chip
         let mut c = SessionAllowCache::default();
-        let root = std::env::temp_dir().join("grok-app-perm-ask-cache");
+        let root = std::env::temp_dir().join("sunsetz-perm-ask-cache");
         let _ = std::fs::create_dir_all(root.join("src"));
         let inside = root.join("src/a.rs");
         let _ = std::fs::write(&inside, "x");
@@ -696,7 +696,7 @@ mod tests {
     #[test]
     fn ask_with_session_cache_never_outside() {
         let mut c = SessionAllowCache::default();
-        let root = std::env::temp_dir().join("grok-app-perm-ask-out");
+        let root = std::env::temp_dir().join("sunsetz-perm-ask-out");
         let _ = std::fs::create_dir_all(&root);
         let outside = "/etc/passwd";
         let sk_out = scope_key("fs.write", outside);
@@ -715,7 +715,7 @@ mod tests {
     #[test]
     fn ask_without_cache_does_not_auto() {
         let c = SessionAllowCache::default();
-        let root = std::env::temp_dir().join("grok-app-perm-ask-empty");
+        let root = std::env::temp_dir().join("sunsetz-perm-ask-empty");
         let _ = std::fs::create_dir_all(&root);
         let inside = root.join("f.txt");
         assert!(!may_auto_allow(
@@ -732,7 +732,7 @@ mod tests {
     #[test]
     fn accept_edits_auto_allows_edit_tools() {
         let c = SessionAllowCache::default();
-        let root = std::env::temp_dir().join("grok-app-perm-accept");
+        let root = std::env::temp_dir().join("sunsetz-perm-accept");
         let _ = std::fs::create_dir_all(&root);
         let inside = root.join("f.txt");
         let _ = std::fs::write(&inside, "x");
@@ -759,7 +759,7 @@ mod tests {
     #[test]
     fn download_into_project_is_auto_allowed() {
         let c = SessionAllowCache::default();
-        let root = std::env::temp_dir().join("grok-app-perm-dl");
+        let root = std::env::temp_dir().join("sunsetz-perm-dl");
         let _ = std::fs::create_dir_all(root.join("outputs"));
         let dest = root.join("outputs/kitten.png");
         let cmd = format!(
@@ -791,7 +791,7 @@ mod tests {
     #[test]
     fn download_outside_project_not_auto_allowed() {
         let c = SessionAllowCache::default();
-        let root = std::env::temp_dir().join("grok-app-perm-dl-out");
+        let root = std::env::temp_dir().join("sunsetz-perm-dl-out");
         let _ = std::fs::create_dir_all(&root);
         let cmd = "curl -sL -o /etc/passwd https://example.com/x";
         assert!(is_download_command(cmd));
@@ -818,7 +818,7 @@ mod tests {
 
     #[test]
     fn relative_traversal_is_outside_project() {
-        let root = std::env::temp_dir().join("grok-app-perm-trav");
+        let root = std::env::temp_dir().join("sunsetz-perm-trav");
         let _ = std::fs::create_dir_all(&root);
         // Non-existent relative escape
         assert!(
@@ -844,7 +844,7 @@ mod tests {
     #[test]
     fn outside_project_never_auto_via_session_cache() {
         let mut c = SessionAllowCache::default();
-        let root = std::env::temp_dir().join("grok-app-perm-proj");
+        let root = std::env::temp_dir().join("sunsetz-perm-proj");
         let _ = std::fs::create_dir_all(&root);
         let inside = root.join("src/a.rs");
         let _ = std::fs::create_dir_all(inside.parent().unwrap());

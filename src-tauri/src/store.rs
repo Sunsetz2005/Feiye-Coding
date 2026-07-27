@@ -1,4 +1,4 @@
-//! Independent store under ~/.grok-app: projects, sessions index, settings, secrets.
+//! Versioned independent store for projects, sessions, settings, and secrets.
 
 use std::fs;
 use std::path::PathBuf;

@@ -1,57 +1,92 @@
 # Sunsetz
 
-Sunsetz 是本地优先的桌面 Agent 工作台，用于管理项目、会话、权限、文件与媒体预览、扩展、账号和自动化任务。
+[English](README_EN.md)
 
-![Sunsetz icon](assets/logo.png)
+![CI](https://github.com/Sunsetz2005/Sunsetz/actions/workflows/ci.yml/badge.svg)
 
-## 功能
+Sunsetz 是一款本地优先的桌面 Agent 工作台。它把项目、会话、权限、计划、文件审阅、扩展和自动化集中在一个由 Tauri 驱动的原生应用中。
 
-- 多项目、多会话、搜索、置顶、归档、分叉与时间线回退
-- Sunsetz 三层输入器：项目/目标状态、附件与可增长编辑区、权限/上下文/模型/发送控制分层呈现
-- 对话内活动时间线：按真实顺序展示并汇总技能、上下文压缩、文件、命令、图像、浏览器与子任务活动
-- 可恢复的 Agent 提问：逐题作答、跳过与取消语义分离，切换会话或重载后仍可继续，后台待回答会话有标记
-- 附件元数据随消息持久化；文件、文件夹与 macOS Finder 所选项均使用真实原生入口
-- Ask、单次允许、会话允许、拒绝及无人值守权限模式
-- Markdown、代码、图片、视频、PDF、Office 文件和内嵌网页预览
-- 底部计划确认、执行步骤进度、资源面板计划文档、会话生成技能、MCP、插件、自定义提供商和计划任务
-- 账号、额度、活动热力图及多账号切换
-- 简体中文、繁体中文、英文
-- 浅色、深色和高对比度主题
+![Sunsetz 图标](assets/logo.png)
 
-## 开发
+> Sunsetz 正在持续重构中。界面只展示 Host 和 Runtime 已明确声明可用的能力；未完成的路线图功能不会作为已交付能力宣传。
 
-要求 Node.js 22+、pnpm 9、Rust stable。macOS 构建还需要 Xcode Command Line Tools。
+## 当前能力
+
+- 多项目与多会话管理，支持搜索、归档、分叉和时间线回退。
+- Runtime 流式会话、工具活动时间线、停止与发送队列。
+- Ask、单次允许、会话允许、拒绝和受控无人值守权限策略。
+- 三层输入器、附件持久化、精确上下文用量和 Runtime 模型选择。
+- 可恢复的 Agent 提问与底部计划确认流程。
+- Files、Changes 和 Plan 资源面板，支持代码、Markdown、图片、媒体、PDF 和 Office 预览。
+- 自定义 Provider、MCP、技能、插件、账号与计划任务的现有管理入口。
+- 简体中文、繁体中文、英文，以及浅色、深色和高对比度主题。
+- `HostCapabilities v2` 能力门控：未知、不支持或未安装的入口不会进入界面和键盘路径。
+
+阶段状态、已验证证据和仍缺门禁见[长期重构执行状态](docs/长期重构-执行状态.md)。
+
+## 技术结构
+
+| 层 | 技术与职责 |
+|----|------------|
+| 桌面 Host | Rust、Tauri 2；窗口、文件、权限、持久化和 Runtime 生命周期 |
+| 工作台 UI | React 19、TypeScript、Vite；会话、输入器、资源和设置界面 |
+| Runtime 边界 | 版本化能力与 DTO；兼容细节隔离在私有适配层 |
+| 验证 | Vitest、Playwright、Rust 测试、Tauri 命令与事件契约扫描 |
+
+## 本地开发
+
+需要 Node.js 22+、pnpm 9 和 Rust stable。macOS 构建还需要 Xcode Command Line Tools；Windows 构建需要 Visual Studio Build Tools 和 WebView2。
 
 ```bash
 pnpm install
 pnpm dev
 ```
 
-仅运行前端：
+仅运行 Web UI：
 
 ```bash
 pnpm dev:ui
 ```
 
-使用模拟 Runtime：
+使用本地模拟 Runtime：
 
 ```bash
 SUNSETZ_ACP=mock pnpm dev
 ```
 
-验证：
+应用数据目录可通过 `SUNSETZ_HOME` 覆盖。
+
+## 验证
 
 ```bash
+pnpm verify:contracts
 pnpm typecheck
 pnpm test
+pnpm test:coverage
+pnpm coverage:audit
+pnpm coverage:changed
 pnpm build:ui
-pnpm verify:contracts
 pnpm test:visual
 cd src-tauri && cargo test
 ```
 
-应用数据可通过 `SUNSETZ_HOME` 覆盖。底层 Runtime 兼容边界见 [运行时兼容说明](docs/runtime-compatibility.md)，工作台与会话交互约束见 [工作台会话说明](docs/llm-wiki/workbench-conversation.md)。
+覆盖率策略见 [`coverage-policy.json`](coverage-policy.json)，构建与打包说明见 [`docs/BUILD.md`](docs/BUILD.md)。
+
+## 安全与数据
+
+- 不要提交 Token、API Key、认证文件、支持包或私人项目内容。
+- 项目信任和 Ask 权限默认开启；无人值守能力需要明确配置。
+- 秘密值应进入系统安全存储，不得写入 journal、预览、技能、日志或诊断包。
+- 安全问题请按 [`SECURITY.md`](SECURITY.md) 私下报告。
+
+## 文档
+
+- [工作台与会话行为](docs/llm-wiki/workbench-conversation.md)
+- [Runtime 兼容边界](docs/runtime-compatibility.md)
+- [设计令牌](docs/design-tokens.md)
+- [长期重构执行状态](docs/长期重构-执行状态.md)
+- [贡献指南](CONTRIBUTING.md)
 
 ## 许可证与品牌
 
-代码基于 RongleCat 的 MIT 许可桌面工作台快照改造，原始版权和许可声明保留在 [LICENSE](LICENSE)。Sunsetz 名称与品牌资产不包含在 MIT 商标授权中，详见 [TRADEMARKS.md](TRADEMARKS.md)。
+源码按 [`LICENSE`](LICENSE) 中的 MIT 条款发布，并保留其中要求的第三方版权声明。Sunsetz 名称、图标和品牌资产不包含在源码许可授予的商标权中，详见 [`TRADEMARKS.md`](TRADEMARKS.md)。

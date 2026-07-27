@@ -227,7 +227,7 @@ fn http_client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .connect_timeout(CONNECT_TIMEOUT)
         .timeout(REQUEST_TIMEOUT)
-        .user_agent(format!("GrokApp/{}", env!("CARGO_PKG_VERSION")))
+        .user_agent(format!("Sunsetz/{}", env!("CARGO_PKG_VERSION")))
         .redirect(reqwest::redirect::Policy::limited(8))
         .build()
         .map_err(|e| e.to_string())

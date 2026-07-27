@@ -193,7 +193,7 @@ mod tests {
     #[test]
     fn read_cache_parses_official_entry() {
         let dir = std::env::temp_dir().join(format!(
-            "grok-app-models-test-{}",
+            "sunsetz-models-test-{}",
             std::process::id()
         ));
         let _ = fs::create_dir_all(&dir);

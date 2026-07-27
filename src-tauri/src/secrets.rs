@@ -24,7 +24,7 @@ use parking_lot::Mutex;
 use crate::paths::{ensure_app_dirs, secrets_file};
 use crate::store::SecretsFile;
 
-/// Reverse-DNS service id shared with app data layout (`com.grokapp.grok-app`).
+/// Legacy keyring service id retained so existing installs do not lose secrets.
 const KEYRING_SERVICE: &str = "com.grokapp.grok-app";
 
 const KEY_OFFICIAL: &str = "official_api_key";
@@ -48,12 +48,12 @@ static SESSION_CACHE: Mutex<Option<SecretsFile>> = Mutex::new(None);
 /// **Does not** call `set_password` — writing a throwaway entry is what made
 /// macOS ask for Keychain password on every cold start.
 fn probe_keychain() -> bool {
-    let probe_user = "__grok_app_keychain_probe__";
+    let probe_user = "__sunsetz_keychain_probe__";
     let entry = match keyring::Entry::new(KEYRING_SERVICE, probe_user) {
         Ok(e) => e,
         Err(e) => {
             tracing::info!(
-                target: "grok_app::secrets",
+                target: "sunsetz::secrets",
                 error = %e,
                 "OS keychain unavailable; using secrets.json fallback"
             );
@@ -64,7 +64,7 @@ fn probe_keychain() -> bool {
         // NoEntry = store is reachable and nothing stored (normal).
         Err(keyring::Error::NoEntry) => {
             tracing::info!(
-                target: "grok_app::secrets",
+                target: "sunsetz::secrets",
                 "OS keychain available for app secrets (soft probe)"
             );
             true
@@ -73,14 +73,14 @@ fn probe_keychain() -> bool {
         Ok(_) => {
             let _ = entry.delete_credential();
             tracing::info!(
-                target: "grok_app::secrets",
+                target: "sunsetz::secrets",
                 "OS keychain available for app secrets"
             );
             true
         }
         Err(e) => {
             tracing::info!(
-                target: "grok_app::secrets",
+                target: "sunsetz::secrets",
                 error = %e,
                 "OS keychain probe failed; using secrets.json fallback"
             );
@@ -116,7 +116,7 @@ fn keychain_get(account: &str) -> Option<String> {
         Err(keyring::Error::NoEntry) => None,
         Err(e) => {
             tracing::warn!(
-                target: "grok_app::secrets",
+                target: "sunsetz::secrets",
                 account,
                 error = %e,
                 "failed to read secret from OS keychain"
@@ -261,7 +261,7 @@ pub fn migrate_plaintext_keys_to_keychain(disk: &mut SecretsFile) -> usize {
             Err(e) => {
                 failed = true;
                 tracing::warn!(
-                    target: "grok_app::secrets",
+                    target: "sunsetz::secrets",
                     field = KEY_OFFICIAL,
                     error = %e,
                     "failed to migrate secret field to OS keychain; leaving on disk"
@@ -281,7 +281,7 @@ pub fn migrate_plaintext_keys_to_keychain(disk: &mut SecretsFile) -> usize {
             Err(e) => {
                 failed = true;
                 tracing::warn!(
-                    target: "grok_app::secrets",
+                    target: "sunsetz::secrets",
                     field = KEY_RELAY,
                     error = %e,
                     "failed to migrate secret field to OS keychain; leaving on disk"
@@ -294,13 +294,13 @@ pub fn migrate_plaintext_keys_to_keychain(disk: &mut SecretsFile) -> usize {
         let path = secrets_file();
         if let Err(e) = write_disk_secrets(&path, disk) {
             tracing::warn!(
-                target: "grok_app::secrets",
+                target: "sunsetz::secrets",
                 error = %e,
                 "migrated secrets to keychain but failed to rewrite secrets.json"
             );
         } else {
             tracing::info!(
-                target: "grok_app::secrets",
+                target: "sunsetz::secrets",
                 migrated_fields = migrated,
                 partial_failure = failed,
                 "migrated plaintext secrets from secrets.json to OS keychain"
@@ -492,7 +492,7 @@ pub fn apply_keychain_preference(enabled: bool) -> Result<(), String> {
             keychain_has_official: meta.keychain_has_official,
             keychain_has_relay: meta.keychain_has_relay,
         });
-        tracing::info!(target: "grok_app::secrets", "API keys storage: OS keychain");
+        tracing::info!(target: "sunsetz::secrets", "API keys storage: OS keychain");
         Ok(())
     } else {
         if keychain_platform_ok() {
@@ -513,7 +513,7 @@ pub fn apply_keychain_preference(enabled: bool) -> Result<(), String> {
         disk.keychain_has_relay = false;
         write_disk_secrets(&path, &disk)?;
         *SESSION_CACHE.lock() = Some(disk);
-        tracing::info!(target: "grok_app::secrets", "API keys storage: secrets.json");
+        tracing::info!(target: "sunsetz::secrets", "API keys storage: secrets.json");
         Ok(())
     }
 }
@@ -525,7 +525,7 @@ pub fn clear_keychain_secrets() {
         for account in [KEY_OFFICIAL, KEY_RELAY] {
             if let Err(e) = keychain_delete(account) {
                 tracing::warn!(
-                    target: "grok_app::secrets",
+                    target: "sunsetz::secrets",
                     account,
                     error = %e,
                     "failed to delete secret from OS keychain"
@@ -543,7 +543,7 @@ pub fn clear_keychain_secrets() {
         let _ = write_disk_secrets(&path, &disk);
     }
     tracing::info!(
-        target: "grok_app::secrets",
+        target: "sunsetz::secrets",
         "cleared app secrets from OS keychain"
     );
 }
@@ -698,7 +698,7 @@ mod tests {
         // Soft probe must not create credentials; leftover probe accounts should stay absent.
         let _ = probe_keychain();
         if let Ok(entry) =
-            keyring::Entry::new(KEYRING_SERVICE, "__grok_app_keychain_probe__")
+            keyring::Entry::new(KEYRING_SERVICE, "__sunsetz_keychain_probe__")
         {
             // After soft probe, either NoEntry or we cleaned a legacy probe write.
             match entry.get_password() {
@@ -735,7 +735,7 @@ mod tests {
     #[test]
     fn file_write_preserves_keys_when_using_full_payload() {
         let tmp = std::env::temp_dir().join(format!(
-            "grok-app-secrets-file-{}",
+            "sunsetz-secrets-file-{}",
             std::process::id()
         ));
         let _ = fs::remove_dir_all(&tmp);
