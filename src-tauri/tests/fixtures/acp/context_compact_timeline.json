@@ -1,0 +1,31 @@
+{
+  "events": [
+    {
+      "type": "assistant",
+      "id": "assistant-before-compact",
+      "content": "I will compact the context now."
+    },
+    {
+      "type": "contextCompact",
+      "id": "context-compact-1",
+      "trigger": "auto",
+      "tokensBefore": 12000,
+      "tokensAfter": 4200,
+      "summaryPreview": "Kept the active implementation constraints.",
+      "note": "threshold reached"
+    },
+    {
+      "type": "assistant",
+      "id": "assistant-after-compact",
+      "content": "Continuing with the compacted context."
+    }
+  ],
+  "expect": {
+    "ids": [
+      "assistant-before-compact",
+      "context-compact-1",
+      "assistant-after-compact"
+    ],
+    "compactContent": "context_compact|auto|tokens:12000->4200|note:threshold reached\nKept the active implementation constraints."
+  }
+}

@@ -1,0 +1,61 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Dependencies & build output
+node_modules
+dist
+dist-ssr
+dist-installers
+playwright-report
+test-results
+*.local
+
+# Editor / OS
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+Thumbs.db
+
+# Tauri / Rust
+src-tauri/target
+src-tauri/gen/schemas
+src-tauri/icons/*.iconset/
+
+# Local runtime data & secrets
+*.db
+*.db-*
+.env
+.env.*
+*.pem
+*.p12
+*.key
+auth.json
+secrets.json
+config.local.*
+
+# Scratch / local experiments (not part of the published tree)
+.spike-proj
+.refs
+.codex/
+.tmp*/
+tmp/
+temp/
+.cache/
+.turbo/
+.eslintcache
+*.tsbuildinfo
+
+# Local agent / IDE workspaces
+.claude/

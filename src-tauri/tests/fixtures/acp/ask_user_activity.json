@@ -1,0 +1,25 @@
+{
+  "_comment": "Host tool_step lifecycle for a recoverable ask_user reverse request.",
+  "rpcId": 42,
+  "toolCallId": "runtime-call-9",
+  "questionCount": 3,
+  "answers": {
+    "q-1": "Alpha",
+    "q-2": []
+  },
+  "expect": {
+    "activityId": "runtime-call-9",
+    "fallbackActivityId": "ask-user-42",
+    "messageId": "tool-runtime-call-9",
+    "timelineIds": [
+      "assistant-before",
+      "tool-runtime-call-9",
+      "assistant-after"
+    ],
+    "waitingContent": "tool_step|in_progress|ask_user|Asking 3 questions",
+    "completedContent": "tool_step|completed|ask_user|Asked 3 questions · 2 answered · 1 skipped",
+    "allSkippedContent": "tool_step|completed|ask_user|Asked 3 questions · 0 answered · 3 skipped",
+    "cancelledContent": "tool_step|cancelled|ask_user|Questionnaire cancelled · 3 questions",
+    "failedContent": "tool_step|failed|ask_user|Questionnaire interrupted · 3 questions"
+  }
+}

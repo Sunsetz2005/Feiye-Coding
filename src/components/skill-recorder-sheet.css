@@ -1,0 +1,490 @@
+.skill-recorder-sheet {
+  position: fixed;
+  z-index: 92;
+  inset: var(--titlebar-height, 44px) 0 0 auto;
+  box-sizing: border-box;
+  width: min(460px, 100vw);
+  min-width: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  border-inline-start: 0.5px solid var(--glass-border);
+  background: color-mix(in srgb, var(--bg-elevated) 92%, transparent);
+  box-shadow: -18px 0 50px rgba(0, 0, 0, 0.22);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  opacity: 0;
+  pointer-events: none;
+  transform: translate3d(28px, 0, 0);
+  visibility: hidden;
+  backdrop-filter: blur(24px) saturate(1.35);
+  -webkit-backdrop-filter: blur(24px) saturate(1.35);
+  transition:
+    transform 210ms var(--ease-spring),
+    opacity 160ms ease-out,
+    visibility 0s linear 210ms;
+}
+
+.skill-recorder-sheet.is-open {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translate3d(0, 0, 0);
+  visibility: visible;
+  transition-delay: 0s;
+}
+
+.skill-recorder-sheet__header {
+  min-height: 50px;
+  padding: 0 var(--space-3) 0 var(--space-4);
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  border-bottom: 0.5px solid var(--border-subtle);
+  background: color-mix(in srgb, var(--bg-elevated) 86%, transparent);
+}
+
+.skill-recorder-sheet__title {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: var(--text-lg);
+  font-weight: 650;
+  letter-spacing: -0.014em;
+  line-height: var(--leading-tight);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.skill-recorder-sheet__icon-button,
+.skill-recorder-sheet__text-button,
+.skill-recorder-sheet__button {
+  appearance: none;
+  border: 0;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition:
+    transform 80ms var(--ease-press),
+    background-color var(--motion-fast) ease-out,
+    border-color var(--motion-fast) ease-out,
+    color var(--motion-fast) ease-out,
+    opacity var(--motion-fast) ease-out;
+}
+
+.skill-recorder-sheet__icon-button:active:not(:disabled),
+.skill-recorder-sheet__text-button:active:not(:disabled),
+.skill-recorder-sheet__button:active:not(:disabled) {
+  transform: scale(0.96);
+}
+
+.skill-recorder-sheet__icon-button:focus-visible,
+.skill-recorder-sheet__text-button:focus-visible,
+.skill-recorder-sheet__button:focus-visible,
+.skill-recorder-sheet input:focus-visible,
+.skill-recorder-sheet textarea:focus-visible,
+.skill-recorder-sheet select:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
+}
+
+.skill-recorder-sheet__icon-button {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  display: inline-flex;
+  flex: 0 0 32px;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-full);
+  background: transparent;
+  color: var(--text-secondary);
+}
+
+.skill-recorder-sheet__icon-button:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.skill-recorder-sheet__scroll {
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.skill-recorder-sheet__section {
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  border-bottom: 0.5px solid var(--border-subtle);
+}
+
+.skill-recorder-sheet__section-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.skill-recorder-sheet__section-title {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  font-weight: 620;
+  letter-spacing: 0;
+  line-height: var(--leading-tight);
+}
+
+.skill-recorder-sheet__range,
+.skill-recorder-sheet__references {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.skill-recorder-sheet__field {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.skill-recorder-sheet__label {
+  color: var(--text-tertiary);
+  font-size: var(--text-xs);
+  font-weight: 520;
+  line-height: var(--leading-tight);
+}
+
+.skill-recorder-sheet input[type="text"],
+.skill-recorder-sheet input:not([type]),
+.skill-recorder-sheet textarea,
+.skill-recorder-sheet select {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  border: 0.5px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font: 400 var(--text-sm) / var(--leading-normal) var(--font-sans);
+}
+
+.skill-recorder-sheet input[type="text"],
+.skill-recorder-sheet input:not([type]),
+.skill-recorder-sheet select {
+  min-height: 34px;
+  padding: 6px 9px;
+}
+
+.skill-recorder-sheet textarea {
+  min-height: 70px;
+  padding: 8px 9px;
+  resize: vertical;
+}
+
+.skill-recorder-sheet select {
+  padding-inline-end: 30px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.skill-recorder-sheet input::placeholder,
+.skill-recorder-sheet textarea::placeholder {
+  color: var(--text-tertiary);
+}
+
+.skill-recorder-sheet__code {
+  tab-size: 2;
+  font-family: var(--font-mono) !important;
+  font-size: 12px !important;
+  line-height: 1.55 !important;
+}
+
+.skill-recorder-sheet__text-button {
+  min-height: 28px;
+  padding: 4px 7px;
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+}
+
+.skill-recorder-sheet__text-button:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.skill-recorder-sheet__text-button--danger {
+  align-self: flex-end;
+  color: var(--danger);
+}
+
+.skill-recorder-sheet__reference {
+  min-width: 0;
+  margin: 0;
+  padding: var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  border: 0.5px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--bg-card) 72%, transparent);
+}
+
+.skill-recorder-sheet__reference legend {
+  padding: 0 5px;
+  color: var(--text-tertiary);
+  font-size: var(--text-xs);
+}
+
+.skill-recorder-sheet__scope {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.skill-recorder-sheet__scope-option {
+  min-height: 44px;
+  padding: 8px 9px;
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: start;
+  gap: var(--space-2);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+}
+
+.skill-recorder-sheet__scope-option:hover {
+  background: var(--bg-hover);
+}
+
+.skill-recorder-sheet__scope-option input {
+  width: 16px;
+  height: 16px;
+  margin: 2px 0 0;
+  accent-color: var(--accent);
+}
+
+.skill-recorder-sheet__scope-option span {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.skill-recorder-sheet__scope-option strong {
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+  font-weight: 560;
+}
+
+.skill-recorder-sheet__scope-option small {
+  color: var(--text-tertiary);
+  font-size: var(--text-xs);
+  line-height: var(--leading-normal);
+}
+
+.skill-recorder-sheet__button {
+  min-height: 34px;
+  padding: 7px 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border: 0.5px solid transparent;
+  border-radius: var(--radius-md);
+  font-size: var(--text-sm);
+  font-weight: 570;
+}
+
+.skill-recorder-sheet__button:disabled,
+.skill-recorder-sheet__icon-button:disabled,
+.skill-recorder-sheet__text-button:disabled {
+  cursor: default;
+  opacity: 0.38;
+}
+
+.skill-recorder-sheet__button--primary {
+  min-width: 96px;
+  background: var(--text-primary);
+  color: var(--text-inverse);
+}
+
+.skill-recorder-sheet__button--secondary {
+  align-self: flex-start;
+  border-color: var(--border-strong);
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.skill-recorder-sheet__button--secondary:hover:not(:disabled) {
+  background: var(--bg-active);
+}
+
+.skill-recorder-sheet__button--danger {
+  background: var(--danger);
+  color: #111;
+}
+
+.skill-recorder-sheet__empty {
+  margin: 0;
+  color: var(--text-tertiary);
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+}
+
+.skill-recorder-sheet__error,
+.skill-recorder-sheet__validation,
+.skill-recorder-sheet__success,
+.skill-recorder-sheet__conflict {
+  margin: var(--space-3) var(--space-4) 0;
+  padding: var(--space-3);
+  border: 0.5px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  font-size: var(--text-xs);
+  line-height: var(--leading-normal);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.skill-recorder-sheet__section > .skill-recorder-sheet__error {
+  margin: 0;
+}
+
+.skill-recorder-sheet__error,
+.skill-recorder-sheet__validation {
+  border-color: color-mix(in srgb, var(--danger) 42%, transparent);
+  background: var(--danger-muted);
+  color: var(--danger);
+}
+
+.skill-recorder-sheet__validation strong {
+  font-weight: 620;
+}
+
+.skill-recorder-sheet__validation ul {
+  margin: 6px 0 0;
+  padding-inline-start: 18px;
+}
+
+.skill-recorder-sheet__success {
+  border-color: color-mix(in srgb, var(--success) 38%, transparent);
+  background: var(--success-muted);
+  color: var(--success);
+}
+
+.skill-recorder-sheet__conflict {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  border-color: color-mix(in srgb, var(--warning) 42%, transparent);
+  background: var(--warning-muted);
+  color: var(--text-primary);
+}
+
+.skill-recorder-sheet__conflict h3,
+.skill-recorder-sheet__conflict p {
+  margin: 0;
+}
+
+.skill-recorder-sheet__conflict h3 {
+  font-size: var(--text-sm);
+  font-weight: 620;
+}
+
+.skill-recorder-sheet__conflict p {
+  color: var(--text-secondary);
+}
+
+.skill-recorder-sheet__conflict-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
+.skill-recorder-sheet__footer {
+  min-height: 58px;
+  padding: var(--space-3) var(--space-4);
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: flex-end;
+  border-top: 0.5px solid var(--border-subtle);
+  background: color-mix(in srgb, var(--bg-elevated) 90%, transparent);
+}
+
+@media (max-width: 620px) {
+  .skill-recorder-sheet {
+    width: 100vw;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skill-recorder-sheet {
+    transform: none;
+    transition:
+      opacity 120ms ease-out,
+      visibility 0s linear 120ms;
+  }
+
+  .skill-recorder-sheet.is-open {
+    transition-delay: 0s;
+  }
+
+  .skill-recorder-sheet__icon-button,
+  .skill-recorder-sheet__text-button,
+  .skill-recorder-sheet__button {
+    transition:
+      background-color 80ms ease-out,
+      border-color 80ms ease-out,
+      color 80ms ease-out,
+      opacity 80ms ease-out;
+  }
+
+  .skill-recorder-sheet__icon-button:active:not(:disabled),
+  .skill-recorder-sheet__text-button:active:not(:disabled),
+  .skill-recorder-sheet__button:active:not(:disabled) {
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .skill-recorder-sheet,
+  .skill-recorder-sheet__header,
+  .skill-recorder-sheet__footer {
+    background: var(--bg-elevated);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+}
+
+@media (prefers-contrast: more) {
+  .skill-recorder-sheet {
+    border-inline-start: 1px solid var(--text-secondary);
+    background: var(--bg-elevated);
+    box-shadow: none;
+  }
+
+  .skill-recorder-sheet input,
+  .skill-recorder-sheet textarea,
+  .skill-recorder-sheet select,
+  .skill-recorder-sheet__reference,
+  .skill-recorder-sheet__button--secondary {
+    border-width: 1px;
+    border-color: var(--text-secondary);
+  }
+}

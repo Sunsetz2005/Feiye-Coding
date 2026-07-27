@@ -1,0 +1,314 @@
+/*
+ * Composer floating surfaces
+ * --------------------------
+ * Loaded after the shared Apple layer. These overrides keep the composer
+ * controls quiet and make model/context popovers spatially anchored.
+ */
+
+.cmm--model .cmm__trigger {
+  gap: 4px;
+  max-width: 190px;
+  min-height: 30px;
+  padding-inline: 8px 6px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.cmm--model .cmm__trigger[data-readonly="true"],
+.cmm--access .cmm__trigger[data-readonly="true"],
+.ctx-meter[data-readonly="true"] {
+  color: var(--text-tertiary);
+}
+
+.cmm--model .cmm__chev {
+  opacity: 0.72;
+}
+
+.cmm__pop--model-root {
+  width: min(280px, calc(100vw - 16px));
+  min-width: min(280px, calc(100vw - 16px));
+  padding: 7px;
+  overflow: visible;
+}
+
+.cmm__pop--model-root,
+.cmm__cascade,
+.ctx-chip__pop {
+  background: color-mix(in srgb, var(--menu-surface-solid) 94%, transparent);
+  border: 0.5px solid var(--menu-border);
+  box-shadow:
+    inset 0 0.5px 0 color-mix(in srgb, white 10%, transparent),
+    0 12px 34px color-mix(in srgb, black 30%, transparent);
+  backdrop-filter: blur(22px) saturate(1.3);
+  -webkit-backdrop-filter: blur(22px) saturate(1.3);
+}
+
+.cmm__pop--model-root .cmm__row {
+  min-height: 42px;
+  padding: 7px 10px;
+  border-radius: 9px;
+  color: var(--text-primary);
+}
+
+.cmm__pop--model-root .cmm__row.is-active {
+  background: var(--menu-active);
+}
+
+.cmm__pop--model-root .cmm__row:active,
+.cmm__cascade .cmm__opt:active,
+.ctx-chip__action:active {
+  transform: scale(0.98);
+  transition-duration: 70ms;
+}
+
+.cmm__pop--model-root .cmm__row-val {
+  color: var(--text-secondary);
+  font-weight: 450;
+}
+
+.cmm__row--reset {
+  position: relative;
+  margin-top: 7px;
+  padding-top: 10px !important;
+}
+
+.cmm__row--reset::before {
+  position: absolute;
+  inset: -4px 4px auto;
+  height: 1px;
+  background: var(--border-subtle);
+  content: "";
+}
+
+.cmm__row-reset-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  color: var(--text-secondary);
+}
+
+.cmm__row-reset-label > span {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.cmm__row-reset-label strong {
+  color: inherit;
+  font-size: 12.5px;
+  font-weight: 540;
+  line-height: 1.25;
+}
+
+.cmm__row-reset-label small {
+  overflow: hidden;
+  color: var(--text-tertiary);
+  font-size: 10.5px;
+  font-weight: 420;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cmm__pop--model-root [aria-disabled="true"],
+.cmm__cascade [aria-disabled="true"] {
+  cursor: default;
+  opacity: 0.52;
+}
+
+.cmm__cascade {
+  box-sizing: border-box;
+  min-width: 190px;
+  padding: 7px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  animation-duration: 200ms;
+}
+
+.cmm__cascade .cmm__opt {
+  min-height: 36px;
+  align-items: center;
+  padding: 7px 10px;
+  border-radius: 9px;
+}
+
+.cmm__cascade .cmm__opt.is-active {
+  background: var(--menu-active);
+}
+
+.cmm__cascade .cmm__opt-title {
+  font-size: 12.5px;
+  font-weight: 520;
+}
+
+.cmm__cascade .cmm__opt-check {
+  margin-top: 0;
+}
+
+/* Deliberate click-only context disclosure: compact, exact, no dashboard. */
+.ctx-meter {
+  cursor: pointer;
+}
+
+.ctx-chip__pop {
+  width: min(270px, calc(100vw - 16px));
+  padding: 9px;
+  gap: 8px;
+  border-color: var(--menu-border);
+}
+
+.ctx-chip__head {
+  grid-template-columns: 34px minmax(0, 1fr) auto;
+  gap: 9px;
+  padding: 3px 3px 9px;
+  border-bottom-color: var(--border-subtle);
+}
+
+.ctx-chip__hero-ring {
+  width: 34px;
+  height: 34px;
+}
+
+.ctx-chip__hero-copy h3 {
+  margin-bottom: 2px;
+  font-size: 12.5px;
+  font-weight: 590;
+}
+
+.ctx-chip__hero-copy p {
+  font-size: 10.5px;
+}
+
+.ctx-chip__source {
+  padding: 2px 5px;
+  background: var(--bg-hover);
+  color: var(--text-tertiary);
+  font-size: 8.5px;
+  font-weight: 560;
+}
+
+.ctx-chip__details {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.ctx-chip__details > div {
+  min-height: 27px;
+  padding: 0 5px;
+  border-radius: 7px;
+}
+
+.ctx-chip__details > div:hover {
+  background: var(--bg-hover);
+}
+
+.ctx-chip__details dt,
+.ctx-chip__details dd {
+  font-size: 10.5px;
+}
+
+.ctx-chip__details dd {
+  max-width: 58%;
+}
+
+.ctx-chip__action {
+  min-height: 32px;
+  margin: 1px 0 0;
+  padding: 7px 8px;
+  border-top: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  color: var(--text-secondary);
+  font-size: 11.5px;
+}
+
+.ctx-chip__action:hover {
+  background: var(--menu-hover);
+}
+
+.ctx-chip__action:disabled,
+.ctx-chip__action[aria-disabled="true"] {
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: default;
+  opacity: 0.52;
+}
+
+.cmm--access [aria-disabled="true"] {
+  cursor: default;
+  opacity: 0.52;
+}
+
+.composer-plus__desc.is-feedback {
+  color: var(--danger);
+}
+
+/* + and / share rows but retain distinct accessibility semantics. */
+.composer-plus[data-mode="plus"] {
+  width: min(480px, calc(100vw - 16px));
+}
+
+.composer-plus[data-mode="plus"] .composer-plus__item {
+  min-height: 34px;
+}
+
+.composer-plus[data-mode="plus"] .composer-plus__section {
+  padding-top: 8px;
+}
+
+.composer-plus__item.is-disabled {
+  opacity: 0.46;
+}
+
+@container composer (max-width: 380px) {
+  .cmm--model .cmm__trigger-text--short {
+    display: inline;
+  }
+
+  .cmm--model .cmm__trigger {
+    width: auto;
+    max-width: 112px;
+    padding-inline: 7px 5px;
+    gap: 3px;
+  }
+
+  .cmm--model .cmm__chev {
+    display: inline-flex;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cmm__cascade,
+  .cmm__pop--model-root,
+  .ctx-chip__pop {
+    animation: none !important;
+    transform: none !important;
+    filter: none !important;
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .cmm__pop--model-root,
+  .cmm__cascade,
+  .ctx-chip__pop {
+    background: var(--menu-surface-solid) !important;
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+  }
+}
+
+@media (prefers-contrast: more) {
+  .cmm__pop--model-root,
+  .cmm__cascade,
+  .ctx-chip__pop {
+    background: var(--menu-surface-solid);
+    border: 1px solid var(--border-strong);
+  }
+
+  .cmm__pop--model-root .cmm__row.is-active,
+  .cmm__cascade .cmm__opt.is-active {
+    outline: 1px solid var(--text-secondary);
+  }
+}

@@ -1,0 +1,39 @@
+{
+  "_comment": "Journal order for one assistant/tool/assistant turn. Tool status updates must replace the original row in place.",
+  "events": [
+    {
+      "type": "assistant",
+      "id": "assistant-before",
+      "content": "I will inspect the file."
+    },
+    {
+      "type": "tool",
+      "toolCallId": "call-1",
+      "status": "in_progress",
+      "kind": "read",
+      "title": "Read file",
+      "path": "/tmp/a.rs"
+    },
+    {
+      "type": "assistant",
+      "id": "assistant-after",
+      "content": "The file contains the expected code."
+    },
+    {
+      "type": "tool",
+      "toolCallId": "call-1",
+      "status": "completed",
+      "kind": "read",
+      "title": "Read file",
+      "detail": "done"
+    }
+  ],
+  "expect": {
+    "ids": [
+      "assistant-before",
+      "tool-call-1",
+      "assistant-after"
+    ],
+    "toolContent": "tool_step|completed|read|Read file\ndone\n/tmp/a.rs"
+  }
+}
