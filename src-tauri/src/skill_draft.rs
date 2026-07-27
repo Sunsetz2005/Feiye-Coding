@@ -3,7 +3,9 @@
 use directories::BaseDirs;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::fs::{self, File, OpenOptions};
+#[cfg(unix)]
+use std::fs::File;
+use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
@@ -326,6 +328,21 @@ fn write_new_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(unix)]
+fn sync_directory(path: &Path) -> Result<(), String> {
+    File::open(path)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| format!("Sync skill staging directory: {error}"))
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_path: &Path) -> Result<(), String> {
+    // Windows does not support opening a directory with std::fs::File and
+    // returns ERROR_ACCESS_DENIED. Each staged file is already sync_all'ed;
+    // the following same-volume rename remains the atomic commit boundary.
+    Ok(())
+}
+
 fn save_to_base(
     request: &SkillDraftSaveRequest,
     base: &Path,
@@ -361,9 +378,7 @@ fn save_to_base(
         for (relative, bytes) in files {
             write_new_file(&staging.join(relative), bytes)?;
         }
-        File::open(&staging)
-            .and_then(|directory| directory.sync_all())
-            .map_err(|error| format!("Sync skill staging directory: {error}"))?;
+        sync_directory(&staging)?;
         Ok(())
     })();
     if let Err(error) = write_result {
