@@ -122,10 +122,12 @@ try {
   }
   $nativeHandle = [System.IntPtr]::new($window.Current.NativeWindowHandle)
   $workingArea = [System.Windows.Forms.Screen]::FromHandle($nativeHandle).WorkingArea
+  # UI Automation includes the invisible DWM resize frame on both horizontal edges.
+  $horizontalFrameTolerance = 24
   if (
-    $bounds.Left -lt $workingArea.Left -or
+    $bounds.Left -lt ($workingArea.Left - $horizontalFrameTolerance) -or
     $bounds.Top -lt $workingArea.Top -or
-    $bounds.Right -gt $workingArea.Right -or
+    $bounds.Right -gt ($workingArea.Right + $horizontalFrameTolerance) -or
     $bounds.Bottom -gt $workingArea.Bottom
   ) {
     throw "Native window $bounds exceeded monitor work area $workingArea"

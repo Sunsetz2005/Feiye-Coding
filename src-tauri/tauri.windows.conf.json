@@ -6,7 +6,7 @@
         "label": "main",
         "title": "Sunsetz",
         "width": 1200,
-        "height": 680,
+        "height": 640,
         "minWidth": 900,
         "minHeight": 600,
         "resizable": true,
