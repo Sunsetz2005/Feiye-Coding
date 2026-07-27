@@ -120,6 +120,16 @@ try {
   if ($bounds.Width -lt 900 -or $bounds.Height -lt 600) {
     throw "Unexpected native window size: $($bounds.Width)x$($bounds.Height)"
   }
+  $nativeHandle = [System.IntPtr]::new($window.Current.NativeWindowHandle)
+  $workingArea = [System.Windows.Forms.Screen]::FromHandle($nativeHandle).WorkingArea
+  if (
+    $bounds.Left -lt $workingArea.Left -or
+    $bounds.Top -lt $workingArea.Top -or
+    $bounds.Right -gt $workingArea.Right -or
+    $bounds.Bottom -gt $workingArea.Bottom
+  ) {
+    throw "Native window $bounds exceeded monitor work area $workingArea"
+  }
 
   & node ./scripts/windows-native-webview-smoke.mjs $OutputDirectory
   if ($LASTEXITCODE -ne 0) {
