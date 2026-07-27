@@ -43,7 +43,13 @@ New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
 
 $dataRoot = Join-Path $env:RUNNER_TEMP "sunsetz-native-smoke"
 New-Item -ItemType Directory -Force -Path $dataRoot | Out-Null
-$probeRuntime = (Get-Command pwsh).Source
+$probeRuntimeDirectory = Join-Path $env:USERPROFILE ".grok\bin"
+New-Item -ItemType Directory -Force -Path $probeRuntimeDirectory | Out-Null
+$probeRuntime = Join-Path $probeRuntimeDirectory "grok.cmd"
+@"
+@echo off
+echo grok native-smoke
+"@ | Set-Content -Path $probeRuntime
 
 $settings = @{
   theme = "light"
