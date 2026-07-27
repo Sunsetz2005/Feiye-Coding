@@ -720,6 +720,28 @@ export async function sessionsList() {
   >("sessions_list");
 }
 
+export interface SessionPreviewV1 {
+  version: 1;
+  sessionId: string;
+  projectId: string | null;
+  title: string;
+  updatedAt: string;
+  modelId: string | null;
+  contextUsage?: import("./session").SessionTokenUsage | null;
+  archived: boolean;
+  scheduled: boolean;
+  recentUserSummary: string | null;
+  recentAssistantSummary: string | null;
+}
+
+/** Bounded, redacted sidebar preview; the browser fallback has no journal. */
+export async function sessionPreview(
+  id: string,
+): Promise<SessionPreviewV1 | null> {
+  if (!isTauri()) return null;
+  return invoke<SessionPreviewV1>("session_preview", { id });
+}
+
 /** CLI sessions under GROK_HOME (shared-mode discovery). */
 export type CliSessionSummary = {
   agentSessionId: string;

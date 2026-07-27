@@ -1,7 +1,12 @@
 import {
+  useCallback,
+  useEffect,
   useId,
+  useRef,
+  useState,
   type MouseEvent as ReactMouseEvent,
 } from "react";
+import { createPortal } from "react-dom";
 import {
   IconArchive,
   IconChevronDown,
@@ -24,7 +29,11 @@ import { Tip } from "@/components/ui/tooltip";
 import { Spinner } from "@/components/ui/spinner";
 import { UserMenu, remainingPercent } from "@/components/UserMenu";
 import { VirtualList } from "@/components/VirtualList";
-import type { AccountStatus, CustomProvider } from "@/lib/api";
+import type {
+  AccountStatus,
+  CustomProvider,
+  SessionPreviewV1,
+} from "@/lib/api";
 import {
   accountDisplayName,
   accountInitials,
@@ -38,6 +47,7 @@ import {
 export interface SidebarSessionItem {
   id: string;
   title: string;
+  updatedAt: string;
   archived: boolean;
   scheduled: boolean;
 }
@@ -82,6 +92,11 @@ interface SidebarLabels {
     scheduledTag: string;
     answerNeeded: string;
     sessionWorking: string;
+    previewTasks: string;
+    previewActive: string;
+    previewUpdated: string;
+    previewPinned: string;
+    previewNoSummary: string;
     unarchive: string;
     archive: string;
   };
@@ -141,6 +156,9 @@ interface SidebarTreeModel {
     event: ReactMouseEvent<HTMLElement>,
     sessionId: string,
   ) => void;
+  loadSessionPreview: (
+    sessionId: string,
+  ) => Promise<SessionPreviewV1 | null>;
 }
 
 interface SidebarAccountModel {
@@ -179,6 +197,8 @@ function SessionItem({
   onOpen,
   onArchive,
   onMenu,
+  onPreview,
+  onPreviewEnd,
 }: {
   item: SidebarSessionItem;
   projectId: string | null;
@@ -192,6 +212,8 @@ function SessionItem({
     event: ReactMouseEvent<HTMLElement>,
     sessionId: string,
   ) => void;
+  onPreview: (anchor: HTMLElement, immediate: boolean) => void;
+  onPreviewEnd: () => void;
 }) {
   return (
     <div
@@ -203,12 +225,16 @@ function SessionItem({
         (working ? " tree-l3--working" : "")
       }
       onContextMenu={(event) => onMenu(event, item.id)}
+      onMouseEnter={(event) => onPreview(event.currentTarget, false)}
+      onMouseLeave={onPreviewEnd}
     >
       <button
         type="button"
         className="tree-l3__open"
         aria-current={active ? "page" : undefined}
         onClick={() => onOpen(item.id, projectId)}
+        onFocus={(event) => onPreview(event.currentTarget, true)}
+        onBlur={onPreviewEnd}
       >
         <span className="tree-l3__title">
           {item.scheduled ? (
@@ -261,7 +287,10 @@ function SessionItem({
               type="button"
               className="tree-icon-btn"
               aria-label={labels.menu}
-              onClick={(event) => onMenu(event, item.id)}
+              onClick={(event) => {
+                onPreviewEnd();
+                onMenu(event, item.id);
+              }}
             >
               <IconMore size={13} />
             </button>
@@ -269,6 +298,158 @@ function SessionItem({
         </span>
       )}
     </div>
+  );
+}
+
+type PreviewAnchor = {
+  left: number;
+  right: number;
+  top: number;
+};
+
+type PreviewState =
+  | {
+      kind: "project";
+      anchor: PreviewAnchor;
+      project: SidebarProjectItem;
+      activeCount: number;
+      lastActivity: string | null;
+    }
+  | {
+      kind: "session";
+      anchor: PreviewAnchor;
+      item: SidebarSessionItem;
+      projectName: string | null;
+      working: boolean;
+      needsAnswer: boolean;
+      data: SessionPreviewV1 | null;
+    };
+
+const PREVIEW_DELAY_MS = 450;
+const PREVIEW_CACHE_MS = 30_000;
+
+function anchorFromElement(element: HTMLElement): PreviewAnchor {
+  const rect = element.getBoundingClientRect();
+  return { left: rect.left, right: rect.right, top: rect.top };
+}
+
+function formatPreviewTime(value: string): string {
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return "—";
+  return date.toLocaleString([], {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function previewPosition(anchor: PreviewAnchor): React.CSSProperties {
+  const width = 310;
+  const gap = 10;
+  const viewportWidth =
+    typeof window === "undefined" ? 1200 : window.innerWidth;
+  const viewportHeight =
+    typeof window === "undefined" ? 800 : window.innerHeight;
+  const left =
+    anchor.right + gap + width <= viewportWidth - 8
+      ? anchor.right + gap
+      : Math.max(8, anchor.left - width - gap);
+  return {
+    left,
+    top: Math.max(8, Math.min(anchor.top - 8, viewportHeight - 230)),
+  };
+}
+
+function SidebarPreviewCard({
+  state,
+  labels,
+}: {
+  state: PreviewState;
+  labels: SidebarLabels["tree"];
+}) {
+  const status = (countLabel: string, count: number) =>
+    countLabel.replace("{count}", String(count));
+  const updated = (value: string) =>
+    labels.previewUpdated.replace("{time}", formatPreviewTime(value));
+
+  return createPortal(
+    <aside
+      className="sidebar-preview"
+      role="tooltip"
+      style={previewPosition(state.anchor)}
+      data-kind={state.kind}
+    >
+      {state.kind === "project" ? (
+        <>
+          <header className="sidebar-preview__header">
+            <IconFolder size={16} aria-hidden />
+            <strong>{state.project.name}</strong>
+            {state.project.pinned ? (
+              <span className="sidebar-preview__badge">
+                {labels.previewPinned}
+              </span>
+            ) : null}
+          </header>
+          <div className="sidebar-preview__meta">
+            <span>
+              {status(labels.previewTasks, state.project.sessions.length)}
+            </span>
+            <span>·</span>
+            <span>{status(labels.previewActive, state.activeCount)}</span>
+          </div>
+          <div className="sidebar-preview__path" title={state.project.path}>
+            {state.project.path}
+          </div>
+          {!state.project.trusted ? (
+            <div className="sidebar-preview__warning">
+              {labels.untrusted}
+            </div>
+          ) : null}
+          {state.lastActivity ? (
+            <footer>{updated(state.lastActivity)}</footer>
+          ) : null}
+        </>
+      ) : (
+        <>
+          <header className="sidebar-preview__header">
+            <strong>{state.data?.title || state.item.title}</strong>
+          </header>
+          <div className="sidebar-preview__meta">
+            {state.projectName ? <span>{state.projectName}</span> : null}
+            {state.working ? (
+              <span>{labels.sessionWorking}</span>
+            ) : state.needsAnswer ? (
+              <span>{labels.answerNeeded}</span>
+            ) : null}
+          </div>
+          {state.data?.recentUserSummary ? (
+            <p>{state.data.recentUserSummary}</p>
+          ) : null}
+          {state.data?.recentAssistantSummary ? (
+            <p className="sidebar-preview__assistant">
+              {state.data.recentAssistantSummary}
+            </p>
+          ) : null}
+          {state.data &&
+          !state.data.recentUserSummary &&
+          !state.data.recentAssistantSummary ? (
+            <p className="sidebar-preview__empty">
+              {labels.previewNoSummary}
+            </p>
+          ) : null}
+          {state.data ? (
+            <footer>
+              <span>{updated(state.data.updatedAt)}</span>
+              {state.data.modelId ? <span>{state.data.modelId}</span> : null}
+            </footer>
+          ) : (
+            <div className="sidebar-preview__loading" aria-hidden />
+          )}
+        </>
+      )}
+    </aside>,
+    document.body,
   );
 }
 
@@ -281,6 +462,139 @@ export function SidebarNavigator({
   tree,
   account,
 }: SidebarNavigatorProps) {
+  const [preview, setPreview] = useState<PreviewState | null>(null);
+  const previewTimerRef = useRef<number | null>(null);
+  const previewRequestRef = useRef(0);
+  const previewCacheRef = useRef(
+    new Map<string, { expiresAt: number; data: SessionPreviewV1 }>(),
+  );
+  const previewInflightRef = useRef(
+    new Map<string, Promise<SessionPreviewV1 | null>>(),
+  );
+  const closePreview = useCallback(() => {
+    if (previewTimerRef.current != null) {
+      window.clearTimeout(previewTimerRef.current);
+      previewTimerRef.current = null;
+    }
+    previewRequestRef.current += 1;
+    setPreview(null);
+  }, []);
+  useEffect(() => {
+    if (collapsed) closePreview();
+  }, [closePreview, collapsed]);
+  useEffect(
+    () => () => {
+      if (previewTimerRef.current != null) {
+        window.clearTimeout(previewTimerRef.current);
+      }
+      previewRequestRef.current += 1;
+    },
+    [],
+  );
+  const scheduleProjectPreview = useCallback(
+    (
+      project: SidebarProjectItem,
+      anchor: HTMLElement,
+      immediate: boolean,
+    ) => {
+      closePreview();
+      const show = () => {
+        const activeCount = project.sessions.filter(
+          (session) =>
+            session.id === tree.busySessionId ||
+            tree.pendingAskSessionIds.has(session.id),
+        ).length;
+        const lastActivity =
+          project.sessions
+            .map((session) => session.updatedAt)
+            .sort()
+            .at(-1) ?? null;
+        setPreview({
+          kind: "project",
+          anchor: anchorFromElement(anchor),
+          project,
+          activeCount,
+          lastActivity,
+        });
+      };
+      if (immediate) show();
+      else previewTimerRef.current = window.setTimeout(show, PREVIEW_DELAY_MS);
+    },
+    [closePreview, tree.busySessionId, tree.pendingAskSessionIds],
+  );
+  const scheduleSessionPreview = useCallback(
+    (
+      item: SidebarSessionItem,
+      projectName: string | null,
+      working: boolean,
+      needsAnswer: boolean,
+      anchor: HTMLElement,
+      immediate: boolean,
+    ) => {
+      closePreview();
+      const requestId = previewRequestRef.current;
+      const show = async () => {
+        const anchored = anchorFromElement(anchor);
+        const cached = previewCacheRef.current.get(item.id);
+        if (cached && cached.expiresAt > Date.now()) {
+          setPreview({
+            kind: "session",
+            anchor: anchored,
+            item,
+            projectName,
+            working,
+            needsAnswer,
+            data: cached.data,
+          });
+          return;
+        }
+        setPreview({
+          kind: "session",
+          anchor: anchored,
+          item,
+          projectName,
+          working,
+          needsAnswer,
+          data: null,
+        });
+        let pending = previewInflightRef.current.get(item.id);
+        if (!pending) {
+          pending = tree
+            .loadSessionPreview(item.id)
+            .catch(() => null)
+            .finally(() => previewInflightRef.current.delete(item.id));
+          previewInflightRef.current.set(item.id, pending);
+        }
+        const data = await pending;
+        if (previewRequestRef.current !== requestId) return;
+        if (!data) {
+          setPreview(null);
+          return;
+        }
+        previewCacheRef.current.set(item.id, {
+          expiresAt: Date.now() + PREVIEW_CACHE_MS,
+          data,
+        });
+        setPreview({
+          kind: "session",
+          anchor: anchored,
+          item,
+          projectName,
+          working,
+          needsAnswer,
+          data,
+        });
+      };
+      if (immediate) void show();
+      else {
+        previewTimerRef.current = window.setTimeout(
+          () => void show(),
+          PREVIEW_DELAY_MS,
+        );
+      }
+    },
+    [closePreview, tree],
+  );
   const idPrefix = useId().replaceAll(":", "");
   const projectListId = `${idPrefix}-projects`;
   const historyListId = `${idPrefix}-history`;
@@ -313,6 +627,7 @@ export function SidebarNavigator({
       aria-hidden={collapsed}
       inert={collapsed ? true : undefined}
       data-testid="sidebar-navigator"
+      onScrollCapture={closePreview}
     >
       {dragZone === "sidebar" ? (
         <div className="drop-overlay drop-overlay--project" aria-hidden>
@@ -454,9 +769,10 @@ export function SidebarNavigator({
                       ? " tree-l2--active"
                       : "")
                   }
-                  onContextMenu={(event) =>
-                    tree.onProjectMenu(event, project.id)
-                  }
+                  onContextMenu={(event) => {
+                    closePreview();
+                    tree.onProjectMenu(event, project.id);
+                  }}
                 >
                   <button
                     type="button"
@@ -490,6 +806,22 @@ export function SidebarNavigator({
                       }
                       disabled={!project.trusted}
                       onClick={() => tree.onSelectProject(project.id)}
+                      onMouseEnter={(event) =>
+                        scheduleProjectPreview(
+                          project,
+                          event.currentTarget,
+                          false,
+                        )
+                      }
+                      onMouseLeave={closePreview}
+                      onFocus={(event) =>
+                        scheduleProjectPreview(
+                          project,
+                          event.currentTarget,
+                          true,
+                        )
+                      }
+                      onBlur={closePreview}
                     >
                       <span className="tree-l2__icon" aria-hidden>
                         <IconFolder size={15} />
@@ -513,9 +845,10 @@ export function SidebarNavigator({
                         type="button"
                         className="tree-icon-btn"
                         aria-label={labels.tree.menu}
-                        onClick={(event) =>
+                        onClick={(event) => {
+                          closePreview();
                           tree.onProjectMenu(event, project.id)
-                        }
+                        }}
                       >
                         <IconMore size={14} />
                       </button>
@@ -559,7 +892,21 @@ export function SidebarNavigator({
                             labels={labels.tree}
                             onOpen={tree.onOpenSession}
                             onArchive={tree.onArchiveSession}
-                            onMenu={tree.onSessionMenu}
+                            onMenu={(event, sessionId) => {
+                              closePreview();
+                              tree.onSessionMenu(event, sessionId);
+                            }}
+                            onPreview={(anchor, immediate) =>
+                              scheduleSessionPreview(
+                                item,
+                                project.name,
+                                tree.busySessionId === item.id,
+                                tree.pendingAskSessionIds.has(item.id),
+                                anchor,
+                                immediate,
+                              )
+                            }
+                            onPreviewEnd={closePreview}
                           />
                         )}
                       />
@@ -620,13 +967,30 @@ export function SidebarNavigator({
                   labels={labels.tree}
                   onOpen={tree.onOpenSession}
                   onArchive={tree.onArchiveSession}
-                  onMenu={tree.onSessionMenu}
+                  onMenu={(event, sessionId) => {
+                    closePreview();
+                    tree.onSessionMenu(event, sessionId);
+                  }}
+                  onPreview={(anchor, immediate) =>
+                    scheduleSessionPreview(
+                      item,
+                      null,
+                      tree.busySessionId === item.id,
+                      tree.pendingAskSessionIds.has(item.id),
+                      anchor,
+                      immediate,
+                    )
+                  }
+                  onPreviewEnd={closePreview}
                 />
               )}
             />
           ) : null}
         </div>
       </OverlayScroll>
+      {preview && typeof document !== "undefined" ? (
+        <SidebarPreviewCard state={preview} labels={labels.tree} />
+      ) : null}
 
       <UserMenu
         open={account.open}
@@ -662,7 +1026,10 @@ export function SidebarNavigator({
             aria-haspopup="menu"
             aria-expanded={account.open}
             aria-label={labels.account.trigger}
-            onClick={() => account.onToggle(!account.open)}
+            onClick={() => {
+              closePreview();
+              account.onToggle(!account.open);
+            }}
           >
             <div className="user-avatar" aria-hidden>
               {accountInitial}

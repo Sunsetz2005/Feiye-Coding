@@ -27,7 +27,9 @@
 - `src/components/ContextUsageChip.tsx`
 - `src/components/FloatingSurfaceProvider.tsx`
 
-`SidebarNavigator` 拥有侧栏渲染、项目/任务披露语义、当前项语义、虚拟任务行和账户入口；数据加载、菜单动作与 Host 协调仍由 `App.tsx` 提供。`WorkbenchShell` 拥有三栏布局根节点，并在侧栏或资源面板关闭后把焦点恢复到对应顶部栏按钮。会话中栏在面板切换时保持挂载，因此原生滚动位置不被重建。不要把尚不存在的 `ConversationSurface` 或 `ComposerDock` 当成当前模块边界。
+`SidebarNavigator` 拥有侧栏渲染、项目/任务披露语义、当前项语义、虚拟任务行、只读悬停预览和账户入口；数据加载、菜单动作与 Host 协调仍由 `App.tsx` 提供。任务预览停留 450ms 后调用 `session_preview`，以 30 秒短缓存合并同一 session 的并发请求，并丢弃移出、滚动、折叠、菜单打开或虚拟行卸载后的过期响应。键盘聚焦跳过停留延迟，但预览自身不可交互、不夺取焦点。Host 只返回最近 `user` 与 `assistant` 的可见正文摘要；思考、附件、工具输出和完整 journal 不进入 DTO。项目预览使用已加载的项目与 session 元数据，Git 摘要完成惰性能力前不显示。
+
+`WorkbenchShell` 拥有三栏布局根节点，并在侧栏或资源面板关闭后把焦点恢复到对应顶部栏按钮。会话中栏在面板切换时保持挂载，因此原生滚动位置不被重建。不要把尚不存在的 `ConversationSurface` 或 `ComposerDock` 当成当前模块边界。
 
 ## 2. 三层输入器
 

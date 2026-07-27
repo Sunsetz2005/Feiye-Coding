@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -18,7 +19,11 @@ import {
   vi,
 } from "vitest";
 import { SidebarNavigator } from "./SidebarNavigator";
-import type { AccountStatus, CustomProvider } from "@/lib/api";
+import type {
+  AccountStatus,
+  CustomProvider,
+  SessionPreviewV1,
+} from "@/lib/api";
 
 beforeAll(() => {
   vi.stubGlobal(
@@ -35,7 +40,10 @@ afterAll(() => {
   vi.unstubAllGlobals();
 });
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+});
 
 function createProps(
   overrides: Partial<React.ComponentProps<typeof SidebarNavigator>> = {},
@@ -71,6 +79,11 @@ function createProps(
         scheduledTag: "Scheduled task",
         answerNeeded: "Answer needed",
         sessionWorking: "Working",
+        previewTasks: "{count} tasks",
+        previewActive: "{count} active",
+        previewUpdated: "Updated {time}",
+        previewPinned: "Pinned",
+        previewNoSummary: "No visible messages",
         unarchive: "Unarchive",
         archive: "Archive",
       },
@@ -121,6 +134,7 @@ function createProps(
             {
               id: "session-1",
               title: "Refactor sidebar",
+              updatedAt: "2026-07-27T08:30:00Z",
               archived: false,
               scheduled: false,
             },
@@ -138,6 +152,21 @@ function createProps(
       onOpenSession: vi.fn(),
       onArchiveSession: vi.fn(),
       onSessionMenu: vi.fn(),
+      loadSessionPreview: vi.fn(
+        async (sessionId: string): Promise<SessionPreviewV1> => ({
+          version: 1,
+          sessionId,
+          projectId: "project-1",
+          title: "Refactor sidebar",
+          updatedAt: "2026-07-27T08:30:00Z",
+          modelId: "sunsetz-4.5",
+          contextUsage: null,
+          archived: false,
+          scheduled: false,
+          recentUserSummary: "Please refine the sidebar preview.",
+          recentAssistantSummary: "Added a bounded, read-only preview.",
+        }),
+      ),
     },
     account: {
       open: false,
@@ -423,6 +452,7 @@ describe("SidebarNavigator", () => {
     const scheduledArchived = {
       id: "session-special",
       title: "",
+      updatedAt: "2026-07-27T08:30:00Z",
       archived: true,
       scheduled: true,
     };
@@ -491,6 +521,7 @@ describe("SidebarNavigator", () => {
           {
             id: "orphan-1",
             title: "Loose task",
+            updatedAt: "2026-07-27T08:30:00Z",
             archived: false,
             scheduled: false,
           },
@@ -566,5 +597,72 @@ describe("SidebarNavigator", () => {
     });
     rerender(<SidebarNavigator {...customRouteProps} />);
     expect(screen.queryByText("58%")).toBeNull();
+  });
+
+  it("delays task previews, caches results, and closes on leave", async () => {
+    vi.useFakeTimers();
+    const props = createProps();
+    render(<SidebarNavigator {...props} />);
+    const row = screen
+      .getByRole("button", { name: "Refactor sidebar" })
+      .closest<HTMLElement>(".tree-l3")!;
+
+    fireEvent.mouseEnter(row);
+    await act(async () => {
+      vi.advanceTimersByTime(449);
+    });
+    expect(props.tree.loadSessionPreview).not.toHaveBeenCalled();
+
+    await act(async () => {
+      vi.advanceTimersByTime(1);
+      await Promise.resolve();
+    });
+    expect(props.tree.loadSessionPreview).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("tooltip").textContent).toContain(
+      "bounded, read-only preview",
+    );
+
+    fireEvent.mouseLeave(row);
+    expect(screen.queryByRole("tooltip")).toBeNull();
+    fireEvent.mouseEnter(row);
+    await act(async () => {
+      vi.advanceTimersByTime(450);
+    });
+    expect(props.tree.loadSessionPreview).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("tooltip")).toBeTruthy();
+
+    fireEvent.click(within(row).getByRole("button", { name: "More" }));
+    expect(screen.queryByRole("tooltip")).toBeNull();
+    expect(props.tree.onSessionMenu).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows project facts on keyboard focus without a Host request", () => {
+    const props = createProps();
+    render(<SidebarNavigator {...props} />);
+
+    fireEvent.focus(screen.getByRole("button", { name: "Sunsetz" }));
+    const preview = screen.getByRole("tooltip");
+    expect(preview.textContent).toContain("1 tasks");
+    expect(preview.textContent).toContain("/tmp/sunsetz");
+    expect(props.tree.loadSessionPreview).not.toHaveBeenCalled();
+  });
+
+  it("does not leave a loading card when the Host has no preview", async () => {
+    const base = createProps();
+    const props = createProps({
+      tree: {
+        ...base.tree,
+        loadSessionPreview: vi.fn(async () => null),
+      },
+    });
+    render(<SidebarNavigator {...props} />);
+
+    await act(async () => {
+      fireEvent.focus(
+        screen.getByRole("button", { name: "Refactor sidebar" }),
+      );
+      await Promise.resolve();
+    });
+    expect(screen.queryByRole("tooltip")).toBeNull();
   });
 });

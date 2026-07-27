@@ -2274,6 +2274,7 @@ export default function App() {
           .map((item) => ({
             id: item.id,
             title: item.title,
+            updatedAt: item.updatedAt,
             archived: !!item.archived,
             scheduled: !!item.scheduled,
           })),
@@ -2293,6 +2294,7 @@ export default function App() {
         .map((item) => ({
           id: item.id,
           title: item.title,
+          updatedAt: item.updatedAt,
           archived: !!item.archived,
           scheduled: !!item.scheduled,
         })),
@@ -6721,6 +6723,11 @@ export default function App() {
               scheduledTag: tr("automations.msgTag"),
               answerNeeded: tr("sidebar.answerNeeded"),
               sessionWorking: tr("sidebar.sessionWorking"),
+              previewTasks: tr("sidebar.previewTasks"),
+              previewActive: tr("sidebar.previewActive"),
+              previewUpdated: tr("sidebar.previewUpdated"),
+              previewPinned: tr("sidebar.previewPinned"),
+              previewNoSummary: tr("sidebar.previewNoSummary"),
               unarchive: tr("sidebar.unarchive"),
               archive: tr("sidebar.archive"),
             },
@@ -6804,6 +6811,7 @@ export default function App() {
               const row = sessions.find((item) => item.id === sessionId);
               if (row) openSessionMenu(event, row);
             },
+            loadSessionPreview: api.sessionPreview,
           }}
           account={{
             open: showUserMenu,

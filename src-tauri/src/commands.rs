@@ -394,6 +394,12 @@ pub async fn sessions_list() -> Result<Vec<SessionMeta>, String> {
     Ok(store::load_sessions_index())
 }
 
+/// Bounded, redacted sidebar preview. Never returns thoughts or tool rows.
+#[tauri::command]
+pub async fn session_preview(id: String) -> Result<store::SessionPreviewV1, String> {
+    store::session_preview(&id)
+}
+
 /// List Sunsetz Runtime sessions under GROK_HOME (shared-mode discovery, E03).
 #[tauri::command]
 pub async fn cli_sessions_list() -> Result<Vec<crate::cli_sessions::CliSessionSummary>, String> {

@@ -202,6 +202,7 @@ pub fn run() {
             commands::project_reveal,
             commands::project_archive_sessions,
             commands::sessions_list,
+            commands::session_preview,
             commands::cli_sessions_list,
             commands::cli_session_import,
             commands::cli_sessions_import_all,

@@ -285,6 +285,73 @@ pub struct ChatMessageStored {
     pub marker: Option<String>,
 }
 
+const SESSION_PREVIEW_TEXT_LIMIT: usize = 280;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionPreviewV1 {
+    pub version: u8,
+    pub session_id: String,
+    pub project_id: Option<String>,
+    pub title: String,
+    pub updated_at: DateTime<Utc>,
+    pub model_id: Option<String>,
+    pub context_usage: Option<SessionTokenUsage>,
+    pub archived: bool,
+    pub scheduled: bool,
+    pub recent_user_summary: Option<String>,
+    pub recent_assistant_summary: Option<String>,
+}
+
+fn bounded_visible_summary(input: &str) -> Option<String> {
+    let normalized = input.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty() {
+        return None;
+    }
+    let redacted = redact_text(&normalized);
+    let mut chars = redacted.trim().chars();
+    let mut value = chars
+        .by_ref()
+        .take(SESSION_PREVIEW_TEXT_LIMIT)
+        .collect::<String>();
+    if chars.next().is_some() {
+        value.push('…');
+    }
+    (!value.is_empty()).then_some(value)
+}
+
+pub fn session_preview(id: &str) -> Result<SessionPreviewV1, String> {
+    let meta = load_sessions_index()
+        .into_iter()
+        .find(|session| session.id == id)
+        .ok_or_else(|| "session not found".to_string())?;
+    let messages = load_messages(id);
+    let recent_user_summary = messages
+        .iter()
+        .rev()
+        .find(|message| message.role == "user")
+        .and_then(|message| bounded_visible_summary(&message.content));
+    let recent_assistant_summary = messages
+        .iter()
+        .rev()
+        .find(|message| message.role == "assistant")
+        .and_then(|message| bounded_visible_summary(&message.content));
+
+    Ok(SessionPreviewV1 {
+        version: 1,
+        session_id: meta.id,
+        project_id: meta.project_id,
+        title: meta.title,
+        updated_at: meta.updated_at,
+        model_id: meta.model_id,
+        context_usage: meta.context_usage,
+        archived: meta.archived,
+        scheduled: meta.scheduled,
+        recent_user_summary,
+        recent_assistant_summary,
+    })
+}
+
 fn read_json<T: for<'de> Deserialize<'de> + Default>(path: &PathBuf) -> T {
     match fs::read_to_string(path) {
         Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
@@ -1249,6 +1316,20 @@ mod tests {
         assert!(!r.contains("sk-abcdefghijklmnopqrstuvwxyz123456") || r.contains("REDACTED") || r.contains("sk-"));
         // at least function is callable
         assert!(!r.is_empty());
+    }
+
+    #[test]
+    fn session_preview_summary_is_visible_bounded_and_collapsed() {
+        let long = format!("  first\n\nsecond   {}  ", "字".repeat(300));
+        let summary = bounded_visible_summary(&long).expect("summary");
+        assert!(summary.starts_with("first second"));
+        assert!(summary.chars().count() <= SESSION_PREVIEW_TEXT_LIMIT + 1);
+        assert!(summary.ends_with('…'));
+    }
+
+    #[test]
+    fn session_preview_summary_rejects_empty_text() {
+        assert_eq!(bounded_visible_summary(" \n\t "), None);
     }
 
     #[test]
