@@ -48,6 +48,8 @@ pnpm setup:cross   # rust targets + (macOS) cargo-xwin / nsis / llvm 检查
 - [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)（多数 Win10/11 已带）
 - Rust MSVC toolchain：`rustup default stable-x86_64-pc-windows-msvc`
 
+CI 的 `windows-native-smoke` 作业使用 `tauri.windows-smoke.conf.json` 构建测试专用调试窗口，再由 `scripts/windows-native-smoke.ps1` 和 `scripts/windows-native-webview-smoke.mjs` 检查系统工作区边界、面板卸载、焦点恢复与键盘路径。测试配置使用隔离的数据目录并启用 WebView2 调试参数，不参与发行构建。作业会上传原生窗口、资源面板和 Host 日志；它是自动诊断，不替代 Windows 实机缩放与辅助功能手测。
+
 ### Linux（含 Arch / Ubuntu / Debian）
 
 ```bash

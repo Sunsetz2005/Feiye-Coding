@@ -175,5 +175,6 @@ Host 校验名称、frontmatter、相对路径、体积、路径穿越、符号�
 7. `AskUserDock` 的逐题、跳过、取消和失败恢复测试。
 8. Rust 的 ask_user、附件、Finder、技能保存、能力表和 compact phase golden 测试。
 9. `pnpm test:visual` 的空工作台、资源面板、焦点恢复和 200% 基本几何矩阵。
+10. Windows 窗口改动需运行 `scripts/windows-native-smoke.ps1` 与 `scripts/windows-native-webview-smoke.mjs` 的 CI 原生诊断，并检查上传的窗口截图；该诊断不替代实机缩放和辅助功能验收。
 
 若接口或行为变化，同步更新本文、`session-continuity.md` 和 `docs/SPIKE-ACP.md`。
