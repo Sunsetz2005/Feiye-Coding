@@ -107,6 +107,37 @@ jobs:
       - name: cargo test
         working-directory: src-tauri
         run: cargo test
+      - uses: pnpm/action-setup@v4
+        if: matrix.os == 'windows-latest'
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        if: matrix.os == 'windows-latest'
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Install frontend dependencies
+        if: matrix.os == 'windows-latest'
+        run: pnpm install --frozen-lockfile
+      - name: Build Windows native smoke application
+        if: matrix.os == 'windows-latest'
+        run: |
+          pnpm build:ui
+          cargo build --manifest-path src-tauri/Cargo.toml
+      - name: Run Windows native workbench smoke
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          ./scripts/windows-native-smoke.ps1 `
+            -Executable ./src-tauri/target/debug/sunsetz.exe `
+            -OutputDirectory "${{ runner.temp }}/sunsetz-native-smoke-artifacts"
+      - name: Upload Windows native smoke diagnostics
+        if: matrix.os == 'windows-latest' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-native-smoke
+          path: ${{ runner.temp }}/sunsetz-native-smoke-artifacts
+          if-no-files-found: warn
 
   rust-coverage:
     runs-on: ubuntu-latest
