@@ -43,6 +43,7 @@ import {
   IconLink as TbLink,
   IconList as TbList,
   IconListTree as TbListTree,
+  IconLogout as TbLogout,
   IconMarkdown as TbMarkdown,
   IconMessage as TbMessage,
   IconMicrophone as TbMicrophone,
@@ -272,6 +273,7 @@ export const IconArrowsMinimize = wrap(TbArrowsMinimize);
 export const IconCircleDashed = wrap(TbCircleDashed);
 export const IconPlug = wrap(TbPlug);
 export const IconActivity = wrap(TbActivity);
+export const IconLogout = wrap(TbLogout);
 export const IconSparkles = wrap(TbSparkles);
 export const IconBox = wrap(TbBox);
 export const IconPuzzle = wrap(TbPuzzle);

@@ -6743,6 +6743,7 @@ export default function App() {
               login: tr("account.login"),
               logout: tr("account.logout"),
               remaining: tr("account.quotaRemaining"),
+              usage: tr("account.usageSummary"),
               customProvider: tr("prov.customProvider"),
               resetsAt: tr("account.resetsAt"),
             },
@@ -6911,6 +6912,11 @@ export default function App() {
                 scheduled={scheduled}
                 scheduledLabel={tr("automations.msgTag")}
                 sessionMenuLabel={tr("session.menu")}
+                projectContext={!!currentSession?.projectId}
+                sessionMenuOpen={
+                  ctxMenu?.kind === "session" &&
+                  ctxMenu.id === currentSession?.id
+                }
                 onOpenSessionMenu={
                   !automationTitle && currentSession
                     ? (event) => openSessionMenu(event, currentSession)
@@ -8767,6 +8773,7 @@ export default function App() {
                 id: "export-md",
                 label: tr("session.exportMd"),
                 icon: <IconCopy size={16} />,
+                separatorBefore: true,
                 onClick: () => {
                   void exportActiveSessionMd({
                     id: s.id,
@@ -8787,6 +8794,7 @@ export default function App() {
                 id: "fork",
                 label: tr("session.fork"),
                 icon: <IconFork size={16} />,
+                separatorBefore: true,
                 onClick: () => confirmForkSession(s),
               },
               {
@@ -8822,7 +8830,6 @@ export default function App() {
                 label: tr("session.delete"),
                 icon: <IconTrash size={16} />,
                 danger: true,
-                separatorBefore: true,
                 onClick: () => deleteSessionConfirm(s),
               },
             ];
@@ -8837,9 +8844,9 @@ export default function App() {
             restoreFocusTo={ctxMenu?.restoreFocusTo}
             onClose={() => setCtxMenu(null)}
             items={items}
-            estimatedHeight={
-              ctxMenu?.kind === "project-policy" ? 280 : 240
-            }
+            estimatedHeight={ctxMenu?.kind === "project-policy" ? 280 : ctxMenu?.kind === "session" ? 330 : 240}
+            estimatedWidth={ctxMenu?.kind === "session" ? 236 : 200}
+            className={ctxMenu?.kind === "session" ? "context-menu--session" : undefined}
           />
         );
       })()}

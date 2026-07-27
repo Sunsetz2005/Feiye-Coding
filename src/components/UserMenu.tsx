@@ -2,9 +2,11 @@
  * Personal center — compact upward menu: account card · settings · theme · logout.
  */
 
-import { useRef, type ReactNode } from "react";
+import { useRef, type CSSProperties, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import {
+  IconActivity,
+  IconLogout,
   IconSettings,
   IconThemeMoon,
   IconThemeSun,
@@ -35,6 +37,7 @@ export interface UserMenuProps {
     login: string;
     logout: string;
     remaining: string;
+    usage: string;
     customProvider: string;
     /** Prefix for quota refresh time, e.g. 重置 / Resets */
     resetsAt: string;
@@ -111,7 +114,6 @@ export function UserMenu({
       : "G";
   const channel = account?.channel ?? "none";
   const billing = account?.billing;
-  const usedPct = billing ? usagePercent(billing) : null;
   const remaining = remainingPercent(account);
   const resetTime = formatQuotaResetTime(billing?.resetsAt);
   const tier = billing
@@ -145,11 +147,6 @@ export function UserMenu({
                 <div className="user-menu__account-text">
                   <div className="user-menu__account-name-row">
                     <div className="user-menu__account-name">{name}</div>
-                    {signedIn && resetTime ? (
-                      <span className="user-menu__quota-reset">
-                        {labels.resetsAt} {resetTime}
-                      </span>
-                    ) : null}
                   </div>
                   {isCustomProvider ? (
                     <div className="user-menu__account-sub">
@@ -161,40 +158,47 @@ export function UserMenu({
                       {labels.signedOut}
                     </div>
                   ) : (
-                    <div className="user-menu__quota">
-                      <div className="user-menu__quota-row">
-                        <span className="user-menu__tier">{tier}</span>
-                        <span className="user-menu__remain">
-                          {remaining != null
-                            ? `${remaining.toFixed(0)}% ${labels.remaining}`
-                            : "—"}
-                        </span>
-                      </div>
-                      {remaining != null && (
-                        <div
-                          className="account-quota-bar account-quota-bar--sm"
-                          aria-hidden
-                        >
-                          <div
-                            className={
-                              "account-quota-bar__fill" +
-                              (usedPct != null && usedPct >= 90
-                                ? " is-danger"
-                                : usedPct != null && usedPct >= 70
-                                  ? " is-warn"
-                                  : "")
-                            }
-                            style={{
-                              width: `${Math.min(100, usedPct ?? 0)}%`,
-                            }}
-                          />
-                        </div>
-                      )}
-                    </div>
+                    <div className="user-menu__account-sub">{tier}</div>
                   )}
                 </div>
               </div>
             </button>
+
+            {signedIn ? (
+              <button
+                type="button"
+                className="user-menu__item user-menu__usage"
+                role="menuitem"
+                onClick={() => {
+                  onClose();
+                  onAccountSettings();
+                }}
+              >
+                <IconActivity size={16} />
+                <span>
+                  {labels.usage}
+                  <em>
+                    {remaining != null
+                      ? `${remaining.toFixed(0)}% ${labels.remaining}`
+                      : "—"}
+                    {resetTime
+                      ? ` · ${labels.resetsAt} ${resetTime}`
+                      : ""}
+                  </em>
+                </span>
+                {remaining != null ? (
+                  <span
+                    className="user-menu__usage-meter"
+                    aria-hidden
+                    style={
+                      { "--remaining": `${remaining}%` } as CSSProperties
+                    }
+                  />
+                ) : null}
+              </button>
+            ) : null}
+
+            <div className="user-menu__separator" role="separator" />
 
             <button
               type="button"
@@ -241,6 +245,7 @@ export function UserMenu({
                   onLogout();
                 }}
               >
+                <IconLogout size={16} />
                 <span>{labels.logout}</span>
               </button>
             ) : (

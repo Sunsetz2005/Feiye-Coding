@@ -99,6 +99,7 @@ function createProps(
         login: "Log in",
         logout: "Log out",
         remaining: "Remaining",
+        usage: "Usage",
         customProvider: "Provider",
         resetsAt: "Resets",
       },
@@ -597,6 +598,82 @@ describe("SidebarNavigator", () => {
     });
     rerender(<SidebarNavigator {...customRouteProps} />);
     expect(screen.queryByText("58%")).toBeNull();
+  });
+
+  it("shows only real account, usage, appearance, and auth actions", async () => {
+    const user = userEvent.setup();
+    const base = createProps();
+    const props = createProps({
+      account: {
+        ...base.account,
+        open: true,
+        account: createAccountStatus(),
+      },
+    });
+    render(<SidebarNavigator {...props} />);
+
+    expect(await screen.findByRole("menu")).toBeTruthy();
+    expect(screen.getByText("Usage")).toBeTruthy();
+    expect(screen.getByText(/58% Remaining/)).toBeTruthy();
+    expect(screen.queryByText(/pet/i)).toBeNull();
+    await user.click(screen.getByRole("menuitem", { name: /Usage/ }));
+    expect(props.account.onClose).toHaveBeenCalledTimes(1);
+    expect(props.account.onAccountSettings).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps unavailable usage and provider account states truthful", async () => {
+    const base = createProps();
+    const noUsage = createAccountStatus({
+      billing: {
+        ...createAccountStatus().billing,
+        remainingPercent: null,
+        creditUsagePercent: null,
+        resetsAt: null,
+      },
+    });
+    const noUsageProps = createProps({
+      account: {
+        ...base.account,
+        open: true,
+        account: noUsage,
+      },
+    });
+    const { rerender } = render(<SidebarNavigator {...noUsageProps} />);
+
+    expect(await screen.findByRole("menuitem", { name: /Usage/ })).toBeTruthy();
+    expect(screen.getByText("—")).toBeTruthy();
+
+    const providerProps = createProps({
+      account: {
+        ...base.account,
+        open: true,
+        activeProvider: {
+          id: "relay",
+          name: "Coral Relay",
+          model: "coral-1",
+          baseUrl: "https://example.invalid/v1",
+          hasApiKey: true,
+          apiBackend: "responses",
+          isDefault: true,
+        },
+      },
+    });
+    rerender(<SidebarNavigator {...providerProps} />);
+    expect(screen.getAllByText("Coral Relay")).toHaveLength(2);
+    expect(screen.getByText("Provider / coral-1")).toBeTruthy();
+    expect(screen.queryByText("Usage")).toBeNull();
+
+    const signedOutProps = createProps({
+      account: {
+        ...base.account,
+        open: true,
+        theme: "light",
+      },
+    });
+    rerender(<SidebarNavigator {...signedOutProps} />);
+    expect(screen.getByText("Signed out")).toBeTruthy();
+    expect(screen.getByRole("menuitem", { name: "Log in" })).toBeTruthy();
+    expect(screen.getByText("Dark")).toBeTruthy();
   });
 
   it("delays task previews, caches results, and closes on leave", async () => {

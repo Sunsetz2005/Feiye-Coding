@@ -1,6 +1,16 @@
 import { createRoot } from "react-dom/client";
+import { ContextMenu } from "@/components/ContextMenu";
+import {
+  IconArchive,
+  IconCopy,
+  IconFork,
+  IconRename,
+  IconRewind,
+  IconTrash,
+} from "@/components/icons";
 import { SidebarNavigator } from "@/components/SidebarNavigator";
-import type { SessionPreviewV1 } from "@/lib/api";
+import { WorkbenchTopbar } from "@/components/WorkbenchTopbar";
+import type { AccountStatus, SessionPreviewV1 } from "@/lib/api";
 import "@/styles/tokens.css";
 import "@/styles/tailwind.css";
 import "@/styles/app.css";
@@ -8,6 +18,59 @@ import "@/styles/apple.css";
 import "@/styles/workbench.css";
 
 const noop = () => {};
+const fixtureQuery = new URLSearchParams(window.location.search);
+const showAccount = fixtureQuery.has("account");
+const showSessionMenu = fixtureQuery.has("session-menu");
+
+const account: AccountStatus = {
+  profile: {
+    signedIn: true,
+    authMode: "oauth",
+    email: "leaf@example.com",
+    displayName: "飞叶",
+    userId: "visual-user",
+    teamId: null,
+    principalType: null,
+    expiresAt: null,
+    expired: false,
+    hasRefresh: true,
+    oidcIssuer: null,
+  },
+  hasOfficialKey: false,
+  hasRelayKey: false,
+  relayBaseUrl: null,
+  cliAuthPresent: true,
+  cliFound: true,
+  cliPath: "/usr/local/bin/sunsetz",
+  channel: "official_oauth",
+  billing: {
+    available: true,
+    source: "visual",
+    message: null,
+    subscriptionTier: "Sunsetz Pro",
+    creditUsagePercent: 30,
+    remainingPercent: 70,
+    monthlyLimit: null,
+    includedUsed: null,
+    totalUsed: null,
+    prepaidBalance: null,
+    onDemandEnabled: null,
+    onDemandCap: null,
+    onDemandUsed: null,
+    billingPeriodStart: null,
+    billingPeriodEnd: null,
+    resetsAt: "2026-08-02T00:00:00Z",
+    isUnifiedBillingUser: true,
+    products: [],
+    manageUrl: "",
+    subscribeUrl: "",
+    fetchedAt: null,
+  },
+  heatmap: [],
+  callLogs: [],
+  usageManageUrl: "",
+  subscribeUrl: "",
+};
 
 const sessionPreview: SessionPreviewV1 = {
   version: 1,
@@ -79,6 +142,7 @@ createRoot(document.getElementById("root")!).render(
             login: "登录",
             logout: "退出",
             remaining: "剩余",
+            usage: "剩余用量",
             customProvider: "提供方",
             resetsAt: "重置时间",
           },
@@ -142,9 +206,9 @@ createRoot(document.getElementById("root")!).render(
           loadSessionPreview: async () => sessionPreview,
         }}
         account={{
-          open: false,
+          open: showAccount,
           theme: "dark",
-          account: null,
+          account: showAccount ? account : null,
           activeProvider: null,
           busy: false,
           customRouteActive: false,
@@ -157,7 +221,98 @@ createRoot(document.getElementById("root")!).render(
           onLogout: noop,
         }}
       />
-      <main className="main" aria-label="预览验收画布" />
+      <main className="main" aria-label="预览验收画布">
+        {showSessionMenu ? (
+          <>
+            <WorkbenchTopbar
+              title="优化工作台菜单"
+              projectContext
+              scheduledLabel="已安排"
+              sessionMenuLabel="任务菜单"
+              sessionMenuOpen
+              onOpenSessionMenu={noop}
+              sidebarCollapsed={false}
+              showSidebarLabel="显示侧栏"
+              onShowSidebar={noop}
+              asideCollapsed
+              showAsideLabel="显示资源"
+              hideAsideLabel="隐藏资源"
+              onToggleAside={noop}
+            />
+            <ContextMenu
+              open
+              x={0}
+              y={0}
+              anchorRect={{
+                left: 389,
+                right: 421,
+                top: 8,
+                bottom: 42,
+                width: 32,
+                height: 34,
+              }}
+              estimatedWidth={236}
+              estimatedHeight={330}
+              className="context-menu--session"
+              onClose={noop}
+              items={[
+                {
+                  id: "rename",
+                  label: "重命名任务",
+                  icon: <IconRename size={16} />,
+                  onClick: noop,
+                },
+                {
+                  id: "export",
+                  label: "导出 Markdown",
+                  icon: <IconCopy size={16} />,
+                  separatorBefore: true,
+                  onClick: noop,
+                },
+                {
+                  id: "diagnostic",
+                  label: "导出诊断包…",
+                  icon: <IconCopy size={16} />,
+                  onClick: noop,
+                },
+                {
+                  id: "fork",
+                  label: "分叉任务",
+                  icon: <IconFork size={16} />,
+                  separatorBefore: true,
+                  onClick: noop,
+                },
+                {
+                  id: "rewind",
+                  label: "回退时间线",
+                  icon: <IconRewind size={16} />,
+                  onClick: noop,
+                },
+                {
+                  id: "copy",
+                  label: "复制任务 ID",
+                  icon: <IconCopy size={16} />,
+                  onClick: noop,
+                },
+                {
+                  id: "archive",
+                  label: "归档任务",
+                  icon: <IconArchive size={16} />,
+                  separatorBefore: true,
+                  onClick: noop,
+                },
+                {
+                  id: "delete",
+                  label: "删除任务",
+                  icon: <IconTrash size={16} />,
+                  danger: true,
+                  onClick: noop,
+                },
+              ]}
+            />
+          </>
+        ) : null}
+      </main>
     </div>
   </div>,
 );

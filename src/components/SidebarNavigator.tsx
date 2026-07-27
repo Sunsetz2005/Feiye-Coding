@@ -112,6 +112,7 @@ interface SidebarLabels {
     login: string;
     logout: string;
     remaining: string;
+    usage: string;
     customProvider: string;
     resetsAt: string;
   };
@@ -1010,6 +1011,7 @@ export function SidebarNavigator({
           login: labels.account.login,
           logout: labels.account.logout,
           remaining: labels.account.remaining,
+          usage: labels.account.usage,
           customProvider: labels.account.customProvider,
           resetsAt: labels.account.resetsAt,
         }}

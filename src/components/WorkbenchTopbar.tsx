@@ -4,6 +4,7 @@ import type {
 } from "react";
 import {
   IconClock,
+  IconFolder,
   IconMore,
   IconPanel,
   IconPanelRight,
@@ -17,6 +18,8 @@ export interface WorkbenchTopbarProps {
   scheduled?: boolean;
   scheduledLabel: string;
   sessionMenuLabel: string;
+  projectContext?: boolean;
+  sessionMenuOpen?: boolean;
   onOpenSessionMenu?: (event: ReactMouseEvent<HTMLButtonElement>) => void;
   sidebarCollapsed: boolean;
   showSidebarLabel: string;
@@ -44,6 +47,8 @@ export function WorkbenchTopbar({
   scheduled = false,
   scheduledLabel,
   sessionMenuLabel,
+  projectContext = false,
+  sessionMenuOpen = false,
   onOpenSessionMenu,
   sidebarCollapsed,
   showSidebarLabel,
@@ -94,6 +99,10 @@ export function WorkbenchTopbar({
           >
             <IconClock size={16} />
           </span>
+        ) : projectContext ? (
+          <span className="main__title-icon" aria-hidden>
+            <IconFolder size={16} />
+          </span>
         ) : null}
 
         {automationTitle ? (
@@ -114,6 +123,9 @@ export function WorkbenchTopbar({
               type="button"
               className="chrome-btn main__title-menu"
               aria-label={sessionMenuLabel}
+              aria-haspopup="menu"
+              aria-expanded={sessionMenuOpen}
+              data-open={sessionMenuOpen ? "true" : undefined}
               onClick={onOpenSessionMenu}
             >
               <IconMore size={16} />

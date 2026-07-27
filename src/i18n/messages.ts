@@ -51,6 +51,7 @@ const en = {
   "user.theme": "Theme",
   "user.themeLight": "Switch to light",
   "user.themeDark": "Switch to dark",
+  "account.usageSummary": "Usage",
 
   // Project / session actions
   "project.pin": "Pin project",
@@ -1305,6 +1306,7 @@ const zh: Record<MessageKey, string> = {
   "user.theme": "主题",
   "user.themeLight": "切换到浅色",
   "user.themeDark": "切换到深色",
+  "account.usageSummary": "剩余用量",
 
   "project.pin": "置顶项目",
   "project.unpin": "取消置顶",

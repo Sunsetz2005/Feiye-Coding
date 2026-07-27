@@ -32,14 +32,21 @@ describe("WorkbenchTopbar", () => {
   it("renders the current task and exposes only real task actions", async () => {
     const user = userEvent.setup();
     const onOpenSessionMenu = vi.fn();
-    renderTopbar({ scheduled: true, onOpenSessionMenu });
+    renderTopbar({
+      projectContext: true,
+      sessionMenuOpen: true,
+      onOpenSessionMenu,
+    });
 
     expect(
       screen.getByRole("heading", { name: "Refactor workbench" }),
     ).toBeTruthy();
-    expect(screen.getByLabelText("Scheduled")).toBeTruthy();
+    expect(document.querySelector(".main__title-icon")).toBeTruthy();
 
-    await user.click(screen.getByRole("button", { name: "Session menu" }));
+    const menuButton = screen.getByRole("button", { name: "Session menu" });
+    expect(menuButton.getAttribute("aria-haspopup")).toBe("menu");
+    expect(menuButton.getAttribute("aria-expanded")).toBe("true");
+    await user.click(menuButton);
     expect(onOpenSessionMenu).toHaveBeenCalledTimes(1);
   });
 

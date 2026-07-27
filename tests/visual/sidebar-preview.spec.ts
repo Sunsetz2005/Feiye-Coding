@@ -54,3 +54,61 @@ test("project preview is available from keyboard focus", async ({ page }) => {
     maxDiffPixels: 100,
   });
 });
+
+test("account menu exposes real usage without unsupported entries", async ({
+  page,
+}) => {
+  await page.goto("/tests/visual/fixtures/sidebar-preview.html?account=1");
+
+  const menu = page.getByRole("menu");
+  await expect(menu).toBeVisible();
+  await expect(menu).toContainText("剩余用量");
+  await expect(menu).toContainText("70% 剩余");
+  await expect(menu).not.toContainText("宠物");
+
+  const geometry = await menu.evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    return {
+      left: rect.left,
+      right: rect.right,
+      top: rect.top,
+      bottom: rect.bottom,
+      viewportWidth: window.innerWidth,
+      viewportHeight: window.innerHeight,
+    };
+  });
+  expect(geometry.left).toBeGreaterThanOrEqual(8);
+  expect(geometry.right).toBeLessThanOrEqual(geometry.viewportWidth - 8);
+  expect(geometry.top).toBeGreaterThanOrEqual(8);
+  expect(geometry.bottom).toBeLessThanOrEqual(geometry.viewportHeight - 8);
+
+  await expect(page).toHaveScreenshot("account-menu.png", {
+    animations: "disabled",
+    caret: "hide",
+    fullPage: false,
+    maxDiffPixels: 100,
+  });
+});
+
+test("top task menu is anchored, grouped, and capability honest", async ({
+  page,
+}) => {
+  await page.goto("/tests/visual/fixtures/sidebar-preview.html?session-menu=1");
+
+  const menu = page.getByRole("menu");
+  await expect(menu).toBeVisible();
+  await expect(menu.getByRole("separator")).toHaveCount(3);
+  await expect(menu).toContainText("重命名任务");
+  await expect(menu).toContainText("导出 Markdown");
+  await expect(menu).not.toContainText("新窗口");
+  await expect(
+    page.getByRole("button", { name: "任务菜单" }),
+  ).toHaveAttribute("aria-expanded", "true");
+
+  await expect(page).toHaveScreenshot("top-task-menu.png", {
+    animations: "disabled",
+    caret: "hide",
+    fullPage: false,
+    maxDiffPixels: 100,
+  });
+});

@@ -43,6 +43,7 @@ export const zhTW: Record<MessageKey, string> = {
   "user.theme": "主題",
   "user.themeLight": "切換為淺色",
   "user.themeDark": "切換為深色",
+  "account.usageSummary": "剩餘用量",
 
   "project.pin": "置頂專案",
   "project.unpin": "取消置頂",
