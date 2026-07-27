@@ -1642,22 +1642,8 @@ export default function App() {
                   : prev.visible
                     ? (prev.rpcId ?? null)
                     : null;
-              const becameReview =
-                rpcId != null && (prev.rpcId == null || !prev.visible);
-              if (becameReview) {
-                // Auto-open resource Plan workbench when gate is ready.
-                queueMicrotask(() => {
-                  setLayout((l) => {
-                    if (!l.asideCollapsed) return l;
-                    const n = { ...l, asideCollapsed: false };
-                    saveLayout(localStorage, n);
-                    return n;
-                  });
-                  setPlanFocusKey((k) => k + 1);
-                });
-              }
               return {
-                title: tr("plan.ready"),
+                title: tr("resources.plan"),
                 body: displayBody || (prev.visible ? prev.body : ""),
                 entries: entries.length
                   ? entries
@@ -4410,73 +4396,6 @@ export default function App() {
     });
     setPlanFocusKey((k) => k + 1);
   }, []);
-
-  const approvePlan = useCallback(async () => {
-    try {
-      await api.sessionResolvePlan({
-        decision: "approved",
-        rpcId: plan.rpcId,
-      });
-      setPlan((p) => ({
-        ...p,
-        visible: false,
-        waiting: false,
-        rpcId: null,
-      }));
-      openPlanInResource();
-      showToast(tr("plan.approvedToast"), 2500);
-    } catch (e) {
-      showToast(String(e), 4500);
-    }
-  }, [openPlanInResource, plan.rpcId, showToast, tr]);
-
-  const requestPlanChanges = useCallback(async () => {
-    try {
-      await api.sessionResolvePlan({
-        decision: "cancelled",
-        feedback: tr("plan.reviseFeedback"),
-        rpcId: plan.rpcId,
-      });
-      setPlan((p) => ({
-        ...p,
-        visible: false,
-        waiting: false,
-        rpcId: null,
-      }));
-      showToast(tr("plan.reviseToast"), 2800);
-    } catch (e) {
-      showToast(String(e), 4500);
-    }
-  }, [plan.rpcId, showToast, tr]);
-
-  const dismissPlan = useCallback(async () => {
-    // Review gate: abandon RPC and clear plan UI entirely.
-    if (plan.rpcId != null) {
-      try {
-        await api.sessionResolvePlan({
-          decision: "abandoned",
-          rpcId: plan.rpcId,
-        });
-      } catch {
-        /* hide UI anyway */
-      }
-      setPlan((p) => ({
-        ...p,
-        visible: false,
-        waiting: true,
-        entries: [],
-        body: "",
-        rpcId: null,
-        barDismissed: false,
-      }));
-      return;
-    }
-    // Execution progress only: soft-hide top bar; keep entries for later updates.
-    setPlan((p) => ({
-      ...p,
-      barDismissed: true,
-    }));
-  }, [plan.rpcId]);
 
   const sendQueueLabels = useMemo(
     () => ({
@@ -7360,7 +7279,7 @@ export default function App() {
               <AskUserDock
                 payload={planApprovalPayload}
                 labels={{
-                  title: plan.title || tr("plan.ready"),
+                  title: tr("plan.ready"),
                   submit: tr("plan.changes"),
                   cancel: tr("plan.dismiss"),
                   otherPlaceholder: tr("plan.confirmChangesPlaceholder"),
@@ -7383,11 +7302,10 @@ export default function App() {
                     });
                     setPlan((current) => ({
                       ...current,
-                      visible: false,
+                      visible: true,
                       waiting: false,
                       rpcId: null,
                     }));
-                    openPlanInResource();
                     showToast(tr("plan.approvedToast"), 2500);
                     return;
                   }
@@ -7399,7 +7317,7 @@ export default function App() {
                     });
                     setPlan((current) => ({
                       ...current,
-                      visible: false,
+                      visible: true,
                       waiting: false,
                       rpcId: null,
                     }));
@@ -8097,9 +8015,6 @@ export default function App() {
                 }
                 plan={plan}
                 planFocusKey={planFocusKey}
-                onApprovePlan={() => void approvePlan()}
-                onRequestPlanChanges={() => void requestPlanChanges()}
-                onDismissPlan={() => void dismissPlan()}
                 onClose={() =>
                   setLayout((l) => {
                     const n = { ...l, asideCollapsed: true };

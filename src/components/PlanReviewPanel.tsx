@@ -1,7 +1,7 @@
 /**
  * Plan review workbench (resource pane).
  *
- * - **Awaiting review** (`rpcId`): expand by default — Markdown + approve/revise.
+ * - **Awaiting review** (`rpcId`): expand by default — read-only Markdown.
  * - **In progress** (entries, no gate): collapsed by default — top progress only;
  *   click header / expand control to show steps + detail body.
  */
@@ -11,7 +11,6 @@ import { MarkdownBody } from "@/components/MarkdownBody";
 import { OverlayScroll } from "@/components/OverlayScroll";
 import { IconChevronDown, IconChevronRight, IconPlan } from "@/components/icons";
 import {
-  planActionsEnabled,
   planDisplayMarkdown,
   planIsAwaitingReview,
   type PlanReviewState,
@@ -24,14 +23,11 @@ import {
 } from "@/lib/planStatus";
 
 export type PlanReviewPanelLabels = {
-  ready: string;
+  plan: string;
   waiting: string;
   progress: string;
   done: string;
   empty: string;
-  approve: string;
-  changes: string;
-  dismiss: string;
   steps: string;
   fraction: string;
   /** Expand control when collapsed. */
@@ -46,18 +42,12 @@ export type PlanReviewPanelProps = {
   labels: PlanReviewPanelLabels;
   /** When set, forces expand (e.g. user clicked 详情 during progress). */
   forceExpandKey?: number | null;
-  onApprove?: () => void;
-  onRequestChanges?: () => void;
-  onDismiss?: () => void;
 };
 
 export function PlanReviewPanel({
   plan,
   labels,
   forceExpandKey = null,
-  onApprove,
-  onRequestChanges,
-  onDismiss,
 }: PlanReviewPanelProps) {
   const hasBody = !!plan.body.trim();
   const entries = useMemo(
@@ -66,7 +56,6 @@ export function PlanReviewPanel({
   );
   const progress = useMemo(() => computePlanProgress(entries), [entries]);
   const fraction = formatPlanFraction(progress);
-  const canAct = planActionsEnabled(plan);
   const awaitingReview = planIsAwaitingReview(plan);
 
   const model = useMemo(
@@ -98,10 +87,10 @@ export function PlanReviewPanel({
       : model.headlineKey === "planBar.done"
         ? labels.done
         : model.headlineKey === "planBar.review"
-          ? labels.ready
-          : plan.waiting && !canAct
+          ? labels.plan
+          : plan.waiting
             ? labels.waiting
-            : labels.ready;
+            : labels.plan;
 
   // Review gate → expanded; pure progress → collapsed until user opens.
   const defaultExpanded = awaitingReview || (hasBody && entries.length === 0);
@@ -148,7 +137,7 @@ export function PlanReviewPanel({
           </span>
           <div className="plan-review__titles">
             <div className="plan-review__status">{statusLabel}</div>
-            <h2 className="plan-review__title">{plan.title || statusLabel}</h2>
+            <h2 className="plan-review__title">{plan.title || labels.plan}</h2>
             {!expanded && model.currentLabel ? (
               <div className="plan-review__current" title={model.currentLabel}>
                 <span className="plan-review__current-label">{labels.current}</span>
@@ -197,33 +186,6 @@ export function PlanReviewPanel({
               onClick={toggleExpand}
             >
               {expanded ? labels.collapseDetails : labels.expandDetails}
-            </button>
-          ) : null}
-          {canAct && onApprove ? (
-            <button
-              type="button"
-              className="btn btn--solid btn--sm"
-              onClick={onApprove}
-            >
-              {labels.approve}
-            </button>
-          ) : null}
-          {canAct && onRequestChanges ? (
-            <button
-              type="button"
-              className="btn btn--ghost btn--sm"
-              onClick={onRequestChanges}
-            >
-              {labels.changes}
-            </button>
-          ) : null}
-          {onDismiss ? (
-            <button
-              type="button"
-              className="btn btn--ghost btn--sm"
-              onClick={onDismiss}
-            >
-              {labels.dismiss}
             </button>
           ) : null}
         </div>

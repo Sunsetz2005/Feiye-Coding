@@ -28,7 +28,7 @@ Codex 截图用于校准信息层级、空间来源与交互密度，不复制�
 ## Changes 与 Plan
 
 - **Changes**：右栏提供 Session / Workspace 两类真实变更；优先工具 payload，再回退到 git diff 或当前文件。保留打开编辑器、Reveal 和复制路径，不提供危险的静默 discard。
-- **Plan**：线程内显示紧凑计划卡，右栏显示 Markdown 全文；批准、请求修改和放弃均调用现有 `sessionResolvePlan`。
+- **Plan**：线程内显示中性紧凑计划卡，右栏只读显示 Markdown 全文；批准、请求修改和放弃只在底部 `AskUserDock` 调用现有 `sessionResolvePlan`，不在资源栏重复决策。
 
 ## 当前视觉与原生证据
 

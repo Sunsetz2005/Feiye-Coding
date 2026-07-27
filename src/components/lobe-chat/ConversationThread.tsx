@@ -817,8 +817,7 @@ export function ConversationThread({
             <PlanArtifactCard
               artifact={planArtifact}
               labels={{
-                waiting: tr("plan.waiting"),
-                ready: tr("plan.ready"),
+                plan: tr("resources.plan"),
                 empty: tr("plan.empty"),
                 open: tr("planBar.expand"),
               }}

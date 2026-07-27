@@ -13,8 +13,7 @@ export interface PlanArtifactCardModel {
 }
 
 export interface PlanArtifactCardLabels {
-  waiting: string;
-  ready: string;
+  plan: string;
   empty: string;
   open: string;
 }
@@ -37,7 +36,7 @@ export function PlanArtifactCard({
 
   if (artifact.visible === false) return null;
 
-  const status = artifact.waiting ? labels.waiting : labels.ready;
+  const status = labels.plan;
   return (
     <article
       className="plan-artifact-card"

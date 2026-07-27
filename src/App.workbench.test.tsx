@@ -21,8 +21,61 @@ import {
 } from "vitest";
 import type { SidebarNavigatorProps } from "@/components/SidebarNavigator";
 
+type EventHandler = (payload: unknown) => void;
+
+const apiListenerCapture = vi.hoisted(() => ({
+  handlers: new Map<string, EventHandler>(),
+  tauri: false,
+  resolvePlan: vi.fn(async () => undefined),
+}));
+
+vi.mock("@/lib/api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/api")>();
+  return {
+    ...actual,
+    isTauri: () => apiListenerCapture.tauri,
+    listen: vi.fn(async (event: string, handler: EventHandler) => {
+      apiListenerCapture.handlers.set(event, handler);
+      return () => {
+        if (apiListenerCapture.handlers.get(event) === handler) {
+          apiListenerCapture.handlers.delete(event);
+        }
+      };
+    }),
+    sessionResolvePlan: apiListenerCapture.resolvePlan,
+    projectsList: vi.fn(async () => []),
+    sessionsList: vi.fn(async () => []),
+    settingsGet: vi.fn(async () => ({
+      locale: "zh",
+      setupWizardCompleted: true,
+    })),
+    probeCli: vi.fn(async () => ({
+      found: true,
+      path: "/test/sunsetz",
+      version: "test",
+      source: "test",
+      cliAuthPresent: false,
+    })),
+    modelsListAvailable: vi.fn(async () => ({
+      models: [],
+      defaultModelId: null,
+    })),
+    composerPrefsResolve: vi.fn(async () => null),
+    secretsGetMasked: vi.fn(async () => ({
+      hasOfficialKey: false,
+      hasRelayKey: false,
+    })),
+    sessionPendingInteractions: vi.fn(async () => []),
+    trayRefresh: vi.fn(async () => undefined),
+  };
+});
+
 vi.mock("@/components/ResourceViewer", () => ({
   ResourceViewer: () => <aside data-testid="resource-viewer-mock" />,
+}));
+
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: vi.fn(async () => () => undefined),
 }));
 
 const sidebarCapture = vi.hoisted(() => ({
@@ -91,6 +144,9 @@ afterEach(() => {
   cleanup();
   localStorage.clear();
   sidebarCapture.current = null;
+  apiListenerCapture.handlers.clear();
+  apiListenerCapture.tauri = false;
+  apiListenerCapture.resolvePlan.mockClear();
   delete (window as Window & { __TAURI_INTERNALS__?: unknown })
     .__TAURI_INTERNALS__;
 });
@@ -245,6 +301,49 @@ describe("App workbench integration", () => {
         ).toBeNull();
       });
       expect(screen.getByText(/save failed/)).toBeTruthy();
+    },
+    20_000,
+  );
+
+  it(
+    "keeps plan review in the dock after approval without opening resources",
+    async () => {
+      const user = userEvent.setup();
+      apiListenerCapture.tauri = true;
+
+      const { default: App } = await import("./App");
+      render(<App />);
+      await screen.findByTestId("workbench-shell");
+      await waitFor(() => {
+        expect(apiListenerCapture.handlers.has("session://plan")).toBe(true);
+      });
+
+      act(() => {
+        apiListenerCapture.handlers.get("session://plan")?.({
+          rpcId: 41,
+          body: "# Delivery plan\n\n1. Update the workbench",
+          entries: [{ content: "Update the workbench", status: "pending" }],
+        });
+      });
+
+      await waitFor(() => {
+        expect(screen.getAllByText(/Plan ready|计划待审阅/)).toHaveLength(1);
+      });
+      expect(screen.queryByTestId("resource-viewer-mock")).toBeNull();
+
+      await user.click(
+        screen.getByRole("button", { name: /Approve plan|实施此计划/ }),
+      );
+      await waitFor(() => {
+        expect(apiListenerCapture.resolvePlan).toHaveBeenCalledWith({
+          decision: "approved",
+          rpcId: 41,
+        });
+      });
+
+      expect(screen.queryByText(/Plan ready|计划待审阅/)).toBeNull();
+      expect(screen.getByTestId("plan-artifact-card")).toBeTruthy();
+      expect(screen.queryByTestId("resource-viewer-mock")).toBeNull();
     },
     20_000,
   );

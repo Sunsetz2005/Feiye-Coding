@@ -1,0 +1,70 @@
+.plan-fixture {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  overflow: hidden;
+  background: var(--wb-stage);
+}
+
+.plan-fixture__main {
+  position: relative;
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  background: var(--wb-stage);
+}
+
+.plan-fixture__topbar {
+  height: 44px;
+  padding: 0 16px;
+  display: flex;
+  align-items: center;
+  border-bottom: 1px solid var(--wb-line);
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 590;
+}
+
+.plan-fixture__conversation {
+  width: min(560px, calc(100% - 48px));
+  margin: 74px auto 0;
+}
+
+.plan-fixture__dock {
+  position: absolute;
+  right: 24px;
+  bottom: 22px;
+  left: 24px;
+}
+
+.plan-fixture__aside {
+  width: clamp(330px, 31vw, 410px);
+  flex: 0 0 auto;
+  padding: 52px 14px 14px;
+  overflow: hidden;
+  border-left: 1px solid var(--wb-line);
+  background: var(--wb-navigation);
+}
+
+@media (max-width: 980px) {
+  .plan-fixture__aside {
+    position: absolute;
+    z-index: 10;
+    top: 44px;
+    right: 0;
+    bottom: 0;
+    width: 350px;
+    padding-top: 14px;
+    box-shadow: -20px 0 44px color-mix(in srgb, black 28%, transparent);
+  }
+
+  .plan-fixture__conversation {
+    margin-right: 374px;
+    margin-left: 24px;
+  }
+
+  .plan-fixture__dock {
+    right: 374px;
+  }
+}

@@ -123,9 +123,6 @@ export interface ResourceViewerProps {
   plan?: PlanReviewState | null;
   /** Increment / change to force switch into Plan mode (详情 / auto-open). */
   planFocusKey?: number | null;
-  onApprovePlan?: () => void;
-  onRequestPlanChanges?: () => void;
-  onDismissPlan?: () => void;
 }
 
 type SideMode = "files" | "changes" | "plan";
@@ -240,9 +237,6 @@ export function ResourceViewer({
   sessionChanges = [],
   plan = null,
   planFocusKey = null,
-  onApprovePlan,
-  onRequestPlanChanges,
-  onDismissPlan,
 }: ResourceViewerProps) {
   const tr = useMemo(() => createT(locale), [locale]);
   const [root, setRoot] = useState<TreeNode[]>([]);
@@ -1948,23 +1942,17 @@ export function ResourceViewer({
               plan={plan}
               forceExpandKey={planFocusKey}
               labels={{
-                ready: tr("plan.ready"),
+                plan: tr("resources.plan"),
                 waiting: tr("plan.waiting"),
                 progress: tr("planBar.progress"),
                 done: tr("planBar.done"),
                 empty: tr("plan.empty"),
-                approve: tr("plan.approve"),
-                changes: tr("plan.changes"),
-                dismiss: tr("plan.dismiss"),
                 steps: tr("plan.steps"),
                 fraction: tr("planBar.fraction"),
                 expandDetails: tr("plan.expandDetails"),
                 collapseDetails: tr("plan.collapseDetails"),
                 current: tr("planBar.current"),
               }}
-              onApprove={onApprovePlan}
-              onRequestChanges={onRequestPlanChanges}
-              onDismiss={onDismissPlan}
             />
           ) : sideMode === "plan" ? (
             <div className="rp__empty-state">
