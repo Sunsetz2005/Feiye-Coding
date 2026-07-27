@@ -23,7 +23,7 @@
 | 虚拟任务行 | CSS 与 `VirtualList` 共用 34px 行高、2px 间距 token |
 | 待回答状态 | `.tree-l3__status--question` |
 | 账户入口 | `.sidebar__footer` |
-| 窄屏覆盖层 | `workbench.css` `@media (max-width: 900px)` |
+| 窄屏覆盖层 | `workbench.css` `@media (max-width: 720px)`；900×600 保持侧栏在布局内 |
 | 完全隐藏 | `.sidebar--hidden` + `inert`，不占布局、不进入 Tab 顺序 |
 
 ## 中栏
@@ -36,9 +36,9 @@
 | Agent 提问/计划确认 | `AskUserDock`，出现时替换普通 composer |
 | 运行步骤 | `TaskProgressRail`，只显示 Runtime 可证明的数据 |
 | 权限审批 | `.perm-bar` + Runtime optionId |
-| Composer 上层 | 项目或目标/计划摘要 |
+| Composer 上层 | 静态项目条中的局部项目按钮，或目标摘要；计划模式不在此重复 |
 | Composer 内容层 | 80×80 图片预览、文件/目录、可增长编辑器 |
-| Composer 底层 | 加号、权限、目标 / 上下文、模型、发送或停止 |
+| Composer 底层 | 加号、权限、启用中的计划模式、目标 / 上下文、模型、发送或停止 |
 | 浮层 | `FloatingSurfaceProvider` 单一所有权 |
 
 ## 右侧资源
@@ -56,9 +56,12 @@
 | 主题 | 深色、浅色、高对比度 |
 | 空工作台像素基线 | 9 |
 | 资源面板打开像素基线 | 9 |
-| 像素基线文件总数 | 18 |
-| Playwright 用例实例 | 21：18 个截图实例 + 3 个 200% 几何实例 |
+| 上下文摘要像素基线 | 3 |
+| 计划模式像素基线 | 3 |
+| 像素基线文件总数 | 24 |
+| Playwright 用例实例 | 27：24 个截图实例 + 3 个 200% 几何实例 |
 | horizontal overflow | 0 |
+| composer 与 main 边界 | 三主题三 viewport 均断言完整包含；900×600 不被侧栏覆盖 |
 | 资源面板生命周期 | 打开可见；关闭后卸载；触发按钮恢复焦点 |
 | 200% 基本几何 | 三个 viewport 均检查无横向溢出、标题与侧栏可见、composer 位于 viewport 内 |
 | 命令 | `pnpm test:visual` |

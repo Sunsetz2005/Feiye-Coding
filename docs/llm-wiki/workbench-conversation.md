@@ -23,6 +23,8 @@
 - `src/components/lobe-chat/TaskProgressRail.tsx`
 - `src/components/ComposerPlusPanel.tsx`
 - `src/components/ComposerModelMenu.tsx`
+- `src/components/ComposerPlanModeButton.tsx`
+- `src/components/ContextUsageChip.tsx`
 - `src/components/FloatingSurfaceProvider.tsx`
 
 `SidebarNavigator` 拥有侧栏渲染、项目/任务披露语义、当前项语义、虚拟任务行和账户入口；数据加载、菜单动作与 Host 协调仍由 `App.tsx` 提供。`WorkbenchShell` 拥有三栏布局根节点，并在侧栏或资源面板关闭后把焦点恢复到对应顶部栏按钮。会话中栏在面板切换时保持挂载，因此原生滚动位置不被重建。不要把尚不存在的 `ConversationSurface` 或 `ComposerDock` 当成当前模块边界。
@@ -31,9 +33,9 @@
 
 输入器按以下三层组织：
 
-1. **状态层**：运行计划时显示 `TaskProgressRail`；否则显示当前目标、计划或 `ComposerProjectMenu`。
+1. **状态层**：运行计划时显示 `TaskProgressRail`；否则显示当前目标或 `ComposerProjectMenu`。
 2. **内容层**：发送队列、附件预览和可增长的 `ComposerEditor`。
-3. **操作层**：左侧为加号、权限和目标；右侧为上下文、模型及发送/停止。
+3. **操作层**：左侧为加号、权限、启用中的计划模式和目标；右侧为上下文、模型及发送/停止。
 
 行为约束：
 
@@ -42,6 +44,9 @@
 - 附件元数据随 `session_send` 写入已有 `ChatMessageStored.attachments`，重载后恢复名称、目录类型和可用缩略图。
 - 旧消息若没有附件元数据，只保留可证明的信息，不猜测回填。
 - 当前 Host 没有语音识别适配器；`HostCapabilities v2` 将 `speechRecognition` / `nativeSpeech` 声明为 `unavailable`，兼容布尔值仍为 `false`，输入器不渲染麦克风。
+- 项目条外层是静态容器；只有内部文件夹、项目名和箭头按钮响应悬停与点击。运行或 pending interaction 锁定设置时不可切换项目。
+- 计划模式启用后只在访问权限右侧出现一次；悬停或键盘聚焦时灯泡变为圆圈叉，点击切回 Agent。Host 保存失败时恢复原模式。
+- 900×600 及更宽的桌面布局保持侧栏在正常文档流中，输入器不得落到侧栏之下；仅 720px 及以下使用侧栏覆盖层。
 
 ## 3. 加号菜单与斜杠面板
 
@@ -77,6 +82,7 @@
 - 有精确使用量和窗口容量时显示比例。
 - 只有使用量时显示 token 数，不推算百分比。
 - 没有可靠数据时显示未知状态 `—`，不按字符数估算。
+- 悬停或键盘聚焦显示紧凑摘要；点击同一圆环才打开详细 Runtime 遥测与 `/compact`。摘要和详情使用同一精确数据源。
 - `/compact` 是真实 Agent 操作；Host 只发送命令、记录事件和展示结果，不改写可见历史。
 
 ## 6. 活动记录与 assistant phase
@@ -174,7 +180,7 @@ Host 校验名称、frontmatter、相对路径、体积、路径穿越、符号�
 6. `ActivityTimeline` 的顺序、归并及旧历史降级测试。
 7. `AskUserDock` 的逐题、跳过、取消和失败恢复测试。
 8. Rust 的 ask_user、附件、Finder、技能保存、能力表和 compact phase golden 测试。
-9. `pnpm test:visual` 的空工作台、资源面板、焦点恢复和 200% 基本几何矩阵。
+9. `pnpm test:visual` 的空工作台、上下文摘要、计划模式、资源面板、焦点恢复和 200% 基本几何矩阵；900×600 还必须断言 composer 完全位于 main 边界内。
 10. Windows 窗口改动需运行 `scripts/windows-native-smoke.ps1` 与 `scripts/windows-native-webview-smoke.mjs` 的 CI 原生诊断，并检查上传的窗口截图；该诊断不替代实机缩放和辅助功能验收。
 
 若接口或行为变化，同步更新本文、`session-continuity.md` 和 `docs/SPIKE-ACP.md`。

@@ -157,6 +157,7 @@ import { SunsetzLogo } from "@/components/SunsetzLogo";
 import { SetupWizard, type SetupCliInfo } from "@/components/SetupWizard";
 import { ComposerEditor } from "@/components/ComposerEditor";
 import { ComposerProjectMenu } from "@/components/ComposerProjectMenu";
+import { ComposerPlanModeButton } from "@/components/ComposerPlanModeButton";
 import { pathsEqual } from "@/lib/gitWorktree";
 import {
   ComposerPlusPanel,
@@ -232,7 +233,6 @@ import {
   preferPermissionFocus,
   trapTabKey,
 } from "@/lib/a11yFocus";
-import { Spinner } from "@/components/ui/spinner";
 import {
   SettingsPage,
   type SettingsSectionId,
@@ -7426,30 +7426,18 @@ export default function App() {
             <div className="composer-dock">
               {!taskProgressVisible ? (
               <div className="composer-context-rail">
-                {goalMode || mode === "plan" ? (
+                {goalMode ? (
                   <button
                     type="button"
                     className="composer-context-rail__activity"
                     onClick={() => {
-                      if (mode === "plan" && (plan.visible || plan.body)) {
-                        openPlanInResource();
-                        return;
-                      }
                       composerInputRef.current?.focus();
                     }}
                   >
                     <IconImagine size={14} aria-hidden />
                     <span className="composer-context-rail__label">
-                      {mode === "plan"
-                        ? plan.title || tr("composer.planMode")
-                        : tr("composer.goal")}
+                      {tr("composer.goal")}
                     </span>
-                    {mode === "plan" && session.state === "streaming" ? (
-                      <Spinner
-                        size={13}
-                        className="composer-context-rail__spinner"
-                      />
-                    ) : null}
                   </button>
                 ) : (
                   <ComposerProjectMenu
@@ -7787,6 +7775,7 @@ export default function App() {
                   }}
                   onMode={(value) => {
                     if (composerSettingsLocked) return;
+                    const previousMode = mode;
                     setMode(value);
                     if (value === "plan") setGoalMode(false);
                     void api
@@ -7795,13 +7784,49 @@ export default function App() {
                         sessionId: session.sessionId ?? null,
                         mode: value,
                       })
-                      .catch((error) => showToast(String(error), 4000));
+                      .catch((error) => {
+                        setMode((current) =>
+                          rollbackOptimisticSetting(
+                            current,
+                            value,
+                            previousMode,
+                          ),
+                        );
+                        showToast(String(error), 4000);
+                      });
                   }}
                   onPolicy={(value: PermissionPolicyId) => {
                     if (composerSettingsLocked) return;
                     applyPermissionPolicy(value);
                   }}
                 />
+                {mode === "plan" ? (
+                  <ComposerPlanModeButton
+                    label={tr("composer.planMode")}
+                    disabled={composerSettingsLocked}
+                    onDisable={() => {
+                      if (composerSettingsLocked) return;
+                      const previousMode = mode;
+                      setMode("agent");
+                      void api
+                        .composerPrefsSet({
+                          projectId: activeProject?.id ?? null,
+                          sessionId: session.sessionId ?? null,
+                          mode: "agent",
+                        })
+                        .catch((error) => {
+                          setMode((current) =>
+                            rollbackOptimisticSetting(
+                              current,
+                              "agent",
+                              previousMode,
+                            ),
+                          );
+                          showToast(String(error), 4000);
+                        });
+                    }}
+                  />
+                ) : null}
                 {goalMode ? (
                   <Tip label={tr("composer.goalHint")}>
                     <button

@@ -5,12 +5,15 @@ import {
   cleanup,
   render,
   screen,
+  within,
   waitFor,
 } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import {
   afterAll,
   afterEach,
   beforeAll,
+  beforeEach,
   describe,
   expect,
   it,
@@ -80,10 +83,16 @@ beforeAll(() => {
   });
 });
 
+beforeEach(() => {
+  window.location.hash = "";
+});
+
 afterEach(() => {
   cleanup();
   localStorage.clear();
   sidebarCapture.current = null;
+  delete (window as Window & { __TAURI_INTERNALS__?: unknown })
+    .__TAURI_INTERNALS__;
 });
 
 afterAll(() => {
@@ -143,6 +152,99 @@ describe("App workbench integration", () => {
       });
 
       expect(window.location.hash).toMatch(/^#\/settings\/(account|general)$/);
+    },
+    20_000,
+  );
+
+  it(
+    "persists plan mode beside access and can disable it in place",
+    async () => {
+      const user = userEvent.setup();
+      const { default: App } = await import("./App");
+      render(<App />);
+      await screen.findByTestId("workbench-shell");
+
+      const invoke = vi.fn(
+        async (command: string, args: Record<string, unknown>) => {
+          if (command !== "composer_prefs_set") return null;
+          return {
+            modelId: "sunsetz-4.5",
+            effort: "medium",
+            mode: args.mode ?? "agent",
+            permissionPolicy: "ask",
+            scope: "global",
+            source: "test",
+          };
+        },
+      );
+      Object.assign(window, { __TAURI_INTERNALS__: { invoke } });
+
+      await user.click(
+        screen.getByRole("button", { name: /Access|访问/ }),
+      );
+      const access = await screen.findByRole("dialog", {
+        name: /Access|访问/,
+      });
+      await user.click(
+        within(access).getByText("Plan").closest("button")!,
+      );
+
+      const planMode = await screen.findByRole("button", {
+        name: /Plan mode|计划模式/,
+      });
+      expect(
+        document.querySelector(".composer-context-rail__activity"),
+      ).toBeNull();
+      await user.click(planMode);
+      await waitFor(() => {
+        expect(
+          screen.queryByRole("button", {
+            name: /Plan mode|计划模式/,
+          }),
+        ).toBeNull();
+      });
+      expect(invoke).toHaveBeenCalledTimes(2);
+    },
+    20_000,
+  );
+
+  it(
+    "rolls plan mode back when Host persistence fails",
+    async () => {
+      const user = userEvent.setup();
+      const { default: App } = await import("./App");
+      render(<App />);
+      await screen.findByTestId("workbench-shell");
+
+      Object.assign(window, {
+        __TAURI_INTERNALS__: {
+          invoke: vi.fn(async (command: string) => {
+            if (command === "composer_prefs_set") {
+              throw new Error("save failed");
+            }
+            return null;
+          }),
+        },
+      });
+
+      await user.click(
+        screen.getByRole("button", { name: /Access|访问/ }),
+      );
+      const access = await screen.findByRole("dialog", {
+        name: /Access|访问/,
+      });
+      await user.click(
+        within(access).getByText("Plan").closest("button")!,
+      );
+
+      await waitFor(() => {
+        expect(
+          screen.queryByRole("button", {
+            name: /Plan mode|计划模式/,
+          }),
+        ).toBeNull();
+      });
+      expect(screen.getByText(/save failed/)).toBeTruthy();
     },
     20_000,
   );

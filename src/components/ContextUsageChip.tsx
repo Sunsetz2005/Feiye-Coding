@@ -6,6 +6,7 @@
  */
 
 import {
+  useId,
   useMemo,
   useRef,
   useState,
@@ -139,6 +140,7 @@ export function ContextUsageChip({
   onCompact,
 }: Props) {
   const [open, setOpen] = useState(false);
+  const summaryId = useId();
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const popRef = useRef<HTMLDivElement>(null);
@@ -179,6 +181,12 @@ export function ContextUsageChip({
     ? formatLastCompactDetail(display.lastCompact, labels)
     : labels.lastCompactNone;
   const runtime = display.runtime;
+  const summaryValue =
+    display.source === "runtime" && display.tokens != null
+      ? display.contextWindowTokens == null
+        ? `${formatTokenCount(display.tokens)} ${labels.used}`
+        : `${formatTokenCount(display.tokens)} / ${formatTokenCount(display.contextWindowTokens)}`
+      : labels.waiting;
 
   return (
     <div ref={rootRef} className={`ctx-chip${open ? " is-open" : ""}`}>
@@ -190,10 +198,21 @@ export function ContextUsageChip({
         aria-haspopup="dialog"
         aria-expanded={open}
         aria-label={accessibleLabel}
+        aria-describedby={open ? undefined : summaryId}
         onClick={() => setOpen((value) => !value)}
       >
         <ContextRing percent={usedPercent} size={20} strokeWidth={2.4} />
       </button>
+      <div
+        id={summaryId}
+        className="ctx-chip__summary"
+        role="tooltip"
+        aria-hidden={open || undefined}
+      >
+        <span className="ctx-chip__summary-label">{labels.menuTitle}</span>
+        <strong>{percentLabel}</strong>
+        <span>{summaryValue}</span>
+      </div>
       {open &&
         pos &&
         typeof document !== "undefined" &&

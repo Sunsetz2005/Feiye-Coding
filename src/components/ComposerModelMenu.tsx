@@ -865,6 +865,7 @@ export function ComposerAccessMenu({
           onClick={() => {
             if (disabled) return;
             onMode(m.id);
+            menu.setOpen(false);
           }}
         >
           <span className="cmm__opt-icon" aria-hidden>

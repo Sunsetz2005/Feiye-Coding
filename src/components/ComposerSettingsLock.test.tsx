@@ -62,6 +62,42 @@ const accessLabels = {
 };
 
 describe("composer settings lock", () => {
+  it("shows an exact compact summary before opening detailed telemetry", () => {
+    render(
+      <ContextUsageChip
+        display={resolveContextUsageDisplay(
+          INITIAL_CONTEXT_USAGE,
+          [],
+          {
+            usedTokens: 173_000,
+            inputTokens: 171_000,
+            outputTokens: 2_000,
+            cachedReadTokens: 0,
+            reasoningTokens: 0,
+            turnInputTokens: 1_000,
+            turnOutputTokens: 200,
+            modelCalls: 1,
+            modelId: "sunsetz-4.5",
+            contextWindowTokens: 258_000,
+            updatedAt: "2026-07-27T12:00:00Z",
+            source: "runtime",
+          },
+        )}
+        labels={contextLabels}
+        onCompact={vi.fn()}
+      />,
+    );
+
+    const tooltip = screen.getByRole("tooltip");
+    expect(tooltip.textContent).toContain("67%");
+    expect(tooltip.textContent).toContain("173k / 258k");
+    expect(
+      screen.getByRole("button", { name: /Context: 67%/ }).getAttribute(
+        "aria-describedby",
+      ),
+    ).toBe(tooltip.id);
+  });
+
   it("keeps context inspectable while disabling compact", async () => {
     const user = userEvent.setup();
     const onCompact = vi.fn();
@@ -120,5 +156,26 @@ describe("composer settings lock", () => {
     await user.click(fullAccessButton!);
     expect(onMode).not.toHaveBeenCalled();
     expect(onPolicy).not.toHaveBeenCalled();
+  });
+
+  it("closes access settings after choosing a mode", async () => {
+    const user = userEvent.setup();
+    const onMode = vi.fn();
+    render(
+      <ComposerAccessMenu
+        mode="agent"
+        policy="ask"
+        labels={accessLabels}
+        onMode={onMode}
+        onPolicy={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Access" }));
+    const dialog = await screen.findByRole("dialog", { name: "Access" });
+    await user.click(within(dialog).getByText("Plan").closest("button")!);
+
+    expect(onMode).toHaveBeenCalledWith("plan");
+    expect(screen.queryByRole("dialog", { name: "Access" })).toBeNull();
   });
 });

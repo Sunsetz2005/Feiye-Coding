@@ -198,16 +198,16 @@
 }
 
 .composer-context-rail .chip--project {
-  width: 100%;
-  max-width: none;
+  width: auto;
+  max-width: min(100%, 360px);
   height: 30px;
-  padding-inline: 4px;
+  padding-inline: 4px 7px;
   justify-content: flex-start;
   border-radius: 7px;
 }
 
 .composer-context-rail .chip--project .chip__label {
-  flex: 1;
+  flex: 0 1 auto;
   text-align: left;
 }
 
@@ -363,9 +363,131 @@
   color: var(--text-secondary);
 }
 
+.chip--plan-active {
+  gap: 6px;
+  padding-inline: 7px 9px;
+  color: var(--text-secondary);
+}
+
+.chip--plan-active__icon {
+  position: relative;
+  width: 15px;
+  height: 15px;
+  display: inline-grid;
+  flex: 0 0 15px;
+  place-items: center;
+}
+
+.chip--plan-active__bulb,
+.chip--plan-active__close {
+  position: absolute;
+  transition:
+    opacity 150ms ease,
+    transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.chip--plan-active__close {
+  width: 15px;
+  height: 15px;
+  padding: 2px;
+  border: 1px solid currentColor;
+  border-radius: 50%;
+  opacity: 0;
+  transform: scale(0.62) rotate(-18deg);
+}
+
+.chip--plan-active:hover .chip--plan-active__bulb,
+.chip--plan-active:focus-visible .chip--plan-active__bulb {
+  opacity: 0;
+  transform: scale(0.62) rotate(18deg);
+}
+
+.chip--plan-active:hover .chip--plan-active__close,
+.chip--plan-active:focus-visible .chip--plan-active__close {
+  opacity: 1;
+  transform: scale(1) rotate(0);
+}
+
 .ctx-meter {
   border-radius: 50%;
   background: transparent;
+}
+
+.ctx-chip {
+  position: relative;
+}
+
+.ctx-chip__summary {
+  position: absolute;
+  right: -6px;
+  bottom: calc(100% + 8px);
+  z-index: var(--z-popover, 60);
+  width: max-content;
+  min-width: 154px;
+  max-width: min(220px, calc(100vw - 24px));
+  padding: 9px 11px 10px;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 2px 12px;
+  border: 0.5px solid var(--menu-border);
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--menu-surface-solid) 96%, transparent);
+  box-shadow:
+    inset 0 0.5px 0 color-mix(in srgb, white 10%, transparent),
+    0 10px 28px color-mix(in srgb, black 24%, transparent);
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.35;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(3px) scale(0.98);
+  transform-origin: right bottom;
+  transition:
+    opacity 140ms ease,
+    transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.ctx-chip__summary-label {
+  color: var(--text-tertiary);
+}
+
+.ctx-chip__summary strong {
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 610;
+}
+
+.ctx-chip__summary > :last-child {
+  grid-column: 1 / -1;
+  color: var(--text-primary);
+  font-size: 12px;
+}
+
+.ctx-chip:not(.is-open):hover .ctx-chip__summary,
+.ctx-chip:not(.is-open):focus-within .ctx-chip__summary {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chip--plan-active__bulb,
+  .chip--plan-active__close,
+  .ctx-chip__summary {
+    transition: none;
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .ctx-chip__summary {
+    background: var(--menu-surface-solid);
+  }
+}
+
+@media (prefers-contrast: more) {
+  .ctx-chip__summary {
+    border: 1px solid var(--border-strong);
+  }
 }
 
 .composer__attachments {
@@ -459,12 +581,11 @@
 }
 
 /*
- * Compact workbench: the project rail becomes an edge-originating,
- * non-modal overlay.  Keeping it out of flex layout is important at 200%
- * zoom: the conversation keeps the full viewport width even while the rail
- * is open, and the existing hide state still removes it from hit testing.
+ * Phone-width workbench: the project rail becomes an edge-originating,
+ * non-modal overlay. At the 900 px desktop acceptance width the rail remains
+ * in layout so it cannot cover the composer controls.
  */
-@media (max-width: 900px) {
+@media (max-width: 720px) {
   .workbench {
     isolation: isolate;
     overflow: hidden;
