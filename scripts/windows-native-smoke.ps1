@@ -70,7 +70,6 @@ $settings | ConvertTo-Json | Set-Content -Path (Join-Path $dataRoot "settings.js
 
 $env:SUNSETZ_HOME = $dataRoot
 $env:SUNSETZ_ACP = "mock"
-$env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--disable-gpu --remote-debugging-port=9222"
 $stdoutPath = Join-Path $OutputDirectory "sunsetz.stdout.log"
 $stderrPath = Join-Path $OutputDirectory "sunsetz.stderr.log"
 $process = Start-Process `
@@ -115,6 +114,10 @@ try {
 
   Save-DesktopScreenshot -Path (Join-Path $OutputDirectory "native-window.png")
   Write-Host "Windows native smoke passed at $($bounds.Width)x$($bounds.Height)."
+}
+catch {
+  Save-DesktopScreenshot -Path (Join-Path $OutputDirectory "native-window-failure.png")
+  throw
 }
 finally {
   if (-not $process.HasExited) {

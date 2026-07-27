@@ -121,13 +121,12 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm build:ui
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: "./src-tauri -> target"
           shared-key: ci-Windows-native
       - name: Build Windows native smoke application
-        run: cargo build --manifest-path src-tauri/Cargo.toml
+        run: pnpm exec tauri build --debug --no-bundle --config src-tauri/tauri.windows-smoke.conf.json
       - name: Run Windows native workbench smoke
         shell: pwsh
         run: |
