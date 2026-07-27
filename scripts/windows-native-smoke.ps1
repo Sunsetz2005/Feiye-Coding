@@ -153,19 +153,38 @@ function Save-DesktopScreenshot {
   }
 }
 
+function Save-AutomationTree {
+  param(
+    [Parameter(Mandatory = $true)]
+    [System.Windows.Automation.AutomationElement]$Root,
+
+    [Parameter(Mandatory = $true)]
+    [string]$Path
+  )
+
+  $rows = foreach ($element in $Root.FindAll(
+      [System.Windows.Automation.TreeScope]::Descendants,
+      [System.Windows.Automation.Condition]::TrueCondition
+    )) {
+    $controlType = $element.Current.ControlType.ProgrammaticName
+    $name = $element.Current.Name.Replace("`r", " ").Replace("`n", " ")
+    "$controlType`t$name`tOffscreen=$($element.Current.IsOffscreen)"
+  }
+  $rows | Set-Content -Path $Path -Encoding UTF8
+}
+
 $resolvedExecutable = (Resolve-Path $Executable).Path
 New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
 
 $dataRoot = Join-Path $env:RUNNER_TEMP "sunsetz-native-smoke"
 New-Item -ItemType Directory -Force -Path $dataRoot | Out-Null
-$fakeRuntime = Join-Path $dataRoot "grok.cmd"
-Set-Content -Path $fakeRuntime -Encoding Ascii -Value "@echo off`r`necho sunsetz-runtime 1.0.0"
+$probeRuntime = (Get-Command pwsh).Source
 
 $settings = @{
   theme = "light"
   locale = "en"
   sessionDataMode = "independent"
-  manualCliPath = $fakeRuntime
+  manualCliPath = $probeRuntime
   permissionPolicy = "ask"
   modelId = $null
   effort = "medium"
@@ -213,6 +232,11 @@ try {
   if ($bounds.Width -lt 900 -or $bounds.Height -lt 600) {
     throw "Unexpected native window size: $($bounds.Width)x$($bounds.Height)"
   }
+
+  Save-DesktopScreenshot -Path (Join-Path $OutputDirectory "initial-window.png")
+  Save-AutomationTree `
+    -Root $window `
+    -Path (Join-Path $OutputDirectory "uia-tree.txt")
 
   Find-NamedElement -Root $window -Names @("New session", "新建会话") | Out-Null
 
