@@ -31,16 +31,17 @@ interface VideoUiProps {
   extraMenu?: ReactNode;
 }
 
-function isLocalFsPath(path: string | undefined): path is string {
+export function isLocalFsPath(path: string | undefined): path is string {
   if (!path) return false;
   if (path.startsWith("http://") || path.startsWith("https://")) return false;
   if (path.startsWith("data:") || path.startsWith("blob:")) return false;
   if (path.startsWith("asset:") || path.includes("asset.localhost")) return false;
   if (path.startsWith("media:") || path.includes("media.localhost")) return false;
+  if (path.startsWith("resource:") || path.includes("resource.localhost")) return false;
   return path.startsWith("/") || /^[A-Za-z]:[\\/]/.test(path);
 }
 
-function isViewableVideoSrc(src: string): boolean {
+export function isViewableVideoSrc(src: string): boolean {
   return (
     src.startsWith("http://") ||
     src.startsWith("https://") ||
@@ -48,8 +49,10 @@ function isViewableVideoSrc(src: string): boolean {
     src.startsWith("blob:") ||
     src.startsWith("asset:") ||
     src.startsWith("media:") ||
+    src.startsWith("resource:") ||
     src.includes("asset.localhost") ||
-    src.includes("media.localhost")
+    src.includes("media.localhost") ||
+    src.includes("resource.localhost")
   );
 }
 

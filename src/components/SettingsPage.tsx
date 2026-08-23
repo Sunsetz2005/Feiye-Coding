@@ -56,6 +56,11 @@ import {
   type SettingsSectionIcon,
   type SettingsSectionId,
 } from "@/lib/settingsRegistry";
+import {
+  acpLoopbackSetupCommand,
+  normalizeSandboxProfile,
+  sandboxStateMessageKey,
+} from "@/lib/runtimeMigrationUi";
 
 export type { SettingsSectionId } from "@/lib/settingsRegistry";
 
@@ -95,7 +100,7 @@ export interface SettingsPageProps {
   manualCliPath: string;
   onManualCliPath: (v: string) => void;
   onCliBlur: (v: string) => void;
-  /** API mode: remote ACP server `host:port` (empty = local CLI spawn). */
+  /** API mode: loopback ACP server `localhost:port` (empty = local CLI spawn). */
   acpServerAddr: string;
   onAcpServerAddr: (v: string) => void;
   /** Max warm/live agent processes (I02). */
@@ -107,6 +112,8 @@ export interface SettingsPageProps {
   /** Stream stall silence timeout seconds (I06). */
   streamStallSeconds?: number;
   onStreamStallSeconds?: (v: number) => void;
+  sandboxProfile?: api.SandboxProfileV1;
+  onSandboxProfile?: (v: api.SandboxProfileV1) => void;
   /** Store App API keys in OS keychain (default off → secrets.json). */
   storeApiKeysInKeychain?: boolean;
   onStoreApiKeysInKeychain?: (v: boolean) => void;
@@ -205,8 +212,7 @@ function AcpServerField({
   const [result, setResult] = useState<api.AcpProbeResult | null>(null);
   const [copied, setCopied] = useState(false);
   const addr = value.trim();
-  const port = (addr.split(":")[1] || "").replace(/[^0-9]/g, "") || "8799";
-  const setupCmd = `socat TCP-LISTEN:${port},reuseaddr,fork EXEC:'grok agent --no-leader stdio'`;
+  const setupCmd = acpLoopbackSetupCommand(addr);
 
   const runTest = async () => {
     if (!addr || !api.isTauri()) return;
@@ -382,6 +388,8 @@ export function SettingsPage({
   onAgentIdleMinutes,
   streamStallSeconds = 120,
   onStreamStallSeconds,
+  sandboxProfile = "off",
+  onSandboxProfile,
   storeApiKeysInKeychain = false,
   onStoreApiKeysInKeychain,
   cliInfo,
@@ -419,6 +427,8 @@ export function SettingsPage({
     "official",
   );
   const [editors, setEditors] = useState<DetectedEditor[]>([]);
+  const [runtimeCapabilities, setRuntimeCapabilities] =
+    useState<api.RuntimeCapabilitiesV1 | null>(null);
   /** Selected archived session ids (settings → archived multi-select). */
   const [archivedSelected, setArchivedSelected] = useState<Set<string>>(
     () => new Set(),
@@ -446,6 +456,22 @@ export function SettingsPage({
     if (!api.isTauri()) return;
     void api.editorsList().then((r) => setEditors(r.editors ?? [])).catch(() => {});
   }, []);
+
+  useEffect(() => {
+    if (section !== "runtime") return;
+    let cancelled = false;
+    void api
+      .runtimeCapabilitiesV1()
+      .then((caps) => {
+        if (!cancelled) setRuntimeCapabilities(caps);
+      })
+      .catch(() => {
+        if (!cancelled) setRuntimeCapabilities(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [sandboxProfile, section]);
 
   const nav = useMemo(() => {
     return filterSettingsRegistry(query, t);
@@ -1322,6 +1348,50 @@ export function SettingsPage({
               onChange={onAcpServerAddr}
               t={t}
             />
+            <div className="settings-row settings-row--stack">
+              <div className="settings-row__text">
+                <div className="settings-row__label">
+                  {t("settings.sandboxProfile")}
+                </div>
+                <div className="settings-row__desc">
+                  {t("settings.sandboxProfileDesc")}
+                </div>
+              </div>
+              <Select
+                value={sandboxProfile}
+                onChange={(value) => onSandboxProfile?.(normalizeSandboxProfile(value))}
+                options={[
+                  { value: "off", label: t("settings.sandbox.off") },
+                  {
+                    value: "workspace_write",
+                    label: t("settings.sandbox.workspaceWrite"),
+                  },
+                  {
+                    value: "read_only",
+                    label: t("settings.sandbox.readOnly"),
+                  },
+                ]}
+              />
+              {runtimeCapabilities ? (
+                <div className="settings-row__hint" role="status">
+                  {t("settings.sandboxStatus", {
+                    requested: runtimeCapabilities.sandbox.requested,
+                    applied: runtimeCapabilities.sandbox.applied,
+                    verified: runtimeCapabilities.sandbox.verified
+                      ? t("settings.sandboxVerified")
+                      : t("settings.sandboxUnverified"),
+                  })}
+                  {` · ${t("settings.sandboxState", {
+                    state: t(
+                      sandboxStateMessageKey(
+                        runtimeCapabilities.sandbox.state,
+                      ),
+                    ),
+                    platform: runtimeCapabilities.sandbox.platform,
+                  })}`}
+                </div>
+              ) : null}
+            </div>
             <div className="settings-row settings-row--stack">
               <div className="settings-row__text">
                 <div className="settings-row__label">

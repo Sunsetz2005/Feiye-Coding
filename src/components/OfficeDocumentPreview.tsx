@@ -24,6 +24,7 @@ pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 export interface OfficeDocumentPreviewProps {
   kind: string;
   absolutePath: string;
+  resourceHandleId?: string | null;
   name: string;
   locale: Locale;
   /** Plain-text extract from host (pptx / fallback). */
@@ -45,6 +46,7 @@ type LoadState =
 export function OfficeDocumentPreview({
   kind,
   absolutePath,
+  resourceHandleId,
   name,
   locale,
   textFallback,
@@ -108,7 +110,11 @@ export function OfficeDocumentPreview({
 
     void (async () => {
       try {
-        const buf = await fetchPreviewArrayBuffer(absolutePath, kind);
+        const buf = await fetchPreviewArrayBuffer(
+          absolutePath,
+          kind,
+          resourceHandleId,
+        );
         if (cancelled) return;
         setLoad({ status: "ready", buffer: buf });
       } catch (e) {
@@ -123,7 +129,7 @@ export function OfficeDocumentPreview({
     return () => {
       cancelled = true;
     };
-  }, [absolutePath, kind, errorFromHost, tr]);
+  }, [absolutePath, kind, errorFromHost, resourceHandleId, tr]);
 
   // DOCX render — reflow to pane width (full text, no side clip)
   useEffect(() => {

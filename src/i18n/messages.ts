@@ -610,13 +610,13 @@ const en = {
   "settings.cliNotFound": "(not found)",
   "settings.acpServer": "ACP server (API mode)",
   "settings.acpServerDesc":
-    "Connect to a remote ACP agent over TCP (host:port) instead of spawning the local CLI — e.g. an agent in WSL, a container, or another host. Leave empty for local spawn.",
+    "Only loopback ACP endpoints are accepted. Enter localhost:port for WSL, a local container, or an SSH local port forward. Leave empty for local Runtime spawn.",
   "settings.acpTest": "Test",
   "settings.acpTesting": "Testing…",
   "settings.acpTestOk": "Connected — {version} · model {model}",
   "settings.acpTestFail": "Failed: {error}",
   "settings.acpSetupHint":
-    "On the machine that runs the agent, expose stdio over TCP (example with socat):",
+    "Bind the ACP proxy to loopback. For another machine, expose this loopback port only through an SSH local port forward:",
   "settings.maxConcurrentAgents": "Max concurrent agents",
   "settings.maxConcurrentAgentsDesc":
     "Warm agent processes kept for open chats (default 3). Opening more than this prompts you to wait or free a session.",
@@ -626,6 +626,23 @@ const en = {
   "settings.streamStallSeconds": "Stream stall timeout (seconds)",
   "settings.streamStallSecondsDesc":
     "If a turn has no stream chunks or tool activity for this long, show a Cancel / Keep waiting prompt (default 120). Long-running tools that still emit events do not count as stalled.",
+  "settings.sandboxProfile": "Runtime sandbox",
+  "settings.sandboxProfileDesc":
+    "Spawn-critical isolation profile. Changing it restarts the Runtime. Linux uses bubblewrap; unsupported platforms fail closed when a sandbox is requested.",
+  "settings.sandbox.off": "Off (default)",
+  "settings.sandbox.workspaceWrite": "Workspace write",
+  "settings.sandbox.readOnly": "Workspace read-only",
+  "settings.sandboxStatus":
+    "Requested: {requested} · applied: {applied} · {verified}",
+  "settings.sandboxVerified": "verified",
+  "settings.sandboxUnverified": "not verified",
+  "settings.sandboxState": "{state} · platform: {platform}",
+  "settings.sandboxState.off": "disabled",
+  "settings.sandboxState.available": "available on next Runtime start",
+  "settings.sandboxState.needsInstall": "bubblewrap is not installed",
+  "settings.sandboxState.unsupportedPlatform": "unsupported on this platform",
+  "settings.sandboxState.applied": "applied to the Runtime process",
+  "settings.sandboxState.unknown": "unknown state",
   "agent.idleRecycledToast":
     "Agent process recycled after idle — session kept; next message will reconnect.",
   "agent.processLimitToast":
@@ -1094,12 +1111,14 @@ const en = {
   "ext.plugins.working": "Working…",
   "ext.plugins.actionError": "Plugin action failed",
   "ext.plugins.filterLabel": "Filter plugins",
+  "ext.plugins.searchPlaceholder": "Search Runtime plugins…",
   "ext.plugins.filter.all": "All",
   "ext.plugins.filter.enabled": "Enabled",
   "ext.plugins.filter.disabled": "Disabled",
   "ext.plugins.filterEmpty": "No plugins match this filter.",
   "ext.plugins.note":
     "Same inventory as Sunsetz Runtime (the runtime plugin list). Enable/disable writes `shared runtime configuration`; the agent soft-respawns so the next turn reloads plugins.",
+  "ext.plugins.hooksInventory": "Hooks providers: {n}",
   "ext.skills.title": "Skills",
   "ext.skills.loading": "Loading skills…",
   "ext.skills.empty": "No skills discovered",
@@ -1839,13 +1858,13 @@ const zh: Record<MessageKey, string> = {
   "settings.cliNotFound": "（未找到）",
   "settings.acpServer": "ACP 服务器（API 模式）",
   "settings.acpServerDesc":
-    "通过 TCP（host:port）连接远程 ACP Agent，替代启动本地 CLI —— 例如运行在 WSL、容器或另一台主机上的 Agent。留空则使用本地启动。",
+    "只接受 loopback ACP 地址。WSL、本机容器或 SSH 本地端口转发请填写 localhost:port；留空则启动本地 Runtime。",
   "settings.acpTest": "测试连接",
   "settings.acpTesting": "测试中…",
   "settings.acpTestOk": "已连接 — {version} · 模型 {model}",
   "settings.acpTestFail": "失败：{error}",
   "settings.acpSetupHint":
-    "在运行 agent 的机器上，用类似 socat 的方式把 stdio 暴露到 TCP：",
+    "ACP 代理必须监听本机回环地址；连接另一台机器时，只通过 SSH 本地端口转发暴露该回环端口：",
   "settings.maxConcurrentAgents": "最大并发 Agent 数",
   "settings.maxConcurrentAgentsDesc":
     "为打开的对话保留的热 Agent 进程数（默认 3）。超过上限时会提示等待或释放其他会话。",
@@ -1855,6 +1874,23 @@ const zh: Record<MessageKey, string> = {
   "settings.streamStallSeconds": "流式卡顿超时（秒）",
   "settings.streamStallSecondsDesc":
     "若一轮对话在该时间内无任何流式片段或工具活动，将提示「取消本轮 / 继续等待」（默认 120）。仍有工具事件的长任务不会误判为卡顿。",
+  "settings.sandboxProfile": "Runtime 沙箱",
+  "settings.sandboxProfileDesc":
+    "该隔离配置会参与进程复用键，修改后强制重启 Runtime。Linux 使用 bubblewrap；不支持的平台在请求沙箱时会拒绝启动，不会静默降级。",
+  "settings.sandbox.off": "关闭（默认）",
+  "settings.sandbox.workspaceWrite": "工作区可写",
+  "settings.sandbox.readOnly": "工作区只读",
+  "settings.sandboxStatus":
+    "请求：{requested} · 实际：{applied} · {verified}",
+  "settings.sandboxVerified": "已验证",
+  "settings.sandboxUnverified": "未验证",
+  "settings.sandboxState": "{state} · 平台：{platform}",
+  "settings.sandboxState.off": "已关闭",
+  "settings.sandboxState.available": "将在下次 Runtime 启动时应用",
+  "settings.sandboxState.needsInstall": "尚未安装 bubblewrap",
+  "settings.sandboxState.unsupportedPlatform": "当前平台不支持",
+  "settings.sandboxState.applied": "已应用到 Runtime 进程",
+  "settings.sandboxState.unknown": "状态未知",
   "agent.idleRecycledToast":
     "Agent 进程因闲置已回收 — 会话仍在；下次发送将重新连接。",
   "agent.processLimitToast":
@@ -2313,12 +2349,14 @@ const zh: Record<MessageKey, string> = {
   "ext.plugins.working": "处理中…",
   "ext.plugins.actionError": "插件操作失败",
   "ext.plugins.filterLabel": "筛选插件",
+  "ext.plugins.searchPlaceholder": "搜索 Runtime 插件…",
   "ext.plugins.filter.all": "全部",
   "ext.plugins.filter.enabled": "已启用",
   "ext.plugins.filter.disabled": "已禁用",
   "ext.plugins.filterEmpty": "没有符合筛选条件的插件。",
   "ext.plugins.note":
     "与 Sunsetz Runtime 共用同一清单（the runtime plugin list）。启用/禁用写入 `shared runtime configuration`；agent soft-respawn 后下一轮对话重新加载插件。",
+  "ext.plugins.hooksInventory": "Hooks 提供方：{n}",
   "ext.skills.title": "技能",
   "ext.skills.loading": "正在加载技能…",
   "ext.skills.empty": "未发现技能",

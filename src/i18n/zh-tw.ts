@@ -575,13 +575,13 @@ export const zhTW: Record<MessageKey, string> = {
   "settings.cliNotFound": "（未找到）",
   "settings.acpServer": "ACP 伺服器（API 模式）",
   "settings.acpServerDesc":
-    "透過 TCP（host:port）連線遠端 ACP Agent，取代啟動本機 CLI —— 例如執行在 WSL、容器或另一台主機上的 Agent。留空則使用本機啟動。",
+    "只接受 loopback ACP 位址。WSL、本機容器或 SSH 本機連接埠轉送請填 localhost:port；留空則啟動本機 Runtime。",
   "settings.acpTest": "測試連線",
   "settings.acpTesting": "測試中…",
   "settings.acpTestOk": "已連線 — {version} · 模型 {model}",
   "settings.acpTestFail": "失敗：{error}",
   "settings.acpSetupHint":
-    "在執行 agent 的機器上，用類似 socat 的方式把 stdio 暴露到 TCP：",
+    "ACP 代理必須監聽本機回環位址；連線另一台機器時，只透過 SSH 本機連接埠轉送暴露該回環連接埠：",
   "settings.maxConcurrentAgents": "最大並發 Agent 數",
   "settings.maxConcurrentAgentsDesc":
     "為開啟的對話保留的熱 Agent 行程數（預設 3）。超過上限時會提示等待或釋放其他工作階段。",
@@ -591,6 +591,23 @@ export const zhTW: Record<MessageKey, string> = {
   "settings.streamStallSeconds": "串流停滯逾時（秒）",
   "settings.streamStallSecondsDesc":
     "若一輪對話在該時間內無任何串流片段或工具活動，將提示「取消本輪 / 繼續等待」（預設 120）。仍有工具事件的長任務不會誤判為停滯。",
+  "settings.sandboxProfile": "Runtime 沙箱",
+  "settings.sandboxProfileDesc":
+    "此隔離設定會納入行程重用鍵，修改後強制重新啟動 Runtime。Linux 使用 bubblewrap；不支援的平台在要求沙箱時會拒絕啟動，不會靜默降級。",
+  "settings.sandbox.off": "關閉（預設）",
+  "settings.sandbox.workspaceWrite": "工作區可寫",
+  "settings.sandbox.readOnly": "工作區唯讀",
+  "settings.sandboxStatus":
+    "要求：{requested} · 實際：{applied} · {verified}",
+  "settings.sandboxVerified": "已驗證",
+  "settings.sandboxUnverified": "未驗證",
+  "settings.sandboxState": "{state} · 平台：{platform}",
+  "settings.sandboxState.off": "已關閉",
+  "settings.sandboxState.available": "將在下次 Runtime 啟動時套用",
+  "settings.sandboxState.needsInstall": "尚未安裝 bubblewrap",
+  "settings.sandboxState.unsupportedPlatform": "目前平台不支援",
+  "settings.sandboxState.applied": "已套用到 Runtime 行程",
+  "settings.sandboxState.unknown": "狀態未知",
   "agent.idleRecycledToast":
     "Agent 行程因閒置已回收 — 工作階段仍在；下次傳送將重新連線。",
   "agent.processLimitToast":
@@ -1048,12 +1065,14 @@ export const zhTW: Record<MessageKey, string> = {
   "ext.plugins.working": "處理中…",
   "ext.plugins.actionError": "外掛操作失敗",
   "ext.plugins.filterLabel": "篩選外掛",
+  "ext.plugins.searchPlaceholder": "搜尋 Runtime 外掛…",
   "ext.plugins.filter.all": "全部",
   "ext.plugins.filter.enabled": "已啟用",
   "ext.plugins.filter.disabled": "已停用",
   "ext.plugins.filterEmpty": "沒有符合篩選條件的外掛。",
   "ext.plugins.note":
     "與 Sunsetz Runtime 共用同一清單（the runtime plugin list）。啟用/停用寫入 `shared runtime configuration`；agent soft-respawn 後下一輪對話重新載入外掛。",
+  "ext.plugins.hooksInventory": "Hooks 提供方：{n}",
   "ext.skills.title": "技能",
   "ext.skills.loading": "正在載入技能…",
   "ext.skills.empty": "未發現技能",

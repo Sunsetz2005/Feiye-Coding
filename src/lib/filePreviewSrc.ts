@@ -4,7 +4,7 @@
  * bounded chunks) so multi‑GB files never load fully into memory.
  * HTML is rendered via HtmlBrowser (srcDoc) — not via this URL helper —
  * because `file://` is blocked inside Tauri's main webview iframes.
- * Small images may use asset protocol or data URLs.
+ * Small images use resource handles or data URLs.
  */
 
 import type { FsReadResult } from "@/lib/api";
@@ -20,7 +20,7 @@ function useMediaProtocol(kind: string): boolean {
   );
 }
 
-/** Kinds that load binary via convertFileSrc for rich client-side render. */
+/** Kinds that load binary through an authorized resource URL. */
 export function isOfficeKind(kind: string): boolean {
   return (
     kind === "docx" ||
@@ -57,24 +57,28 @@ export function pathToFileUrl(absolutePath: string): string {
  * Convert absolute path → URL the webview can load.
  * `media` protocol: range streaming (video/audio/pdf/large image).
  * `file` protocol: local HTML.
- * `asset` protocol: fallback for everything else.
+ * Other local kinds require a ResourceHandleV1; there is no broad asset fallback.
  */
 export async function pathToPreviewUrl(
   absolutePath: string,
   kind?: string,
+  resourceHandleId?: string | null,
 ): Promise<string | null> {
-  if (!absolutePath) return null;
-  // HTML is handled by HtmlBrowser (srcDoc); asset URL is only a fetch fallback
+  if (!absolutePath && !resourceHandleId) return null;
+  // HTML is handled by HtmlBrowser (srcDoc).
   if (!isTauri()) {
     if (kind === "html") return pathToFileUrl(absolutePath);
     return null;
   }
   try {
     const { convertFileSrc } = await import("@tauri-apps/api/core");
+    if (resourceHandleId) {
+      return convertFileSrc(resourceHandleId, "resource");
+    }
     if (kind && useMediaProtocol(kind)) {
       return convertFileSrc(absolutePath, "media");
     }
-    return convertFileSrc(absolutePath);
+    return null;
   } catch {
     return null;
   }
@@ -90,7 +94,11 @@ export async function resolvePreviewSrc(
 
   // Prefer stream path for video/audio/pdf/large image
   if (preview.stream && preview.absolutePath && isTauri()) {
-    const url = await pathToPreviewUrl(preview.absolutePath, preview.kind);
+    const url = await pathToPreviewUrl(
+      preview.absolutePath,
+      preview.kind,
+      preview.resourceHandleId,
+    );
     if (url) return url;
   }
 
@@ -108,7 +116,11 @@ export async function resolvePreviewSrc(
       preview.kind === "image" ||
       isOfficeKind(preview.kind))
   ) {
-    return pathToPreviewUrl(preview.absolutePath, preview.kind);
+    return pathToPreviewUrl(
+      preview.absolutePath,
+      preview.kind,
+      preview.resourceHandleId,
+    );
   }
 
   return null;
@@ -118,8 +130,9 @@ export async function resolvePreviewSrc(
 export async function fetchPreviewArrayBuffer(
   absolutePath: string,
   kind?: string,
+  resourceHandleId?: string | null,
 ): Promise<ArrayBuffer> {
-  const url = await pathToPreviewUrl(absolutePath, kind);
+  const url = await pathToPreviewUrl(absolutePath, kind, resourceHandleId);
   if (!url) {
     throw new Error("cannot resolve local file URL");
   }

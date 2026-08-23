@@ -59,6 +59,7 @@ import {
   type AskUserPayload,
   type ChatMessage,
   type GeneratedImagePayload,
+  type InteractionSnapshotV1,
   type PermissionPayload,
   type SessionSnapshot,
   type SessionTokenUsage,
@@ -206,7 +207,6 @@ import {
 import {
   aiCreateSeedPrompt,
   computeNextRunAt,
-  isDue,
   parseScheduledUserContent,
   type Automation,
 } from "@/lib/automations";
@@ -215,6 +215,22 @@ import {
   looksLikeScheduleIntent,
   wrapAutomationSetupAgentText,
 } from "@/lib/automationSetup";
+import {
+  askUserFromInteraction,
+  automationClaimIntake,
+  canStartAutomationClaim,
+  interactionMatches,
+  isActiveInteraction,
+  mergeContentSearchSessions,
+  normalizeSandboxProfile,
+  pendingInteractionSessionIds,
+  permissionFromInteraction,
+  planResolutionContext,
+  rememberSkillCandidateIds,
+  skillCandidateAtBootstrap,
+  unseenSkillCandidateForSession,
+  updateActiveInteractions,
+} from "@/lib/runtimeMigrationUi";
 import {
   ComposerAccessMenu,
   ComposerModelMenu,
@@ -312,6 +328,7 @@ interface PlanState {
   waiting: boolean;
   /** Pending exit_plan_mode JSON-RPC id */
   rpcId?: number | null;
+  interactionId?: string | null;
   toolCallId?: string | null;
   /**
    * Soft-hide the top PlanStatusBar without clearing progress.
@@ -414,6 +431,9 @@ export default function App() {
   appDialogRef.current = appDialog;
   const [showSearch, setShowSearch] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
+  const [contentSearchHits, setContentSearchHits] = useState<
+    api.SessionSearchResultV1[]
+  >([]);
   const [showComposerPlus, setShowComposerPlus] = useState(false);
   const [finderSelectionFeedback, setFinderSelectionFeedback] = useState<
     string | null
@@ -423,6 +443,10 @@ export default function App() {
   const [projectMenuOpenKey, setProjectMenuOpenKey] = useState(0);
   /** Review sheet for creating a reusable skill from visible conversation data. */
   const [skillRecorderOpen, setSkillRecorderOpen] = useState(false);
+  const [skillCandidate, setSkillCandidate] =
+    useState<api.SkillCandidateV1 | null>(null);
+  const seenSkillCandidateIdsRef = useRef<Set<string>>(new Set());
+  const skillCandidatesReadyRef = useRef(false);
   const pendingSkillGenerationRef = useRef<{
     startIndex: number;
     sessionId: string | null;
@@ -452,7 +476,9 @@ export default function App() {
     useState<SettingsSectionId>("general");
   /** Prevent overlapping automation runs. */
   const automationRunLock = useRef(false);
-  const firedAutomationIds = useRef<Set<string>>(new Set());
+  const [pendingAutomationClaim, setPendingAutomationClaim] =
+    useState<api.AutomationClaimV1 | null>(null);
+  const handledAutomationClaimIds = useRef<Set<string>>(new Set());
   /** Conversation is guiding the user to create a scheduled task. */
   const automationSetupDraftRef = useRef(false);
   const automationSetupSessionsRef = useRef<Set<string>>(new Set());
@@ -601,9 +627,12 @@ export default function App() {
   const [perm, setPerm] = useState<PermissionPayload | null>(null);
   const permBarRef = useRef<HTMLDivElement | null>(null);
   const [askUser, setAskUser] = useState<AskUserPayload | null>(null);
-  /** Background tasks that are paused on an Agent question. */
+  /** Background tasks paused on permission, plan review, or Agent questions. */
   const [pendingAskSessionIds, setPendingAskSessionIds] = useState<Set<string>>(
     () => new Set(),
+  );
+  const activeInteractionsRef = useRef<Map<string, InteractionSnapshotV1>>(
+    new Map(),
   );
   /** Polite SR announce for stream start/stop (not every token). */
   const [streamA11yNote, setStreamA11yNote] = useState("");
@@ -616,6 +645,7 @@ export default function App() {
     // Only show when Agent sends a plan event (or user opens Plan mode later)
     visible: false,
     rpcId: null,
+    interactionId: null,
     toolCallId: null,
     barDismissed: false,
   });
@@ -625,6 +655,76 @@ export default function App() {
   const tr = useMemo(() => createT(locale), [locale]);
   const trRef = useRef(tr);
   trRef.current = tr;
+  const syncPendingInteractionSessions = useCallback(() => {
+    setPendingAskSessionIds(
+      pendingInteractionSessionIds(
+        activeInteractionsRef.current,
+        viewingSessionIdRef.current,
+      ),
+    );
+  }, []);
+  const applyInteractionSnapshot = useCallback(
+    (interaction: InteractionSnapshotV1) => {
+      const active = isActiveInteraction(interaction);
+      const focused = interaction.sessionId === viewingSessionIdRef.current;
+      activeInteractionsRef.current = updateActiveInteractions(
+        activeInteractionsRef.current,
+        interaction,
+      );
+      syncPendingInteractionSessions();
+      if (!focused) return;
+
+      if (!active) {
+        if (interaction.payload.kind === "permission") {
+          setPerm((current) =>
+            interactionMatches(current?.interactionId, interaction) ? null : current,
+          );
+        } else if (interaction.payload.kind === "ask_user") {
+          setAskUser((current) =>
+            interactionMatches(current?.interactionId, interaction) ? null : current,
+          );
+        } else {
+          setPlan((current) =>
+            interactionMatches(current.interactionId, interaction)
+              ? {
+                  ...current,
+                  rpcId: null,
+                  interactionId: null,
+                  waiting: false,
+                }
+              : current,
+          );
+        }
+        return;
+      }
+
+      const payload = interaction.payload;
+      if (payload.kind === "permission") {
+        setPerm(permissionFromInteraction(interaction));
+      } else if (payload.kind === "ask_user") {
+        setAskUser(askUserFromInteraction(interaction));
+      } else {
+        const entries = Array.isArray(payload.entries) ? payload.entries : [];
+        const body = (payload.body || "").trim();
+        setPlan((current) => ({
+          ...current,
+          title: trRef.current("resources.plan"),
+          body: body || current.body,
+          entries: entries.length ? entries : current.entries,
+          waiting: false,
+          visible: true,
+          rpcId: interaction.rpcId,
+          interactionId: interaction.interactionId,
+          toolCallId: interaction.toolCallId,
+          barDismissed: false,
+        }));
+      }
+    },
+    [syncPendingInteractionSessions],
+  );
+  useEffect(() => {
+    syncPendingInteractionSessions();
+  }, [session.sessionId, syncPendingInteractionSessions]);
   const [modelId, setModelId] = useState(DEFAULT_MODEL_ID);
   const [effort, setEffort] = useState(DEFAULT_EFFORT);
   const [mode, setMode] = useState("agent");
@@ -664,6 +764,8 @@ export default function App() {
   const [maxConcurrentAgents, setMaxConcurrentAgents] = useState(3);
   const [agentIdleMinutes, setAgentIdleMinutes] = useState(30);
   const [streamStallSeconds, setStreamStallSeconds] = useState(120);
+  const [sandboxProfile, setSandboxProfile] =
+    useState<api.SandboxProfileV1>("off");
   const [storeApiKeysInKeychain, setStoreApiKeysInKeychain] = useState(false);
   const [gitWorktrees, setGitWorktrees] = useState<api.GitWorktreeEntry[]>([]);
   /** null = unknown/loading; true = git work tree; false = not a git repo. */
@@ -908,6 +1010,7 @@ export default function App() {
           ? Math.min(900, Math.round(settings.streamStallSeconds))
           : 120,
       );
+      setSandboxProfile(normalizeSandboxProfile(settings.sandboxProfile));
       setStoreApiKeysInKeychain(!!settings.storeApiKeysInKeychain);
       setCliInfo({
         found: cli.found,
@@ -1533,6 +1636,12 @@ export default function App() {
           }),
         );
         await track(
+          api.listen<InteractionSnapshotV1>("session://interaction", (payload) => {
+            if (cancelled) return;
+            applyInteractionSnapshot(payload);
+          }),
+        );
+        await track(
           api.listen<PermissionPayload>("session://permission", (p) => {
             if (cancelled) return;
             // Only surface the bar when viewing the session that needs it.
@@ -1605,6 +1714,7 @@ export default function App() {
             sessionId?: string;
             rpcId?: number | null;
             toolCallId?: string | null;
+            interactionId?: string | null;
             waiting?: boolean;
           }>("session://plan", (p) => {
             if (cancelled) return;
@@ -1653,6 +1763,10 @@ export default function App() {
                 waiting: rpcId == null,
                 visible: true,
                 rpcId,
+                interactionId:
+                  p.interactionId != null
+                    ? p.interactionId
+                    : (prev.interactionId ?? null),
                 toolCallId:
                   p.toolCallId != null
                     ? p.toolCallId
@@ -1689,27 +1803,11 @@ export default function App() {
           ),
         );
 
-        // Restore every foreground/background Agent question after a WebView
-        // reload. Live events remain the source of truth after this bootstrap.
-        const pendingInteractions = await api.sessionPendingInteractions();
+        // Restore every foreground/background interaction after a WebView reload.
+        // Live events remain the source of truth after this bootstrap.
+        const pendingInteractions = await api.sessionInteractionsList();
         if (!cancelled) {
-          const focusedId = viewingSessionIdRef.current;
-          const focused = focusedId
-            ? pendingInteractions.find((item) => item.sessionId === focusedId)
-            : undefined;
-          setPendingAskSessionIds((current) => {
-            const next = new Set(current);
-            for (const item of pendingInteractions) {
-              if (item.sessionId && item.sessionId !== focusedId) {
-                next.add(item.sessionId);
-              }
-            }
-            if (focusedId) next.delete(focusedId);
-            return next;
-          });
-          if (focused) {
-            setAskUser((current) => current ?? focused);
-          }
+          pendingInteractions.forEach(applyInteractionSnapshot);
         }
       } catch (e) {
         if (!cancelled) setLocalError(String(e));
@@ -1720,7 +1818,11 @@ export default function App() {
       cancelled = true;
       cleanups.forEach((u) => u());
     };
-  }, [patchSessionMessages, tryApplyAutomationFromSession]);
+  }, [
+    applyInteractionSnapshot,
+    patchSessionMessages,
+    tryApplyAutomationFromSession,
+  ]);
 
   const toggleThemeBtn = () => {
     setTheme((t) => {
@@ -2057,19 +2159,20 @@ export default function App() {
       setRetryStatus(null);
     }
 
-    // Recover a question that belongs to this task, including one raised while
-    // it was in the background or while the WebView was reloading.
+    // Recover any interaction that belongs to this task, including one raised
+    // while it was in the background or while the WebView was reloading.
     if (api.isTauri()) {
       void api
-        .sessionGetPendingAskUser(s.id)
-        .then((pending) => {
+        .sessionInteractionsList(s.id)
+        .then((interactions) => {
           if (viewingSessionIdRef.current !== s.id) return;
-          setPendingAskSessionIds((current) => {
-            const next = new Set(current);
-            next.delete(s.id);
-            return next;
-          });
-          setAskUser(pending);
+          interactions
+            .filter(
+              (interaction) =>
+                interaction.status === "pending" ||
+                interaction.status === "resolving",
+            )
+            .forEach(applyInteractionSnapshot);
         })
         .catch(() => {
           // Keep the transcript usable; a later live event can still restore it.
@@ -2362,7 +2465,7 @@ export default function App() {
   const runAutomation = useCallback(
     async (
       auto: Automation,
-      opts?: { fromScheduler?: boolean },
+      opts?: { fromScheduler?: boolean; claimId?: string },
     ): Promise<boolean> => {
       if (automationRunLock.current) return false;
       if (opts?.fromScheduler && (session.state === "streaming" || connecting)) {
@@ -2424,6 +2527,9 @@ export default function App() {
           )) as { id: string; title?: string; scheduled?: boolean };
           sessionId = meta.id;
           createdSessionId = meta.id;
+          if (opts?.claimId) {
+            await api.automationClaimBindV1(opts.claimId, meta.id);
+          }
           viewingSessionIdRef.current = meta.id;
           setSession((prev) => ({
             ...prev,
@@ -2545,17 +2651,19 @@ export default function App() {
           return false;
         }
 
-        const lastRunAt = new Date().toISOString();
-        const nextRunAt =
-          auto.frequency === "once"
-            ? null
-            : computeNextRunAt(
-                { ...auto, enabled: auto.frequency !== "once" },
-                new Date(Date.now() + 60_000),
-              );
-        await api.automationMarkRun(auto.id, lastRunAt, nextRunAt);
-        if (auto.frequency === "once") {
-          await api.automationSetEnabled(auto.id, false);
+        if (!opts?.fromScheduler) {
+          const lastRunAt = new Date().toISOString();
+          const nextRunAt =
+            auto.frequency === "once"
+              ? null
+              : computeNextRunAt(
+                  { ...auto, enabled: auto.frequency !== "once" },
+                  new Date(Date.now() + 60_000),
+                );
+          await api.automationMarkRun(auto.id, lastRunAt, nextRunAt);
+          if (auto.frequency === "once") {
+            await api.automationSetEnabled(auto.id, false);
+          }
         }
         setToast(tr("automations.runningToast", { title: auto.title }));
         window.setTimeout(() => setToast(null), 3200);
@@ -2570,42 +2678,76 @@ export default function App() {
     [projects, session.state, connecting, tr],
   );
 
-  // Shell scheduler: poll enabled automations while app is open.
+  // Rust Host owns due-time polling and atomic claims. The WebView only runs
+  // an already-claimed prompt through the existing ACP session path.
   useEffect(() => {
-    if (!api.isTauri() && typeof window === "undefined") return;
-    const tick = async () => {
-      if (automationRunLock.current || connecting) return;
-      if (session.state === "streaming") return;
-      try {
-        const rows = await api.automationsList();
-        const due = rows.find(
-          (r) =>
-            r.enabled &&
-            isDue(r as Automation) &&
-            !firedAutomationIds.current.has(`${r.id}:${r.nextRunAt ?? ""}`),
+    if (!api.isTauri()) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void api
+      .listen<api.AutomationClaimV1>("automation://claim_v1", (claim) => {
+        const intake = automationClaimIntake(
+          claim,
+          handledAutomationClaimIds.current,
+          disposed,
         );
-        if (!due) return;
-        const fireKey = `${due.id}:${due.nextRunAt ?? ""}`;
-        // Claim only after we know we will attempt; release on failure so due tasks retry.
-        firedAutomationIds.current.add(fireKey);
-        const ok = await runAutomation(due as Automation, {
-          fromScheduler: true,
-        });
-        if (!ok) {
-          firedAutomationIds.current.delete(fireKey);
+        if (intake === "ignore") return;
+        // A bound claim is already executing in the Host-owned session. After
+        // a WebView reload, wait for Host completion instead of sending the
+        // scheduled prompt a second time.
+        if (intake === "bound") {
+          handledAutomationClaimIds.current.add(claim.claimId);
+          return;
         }
-      } catch {
-        /* ignore tick errors */
-      }
-    };
-    const id = window.setInterval(() => void tick(), 30_000);
-    // First check shortly after mount.
-    const boot = window.setTimeout(() => void tick(), 8_000);
+        setPendingAutomationClaim((current) => current ?? claim);
+      })
+      .then((dispose) => {
+        if (disposed) dispose();
+        else unlisten = dispose;
+      });
     return () => {
-      window.clearInterval(id);
-      window.clearTimeout(boot);
+      disposed = true;
+      unlisten?.();
     };
-  }, [runAutomation, connecting, session.state]);
+  }, []);
+
+  useEffect(() => {
+    const claim = pendingAutomationClaim;
+    if (
+      !claim ||
+      !canStartAutomationClaim({
+        claim,
+        connecting,
+        sessionState: session.state,
+        runLocked: automationRunLock.current,
+        handledIds: handledAutomationClaimIds.current,
+      })
+    ) {
+      return;
+    }
+    handledAutomationClaimIds.current.add(claim.claimId);
+    void runAutomation(claim.automation as Automation, {
+      fromScheduler: true,
+      claimId: claim.claimId,
+    })
+      .then(async (success) => {
+        if (!success) {
+          await api.automationClaimCompleteV1(
+            claim.claimId,
+            false,
+            "automation execution did not start",
+          );
+        }
+      })
+      .catch(async (error) => {
+        await api
+          .automationClaimCompleteV1(claim.claimId, false, String(error))
+          .catch(() => {});
+      })
+      .finally(() => {
+        setPendingAutomationClaim(null);
+      });
+  }, [connecting, pendingAutomationClaim, runAutomation, session.state]);
 
   const refreshProjects = async () => {
     try {
@@ -2974,9 +3116,31 @@ export default function App() {
     });
   };
 
-  const searchHits = useMemo(
-    () =>
-      filterSessionSearch(
+  useEffect(() => {
+    const query = searchQuery.trim();
+    if (!showSearch || !query || !api.isTauri()) {
+      setContentSearchHits([]);
+      return;
+    }
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      void api
+        .sessionSearchV1(query, 40)
+        .then((hits) => {
+          if (!cancelled) setContentSearchHits(hits);
+        })
+        .catch(() => {
+          if (!cancelled) setContentSearchHits([]);
+        });
+    }, 180);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [searchQuery, showSearch]);
+
+  const searchHits = useMemo(() => {
+    const base = filterSessionSearch(
         searchQuery,
         sessions.map((s) => ({
           id: s.id,
@@ -2985,9 +3149,14 @@ export default function App() {
           archived: s.archived,
         })),
         projects.map((p) => ({ id: p.id, name: p.name, path: p.path })),
-      ),
-    [searchQuery, sessions, projects],
-  );
+      );
+    const merged = mergeContentSearchSessions(
+      base.matchedSessions,
+      sessions,
+      contentSearchHits,
+    );
+    return { ...base, matchedSessions: merged };
+  }, [contentSearchHits, searchQuery, sessions, projects]);
 
   const connPill = useMemo(
     () => connPillForState(session.state, connecting),
@@ -3424,6 +3593,7 @@ export default function App() {
   const generateSkillDraft = (
     request: SkillGenerationRequest,
   ): Promise<SkillDraft> => {
+    setSkillCandidate(null);
     if (pendingSkillGenerationRef.current) {
       return Promise.reject(
         new Error(tr("skillRecorder.generationAlreadyRunning")),
@@ -3458,6 +3628,58 @@ export default function App() {
       });
     });
   };
+
+  useEffect(() => {
+    if (!api.isTauri()) {
+      skillCandidatesReadyRef.current = true;
+      return;
+    }
+    let cancelled = false;
+    void api
+      .skillCandidatesListV1()
+      .then((candidates) => {
+        if (cancelled) return;
+        rememberSkillCandidateIds(seenSkillCandidateIdsRef.current, candidates);
+        setSkillCandidate(skillCandidateAtBootstrap(candidates));
+        skillCandidatesReadyRef.current = true;
+      })
+      .catch(() => {
+        skillCandidatesReadyRef.current = true;
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (
+      !skillCandidatesReadyRef.current ||
+      !api.isTauri() ||
+      session.state !== "ready" ||
+      !session.sessionId
+    ) {
+      return;
+    }
+    let cancelled = false;
+    void api
+      .skillCandidatesListV1()
+      .then((candidates) => {
+        if (cancelled) return;
+        const candidate = unseenSkillCandidateForSession(
+          candidates,
+          session.sessionId,
+          seenSkillCandidateIdsRef.current,
+        );
+        rememberSkillCandidateIds(seenSkillCandidateIdsRef.current, candidates);
+        if (!candidate) return;
+        setSkillCandidate(candidate);
+        setSkillRecorderOpen(true);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [session.sessionId, session.state]);
 
   useEffect(() => {
     const pending = pendingSkillGenerationRef.current;
@@ -5541,6 +5763,8 @@ export default function App() {
         if (deny) {
           void api
             .sessionResolvePermission({
+              interactionId: perm.interactionId,
+              sessionId: perm.sessionId,
               rpcId: perm.rpcId,
               decision: deny.decision,
               optionId: deny.optionId,
@@ -6584,6 +6808,13 @@ export default function App() {
           onSkillsPrefsChanged={() =>
             setSkillsReloadToken((n) => n + 1)
           }
+          sandboxProfile={sandboxProfile}
+          onSandboxProfile={(v) => {
+            setSandboxProfile(v);
+            void api.settingsGet().then((s) =>
+              api.settingsSet({ ...s, sandboxProfile: v }),
+            );
+          }}
           onProviderActivated={() => {
             // Hot-reload Sunsetz Runtime: drop live ACP so next send re-spawns with new GROK_HOME config.
             void (async () => {
@@ -7215,6 +7446,8 @@ export default function App() {
                       onClick={() =>
                         void api
                           .sessionResolvePermission({
+                            interactionId: perm.interactionId,
+                            sessionId: perm.sessionId,
                             rpcId: perm.rpcId,
                             decision: btn.decision,
                             optionId: btn.optionId,
@@ -7249,6 +7482,7 @@ export default function App() {
                 }}
                 onSubmit={async (answers) => {
                   await api.sessionResolveAskUser({
+                    interactionId: askUser.interactionId,
                     sessionId: askUser.sessionId ?? session.sessionId,
                     decision: "accepted",
                     answers,
@@ -7263,6 +7497,7 @@ export default function App() {
                 }}
                 onCancel={async () => {
                   await api.sessionResolveAskUser({
+                    interactionId: askUser.interactionId,
                     sessionId: askUser.sessionId ?? session.sessionId,
                     decision: "cancelled",
                     rpcId: askUser.rpcId,
@@ -7297,6 +7532,10 @@ export default function App() {
                   const answer = Object.values(answers)[0]?.trim() || "";
                   if (answer === tr("plan.confirmApprove")) {
                     await api.sessionResolvePlan({
+                      ...planResolutionContext(
+                        plan.interactionId,
+                        session.sessionId,
+                      ),
                       decision: "approved",
                       rpcId: planApprovalPayload.rpcId,
                     });
@@ -7311,6 +7550,10 @@ export default function App() {
                   }
                   if (answer) {
                     await api.sessionResolvePlan({
+                      ...planResolutionContext(
+                        plan.interactionId,
+                        session.sessionId,
+                      ),
                       decision: "cancelled",
                       feedback: answer,
                       rpcId: planApprovalPayload.rpcId,
@@ -7325,6 +7568,10 @@ export default function App() {
                     return;
                   }
                   await api.sessionResolvePlan({
+                    ...planResolutionContext(
+                      plan.interactionId,
+                      session.sessionId,
+                    ),
                     decision: "abandoned",
                     rpcId: planApprovalPayload.rpcId,
                   });
@@ -7340,6 +7587,10 @@ export default function App() {
                 }}
                 onCancel={async () => {
                   await api.sessionResolvePlan({
+                    ...planResolutionContext(
+                      plan.interactionId,
+                      session.sessionId,
+                    ),
                     decision: "abandoned",
                     rpcId: planApprovalPayload.rpcId,
                   });
@@ -8033,6 +8284,7 @@ export default function App() {
         open={skillRecorderOpen}
         messages={messages}
         projectPath={activeProject?.path ?? null}
+        draft={skillCandidate?.draft ?? null}
         labels={{
           title: tr("skillRecorder.title"),
           close: tr("common.close"),
@@ -8079,13 +8331,25 @@ export default function App() {
         onGenerate={generateSkillDraft}
         onSave={async (draft, scope, overwrite) => {
           try {
-            await api.skillDraftSave({
-              ...draft,
-              scope,
-              projectPath:
-                scope === "project" ? activeProject?.path ?? null : null,
-              overwrite,
-            });
+            const projectPath =
+              scope === "project" ? activeProject?.path ?? null : null;
+            if (skillCandidate) {
+              await api.skillCandidateApproveV1({
+                id: skillCandidate.id,
+                scope,
+                projectPath,
+                draft,
+                overwrite,
+                userConfirmedOverwrite: overwrite,
+              });
+            } else {
+              await api.skillDraftSave({
+                ...draft,
+                scope,
+                projectPath,
+                overwrite,
+              });
+            }
             return { status: "saved" as const };
           } catch (error) {
             const detail = String(error);
@@ -8099,6 +8363,7 @@ export default function App() {
           }
         }}
         onSaved={() => {
+          setSkillCandidate(null);
           setSkillsReloadToken((token) => token + 1);
           showToast(tr("skillRecorder.savedToast"), 3200);
         }}
@@ -8408,6 +8673,9 @@ export default function App() {
               const s = sessions.find((x) => x.id === hit.id);
               if (!s) return null;
               const proj = projects.find((p) => p.id === s.projectId);
+              const contentHit = contentSearchHits.find(
+                (candidate) => candidate.sessionId === s.id,
+              );
               return (
                 <button
                   key={s.id}
@@ -8423,7 +8691,7 @@ export default function App() {
                     {s.title || tr("session.untitled")}
                   </span>
                   <span className="search-panel__meta">
-                    {proj?.name ?? "—"}
+                    {contentHit?.snippet || proj?.name || "—"}
                     {i < 9 ? `  ⌘${i + 1}` : ""}
                   </span>
                 </button>

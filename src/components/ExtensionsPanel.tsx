@@ -59,6 +59,10 @@ export function ExtensionsPanel({
   const [skills, setSkills] = useState<api.SkillDto[]>([]);
   const [servers, setServers] = useState<api.McpDto[]>([]);
   const [plugins, setPlugins] = useState<api.PluginDto[]>([]);
+  const [hooksInventory, setHooksInventory] = useState<
+    api.RuntimeHookInventoryItemV1[]
+  >([]);
+  const [pluginQuery, setPluginQuery] = useState("");
   const [skillsError, setSkillsError] = useState<string | null>(null);
   const [mcpError, setMcpError] = useState<string | null>(null);
   const [pluginsError, setPluginsError] = useState<string | null>(null);
@@ -96,7 +100,7 @@ export function ExtensionsPanel({
     setPluginsError(null);
     setPathHint(null);
     const cwd = projectPath?.trim() || null;
-    const [skillsRes, mcpRes, pluginsRes, providersRes] = await Promise.all([
+    const [skillsRes, mcpRes, pluginsRes, hooksRes, providersRes] = await Promise.all([
       api.skillsList(cwd).catch((e) => ({
         skills: [] as api.SkillDto[],
         error: String(e),
@@ -105,15 +109,20 @@ export function ExtensionsPanel({
         servers: [] as api.McpDto[],
         error: String(e),
       })),
-      api.pluginsList().catch((e) => ({
+      api.runtimePluginsCatalogV1().catch((e) => ({
+        version: 1 as const,
+        source: "runtime_cli",
+        installActionAvailable: false as const,
         plugins: [] as api.PluginDto[],
         error: String(e),
       })),
+      api.runtimeHooksInventoryV1().catch(() => []),
       api.providersList().catch(() => null),
     ]);
     setSkills(sortSkillsByName(skillsRes.skills ?? []));
     setServers(sortMcpByName(mcpRes.servers ?? []));
     setPlugins(sortPluginsByName(pluginsRes.plugins ?? []));
+    setHooksInventory(hooksRes);
     setSkillsError(skillsRes.error?.trim() ? skillsRes.error : null);
     setMcpError(mcpRes.error?.trim() ? mcpRes.error : null);
     setPluginsError(pluginsRes.error?.trim() ? pluginsRes.error : null);
@@ -127,6 +136,20 @@ export function ExtensionsPanel({
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  useEffect(() => {
+    if (!api.isTauri()) return;
+    const timer = window.setTimeout(() => {
+      void api
+        .runtimePluginsCatalogV1(pluginQuery)
+        .then((result) => {
+          setPlugins(sortPluginsByName(result.plugins ?? []));
+          setPluginsError(result.error?.trim() || null);
+        })
+        .catch((error) => setPluginsError(String(error)));
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [pluginQuery]);
 
   const bannerError = useMemo(
     () => mergeInspectErrors(skillsError, mcpError, pluginsError),
@@ -395,11 +418,19 @@ export function ExtensionsPanel({
       </h2>
       <div className="settings-card ext-card">
         {!loading && plugins.length > 0 ? (
-          <div
-            className="ext-plugin-filters"
-            role="tablist"
-            aria-label={tr("ext.plugins.filterLabel")}
-          >
+          <>
+            <input
+              className="settings-input"
+              value={pluginQuery}
+              onChange={(event) => setPluginQuery(event.target.value)}
+              placeholder={tr("ext.plugins.searchPlaceholder")}
+              aria-label={tr("ext.plugins.searchPlaceholder")}
+            />
+            <div
+              className="ext-plugin-filters"
+              role="tablist"
+              aria-label={tr("ext.plugins.filterLabel")}
+            >
             {(
               [
                 ["all", "ext.plugins.filter.all"],
@@ -420,7 +451,8 @@ export function ExtensionsPanel({
                 {tr(key)}
               </button>
             ))}
-          </div>
+            </div>
+          </>
         ) : null}
         {loading && <p className="ext-empty">{tr("ext.plugins.loading")}</p>}
         {!loading && plugins.length === 0 && (
@@ -521,7 +553,11 @@ export function ExtensionsPanel({
           </ul>
         )}
         {!loading && plugins.length > 0 ? (
-          <p className="ext-section-note">{tr("ext.plugins.note")}</p>
+          <p className="ext-section-note">
+            {tr("ext.plugins.note")} · {tr("ext.plugins.hooksInventory", {
+              n: hooksInventory.length,
+            })}
+          </p>
         ) : null}
       </div>
 

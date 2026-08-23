@@ -4,12 +4,37 @@
  * Nested Tauri WebViews are possible but heavy (positioning, z-index, lifecycle).
  * WKWebView also blocks `file://` inside the main app iframe → blank page.
  *
- * Reliable approach for local reports (usually self-contained):
- * load HTML text via host/asset and render with `srcDoc` (scripts work, full-bleed).
+ * Local reports are rendered as static, isolated documents. They never inherit
+ * the main WebView origin or Tauri IPC access.
  */
 
 import { useEffect, useState } from "react";
-import { isTauri } from "@/lib/api";
+import { fsReadAbsolute, isTauri } from "@/lib/api";
+
+const STATIC_PREVIEW_CSP = [
+  "default-src 'none'",
+  "base-uri 'none'",
+  "connect-src 'none'",
+  "font-src data:",
+  "form-action 'none'",
+  "frame-src 'none'",
+  "img-src data: blob:",
+  "media-src data: blob:",
+  "object-src 'none'",
+  "script-src 'none'",
+  "style-src 'unsafe-inline'",
+].join("; ");
+
+export function buildStaticPreviewDocument(source: string): string {
+  const meta = `<meta http-equiv="Content-Security-Policy" content="${STATIC_PREVIEW_CSP}">`;
+  if (/<head(?:\s[^>]*)?>/i.test(source)) {
+    return source.replace(/<head(\s[^>]*)?>/i, (match) => `${match}${meta}`);
+  }
+  if (/<html(?:\s[^>]*)?>/i.test(source)) {
+    return source.replace(/<html(\s[^>]*)?>/i, (match) => `${match}<head>${meta}</head>`);
+  }
+  return `<!doctype html><html><head>${meta}</head><body>${source}</body></html>`;
+}
 
 export interface HtmlBrowserProps {
   title?: string;
@@ -24,14 +49,12 @@ async function fetchHtmlText(absolutePath: string): Promise<string> {
   if (!isTauri()) {
     throw new Error("Tauri required to load local HTML");
   }
-  const { convertFileSrc } = await import("@tauri-apps/api/core");
-  // asset protocol is allowed to read local files from the app webview
-  const url = convertFileSrc(absolutePath);
-  const res = await fetch(url);
-  if (!res.ok) {
-    throw new Error(`HTTP ${res.status}`);
+  const result = await fsReadAbsolute(absolutePath);
+  if (result.error) throw new Error(result.error);
+  if (typeof result.text !== "string") {
+    throw new Error("HTML preview is not UTF-8 text");
   }
-  return res.text();
+  return result.text;
 }
 
 export function HtmlBrowser({
@@ -100,9 +123,9 @@ export function HtmlBrowser({
         "rp-preview__frame rp-preview__frame--browser " + className
       }
       title={title}
-      // Full document; no sandbox so inline scripts (copy buttons) work
-      srcDoc={doc}
-      allow="clipboard-read; clipboard-write; fullscreen"
+      sandbox=""
+      referrerPolicy="no-referrer"
+      srcDoc={buildStaticPreviewDocument(doc)}
     />
   );
 }

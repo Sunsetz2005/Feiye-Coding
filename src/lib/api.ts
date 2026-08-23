@@ -1,6 +1,10 @@
 /** Typed Tauri invoke helpers with browser fallback. */
 
-import type { AskUserPayload, SessionSnapshot } from "./session";
+import type {
+  AskUserPayload,
+  InteractionSnapshotV1,
+  SessionSnapshot,
+} from "./session";
 import { IDLE_SNAPSHOT } from "./session";
 import {
   RUNTIME_SUBSCRIBE_URL,
@@ -34,6 +38,60 @@ export interface HostCapabilities {
   speechRecognition: boolean;
   skillDraftSave: boolean;
   capabilities?: Record<string, HostCapability>;
+}
+
+export type SandboxProfileV1 = "off" | "workspace_write" | "read_only";
+
+export interface SandboxApplicationV1 {
+  requested: SandboxProfileV1 | string;
+  applied: SandboxProfileV1 | string;
+  verified: boolean;
+  state: string;
+  platform: string;
+  reason?: string | null;
+}
+
+export interface RuntimeFeatureV1 {
+  state: string;
+  source: string;
+  reason?: string | null;
+}
+
+export interface RuntimeCapabilitiesV1 {
+  version: 1;
+  runtimeVersion?: string | null;
+  protocolVersion: number;
+  clientVersion: string;
+  platform: string;
+  sandbox: SandboxApplicationV1;
+  memory: RuntimeFeatureV1;
+  pluginCatalog: RuntimeFeatureV1;
+  hooksInventory: RuntimeFeatureV1;
+  mcp: RuntimeFeatureV1;
+}
+
+export interface CapabilityDescriptorV1 {
+  id: string;
+  kind: "host_contract" | "runtime_contract" | "plugin_inventory" | string;
+  state: string;
+  version?: string | null;
+  source: string;
+  interfaceHash: string;
+  implementationOmitted: boolean;
+}
+
+export interface CapabilityManifestV1 {
+  schema: "sunsetz.capabilities.v1" | string;
+  version: 1;
+  producer: string;
+  generatedAt: string;
+  capabilities: CapabilityDescriptorV1[];
+}
+
+export interface CapabilityManifestValidationV1 {
+  version: 1;
+  valid: boolean;
+  errors: string[];
 }
 
 const BROWSER_HOST_CAPABILITIES: HostCapabilities = {
@@ -119,6 +177,51 @@ export async function hostCapabilities(): Promise<HostCapabilities> {
   return invoke<HostCapabilities>("host_capabilities");
 }
 
+export async function runtimeCapabilitiesV1(): Promise<RuntimeCapabilitiesV1> {
+  if (!isTauri()) {
+    return {
+      version: 1,
+      runtimeVersion: null,
+      protocolVersion: 1,
+      clientVersion: "browser",
+      platform: "other",
+      sandbox: {
+        requested: "off",
+        applied: "off",
+        verified: true,
+        state: "off",
+        platform: "other",
+      },
+      memory: { state: "unavailable", source: "browser" },
+      pluginCatalog: { state: "unavailable", source: "browser" },
+      hooksInventory: { state: "unavailable", source: "browser" },
+      mcp: { state: "unavailable", source: "browser" },
+    };
+  }
+  return invoke<RuntimeCapabilitiesV1>("runtime_capabilities_v1");
+}
+
+/** Export a metadata-only capability contract; no implementation or local paths. */
+export async function capabilityManifestExportV1(): Promise<CapabilityManifestV1> {
+  if (!isTauri()) {
+    throw new Error("Capability manifests require the desktop Host");
+  }
+  return invoke<CapabilityManifestV1>("capability_manifest_export_v1");
+}
+
+/** Validate a clean-room capability manifest before another Agent consumes it. */
+export async function capabilityManifestValidateV1(
+  manifest: CapabilityManifestV1,
+): Promise<CapabilityManifestValidationV1> {
+  if (!isTauri()) {
+    return { version: 1, valid: false, errors: ["Desktop Host required"] };
+  }
+  return invoke<CapabilityManifestValidationV1>(
+    "capability_manifest_validate_v1",
+    { manifest },
+  );
+}
+
 /** Current Finder selection. Only exposed when `hostCapabilities.finderSelection`. */
 export async function finderSelectedPaths(): Promise<string[]> {
   if (!isTauri()) return [];
@@ -141,6 +244,33 @@ export async function sessionPendingInteractions(): Promise<AskUserPayload[]> {
   return invoke("session_pending_interactions");
 }
 
+/** Versioned permission / ask-user / plan interaction query. */
+export async function sessionInteractionsList(
+  sessionId?: string | null,
+): Promise<InteractionSnapshotV1[]> {
+  if (!isTauri()) return [];
+  return invoke("session_interactions_list", {
+    sessionId: sessionId ?? null,
+  });
+}
+
+export interface ResolveInteractionRequestV1 {
+  interactionId: string;
+  sessionId: string;
+  decision: string;
+  optionId?: string | null;
+  scopeKey?: string | null;
+  feedback?: string | null;
+  answers?: Record<string, string> | null;
+}
+
+/** Resolve a live interaction by stable id; stale/process-dead requests fail closed. */
+export async function sessionResolveInteractionV1(
+  request: ResolveInteractionRequestV1,
+): Promise<SessionSnapshot> {
+  return invoke("session_resolve_interaction_v1", { request });
+}
+
 export interface SkillDraftSaveRequest {
   name: string;
   description: string;
@@ -158,11 +288,56 @@ export interface SkillDraftSaveResult {
   overwritten: boolean;
 }
 
+export interface SkillCandidateV1 {
+  version: 1;
+  id: string;
+  status: "pending" | "approved" | "rejected";
+  createdAt: string;
+  updatedAt: string;
+  contentHash: string;
+  source: {
+    sessionId: string;
+    sessionTitle: string;
+    messageIds: string[];
+  };
+  owner: {
+    kind: "host_generated" | string;
+    namespace: string;
+    mayOverwriteExternal: false;
+  };
+  draft: {
+    name: string;
+    description: string;
+    skillMd: string;
+    references: Array<{ path: string; content: string }>;
+  };
+  approvedPath?: string | null;
+}
+
 /** Persist a reviewed skill through the Host's validated atomic writer. */
 export async function skillDraftSave(
   request: SkillDraftSaveRequest,
 ): Promise<SkillDraftSaveResult> {
   return invoke("skill_draft_save", { request });
+}
+
+export async function skillCandidatesListV1() {
+  return invoke<SkillCandidateV1[]>("skill_candidates_list_v1");
+}
+
+export async function skillCandidateApproveV1(request: {
+  id: string;
+  scope: "project" | "user";
+  projectPath?: string | null;
+  draft?: SkillCandidateV1["draft"] | null;
+  overwrite?: boolean;
+  userConfirmedOverwrite?: boolean;
+}) {
+  return invoke<SkillDraftSaveResult>("skill_candidate_approve_v1", { request });
+}
+
+export async function skillCandidateRejectV1(id: string) {
+  return invoke<SkillCandidateV1>("skill_candidate_reject_v1", { id });
 }
 
 export async function sessionGetState(): Promise<SessionSnapshot> {
@@ -295,6 +470,8 @@ export async function sessionReattach(): Promise<SessionSnapshot> {
 }
 
 export async function sessionResolvePermission(args: {
+  interactionId?: string | null;
+  sessionId?: string | null;
   rpcId: number;
   decision: string;
   optionId?: string;
@@ -305,11 +482,15 @@ export async function sessionResolvePermission(args: {
     decision: args.decision,
     optionId: args.optionId ?? null,
     scopeKey: args.scopeKey ?? null,
+    sessionId: args.sessionId ?? null,
+    interactionId: args.interactionId ?? null,
   });
 }
 
 /** Approve / revise / abandon pending `_x.ai/exit_plan_mode`. */
 export async function sessionResolvePlan(args: {
+  interactionId?: string | null;
+  sessionId?: string | null;
   decision: "approved" | "cancelled" | "abandoned" | string;
   feedback?: string | null;
   rpcId?: number | null;
@@ -318,11 +499,14 @@ export async function sessionResolvePlan(args: {
     decision: args.decision,
     feedback: args.feedback ?? null,
     rpcId: args.rpcId ?? null,
+    sessionId: args.sessionId ?? null,
+    interactionId: args.interactionId ?? null,
   });
 }
 
 /** Answer or dismiss pending `_x.ai/ask_user_question`. */
 export async function sessionResolveAskUser(args: {
+  interactionId?: string | null;
   sessionId?: string | null;
   decision: "accepted" | "cancelled" | string;
   answers?: Record<string, string> | null;
@@ -333,6 +517,7 @@ export async function sessionResolveAskUser(args: {
     decision: args.decision,
     answers: args.answers ?? null,
     rpcId: args.rpcId ?? null,
+    interactionId: args.interactionId ?? null,
   });
 }
 
@@ -585,6 +770,22 @@ export interface FsReadResult {
   error: string | null;
   /** Last modified (ms since epoch) for edit conflict checks. */
   mtimeMs?: number;
+  /** Opaque token for resource:// preview streaming. */
+  resourceHandleId?: string;
+}
+
+export interface ResourceHandleV1 {
+  version: 1;
+  id: string;
+  name: string;
+  size: number;
+  origin:
+    | "trusted_project"
+    | "app_attachment"
+    | "session_artifact"
+    | "message_attachment"
+    | "user_selected";
+  expiresAt: string;
 }
 
 export interface FsWriteResult {
@@ -641,6 +842,14 @@ export async function fsWriteAbsolute(
 /** Read absolute filesystem path for chat → resource pane preview. */
 export async function fsReadAbsolute(path: string) {
   return invoke<FsReadResult>("fs_read_absolute", { path });
+}
+
+export async function resourceOpenV1(path: string) {
+  return invoke<ResourceHandleV1>("resource_open_v1", { path });
+}
+
+export async function resourceReadV1(handleId: string) {
+  return invoke<FsReadResult>("resource_read_v1", { handleId });
 }
 
 /**
@@ -847,6 +1056,35 @@ export async function sessionMessages(id: string) {
   >("session_messages", { id });
 }
 
+export interface SessionSearchResultV1 {
+  version: 1;
+  sessionId: string;
+  sessionTitle: string;
+  messageId: string;
+  role: string;
+  snippet: string;
+  rank: number;
+}
+
+export interface SessionSearchRebuildResultV1 {
+  version: 1;
+  sessions: number;
+  messages: number;
+}
+
+/** Search visible JSON-journal messages through the disposable FTS5 cache. */
+export async function sessionSearchV1(query: string, limit = 40) {
+  return invoke<SessionSearchResultV1[]>("session_search_v1", { query, limit });
+}
+
+export async function sessionSearchRebuildV1() {
+  return invoke<SessionSearchRebuildResultV1>("session_search_rebuild_v1");
+}
+
+export async function sessionSearchDeleteIndexV1() {
+  return invoke<void>("session_search_delete_index_v1");
+}
+
 /** Agent session folder under GROK_HOME (contains images/, etc.). */
 export async function sessionMediaRoot(id: string) {
   return invoke<string | null>("session_media_root", { id });
@@ -895,6 +1133,8 @@ export interface AppSettings {
   agentIdleMinutes?: number;
   /** Pure stream silence before cancel prompt, seconds (default 120). */
   streamStallSeconds?: number;
+  /** Runtime subprocess sandbox; defaults to off. */
+  sandboxProfile?: SandboxProfileV1 | string;
   /**
    * When true, App API keys go in the OS keychain.
    * Default false: keys stay in secrets.json (0600). Official login uses auth.json.
@@ -1205,6 +1445,21 @@ export interface PluginsListResult {
   error?: string;
 }
 
+export interface RuntimePluginCatalogV1 {
+  version: 1;
+  source: "runtime_cli" | string;
+  installActionAvailable: false;
+  plugins: PluginDto[];
+  error?: string | null;
+}
+
+export interface RuntimeHookInventoryItemV1 {
+  version: 1;
+  pluginName: string;
+  source: "runtime_inspect" | string;
+  path?: string | null;
+}
+
 export interface PluginActionResult {
   ok: boolean;
   name: string;
@@ -1219,6 +1474,16 @@ export interface PluginDetailsResult {
 /** List installed plugins via `grok plugin list --json`. */
 export async function pluginsList() {
   return invoke<PluginsListResult>("plugins_list");
+}
+
+export async function runtimePluginsCatalogV1(query?: string | null) {
+  return invoke<RuntimePluginCatalogV1>("runtime_plugins_catalog_v1", {
+    query: query?.trim() || null,
+  });
+}
+
+export async function runtimeHooksInventoryV1() {
+  return invoke<RuntimeHookInventoryItemV1[]>("runtime_hooks_inventory_v1");
 }
 
 /** Enable plugin (`grok plugin enable`) and soft-respawn agent. */
@@ -1661,6 +1926,15 @@ export interface AutomationDto {
   nextRunAt?: string | null;
 }
 
+export interface AutomationClaimV1 {
+  version: 1;
+  claimId: string;
+  scheduledFor: string;
+  catchUp: boolean;
+  sessionId?: string | null;
+  automation: AutomationDto;
+}
+
 export interface AutomationInputDto {
   title: string;
   prompt: string;
@@ -1828,4 +2102,23 @@ export async function automationDelete(id: string): Promise<void> {
     return;
   }
   return invoke<void>("automation_delete", { id });
+}
+
+export async function automationClaimCompleteV1(
+  claimId: string,
+  success: boolean,
+  error?: string | null,
+) {
+  return invoke<void>("automation_claim_complete_v1", {
+    claimId,
+    success,
+    error: error ?? null,
+  });
+}
+
+export async function automationClaimBindV1(
+  claimId: string,
+  sessionId: string,
+) {
+  return invoke<void>("automation_claim_bind_v1", { claimId, sessionId });
 }

@@ -1490,6 +1490,7 @@ export function ResourceViewer({
         <OfficeDocumentPreview
           kind={preview.kind === "office" ? guessOfficeKind(preview.name) : preview.kind}
           absolutePath={preview.absolutePath}
+          resourceHandleId={preview.resourceHandleId}
           name={preview.name}
           locale={locale}
           textFallback={preview.text}
@@ -1505,10 +1506,12 @@ export function ResourceViewer({
           preview.text &&
           (preview.mime.includes("svg") || preview.name.endsWith(".svg"))
         ) {
+          const svgSrc = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(preview.text)}`;
           return (
-            <div
+            <img
               className="rp-preview__svg"
-              dangerouslySetInnerHTML={{ __html: preview.text }}
+              src={svgSrc}
+              alt={preview.name}
             />
           );
         }
@@ -1568,7 +1571,7 @@ export function ResourceViewer({
         );
       case "html":
         // Do not use file:// in iframe — WKWebView/Tauri blocks it (blank page).
-        // HtmlBrowser uses srcDoc (host text) or asset fetch; scripts work, full-bleed.
+        // HtmlBrowser uses an opaque-origin, static srcDoc sandbox.
         return (
           <HtmlBrowser
             title={preview.name}

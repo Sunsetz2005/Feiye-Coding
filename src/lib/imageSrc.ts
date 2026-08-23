@@ -1,9 +1,8 @@
 /**
  * Resolve a local filesystem path (or remote URL) to something an <img> can load.
  *
- * Prefer the custom `media://` protocol for absolute paths — Tauri's built-in
- * `asset://` scope often rejects real user paths (and Chinese segments), which
- * floods the console and reflows the chat on every scroll retry.
+ * Absolute paths use the Host-authorized custom `media://` protocol. The broad
+ * built-in asset protocol is intentionally disabled.
  *
  * Resolution is synchronous + cached so chat image cards never flash through a
  * zero-height state (pending → img) that collapses scrollHeight and yanks the
@@ -25,12 +24,16 @@ export function isViewableSrc(src: string): boolean {
     src.startsWith("blob:") ||
     src.startsWith("asset:") ||
     src.startsWith("media:") ||
+    src.startsWith("resource:") ||
     src.startsWith("https://asset.localhost") ||
     src.startsWith("http://asset.localhost") ||
     src.startsWith("https://media.localhost") ||
     src.startsWith("http://media.localhost") ||
+    src.startsWith("https://resource.localhost") ||
+    src.startsWith("http://resource.localhost") ||
     src.includes("://asset.localhost") ||
-    src.includes("://media.localhost")
+    src.includes("://media.localhost") ||
+    src.includes("://resource.localhost")
   );
 }
 
@@ -69,20 +72,13 @@ export function resolveImageSrcSync(pathOrUrl: string): string | null {
   }
 
   try {
-    // media protocol: registered in host, reads any absolute path without
-    // assetProtocol scope denials that cause scroll-time error spam.
+    // The Host validates the path provenance before serving any bytes.
     const url = convertFileSrc(raw, "media");
     resolveCache.set(raw, url);
     return url;
   } catch {
-    try {
-      const url = convertFileSrc(raw);
-      resolveCache.set(raw, url);
-      return url;
-    } catch {
-      resolveCache.set(raw, null);
-      return null;
-    }
+    resolveCache.set(raw, null);
+    return null;
   }
 }
 

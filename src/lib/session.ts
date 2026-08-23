@@ -36,6 +36,7 @@ export interface SessionSnapshot {
   projectPath?: string | null;
   title?: string;
   contextUsage?: SessionTokenUsage | null;
+  sandbox?: import("./api").SandboxApplicationV1;
 }
 
 export interface SessionTokenUsage {
@@ -625,6 +626,7 @@ function appendContentToSegments(
 }
 
 export interface PermissionPayload {
+  interactionId?: string;
   rpcId: number;
   sessionId: string;
   toolCallId: string;
@@ -652,6 +654,7 @@ export interface AskUserQuestionItem {
 
 /** Payload for `session://ask_user` (`_x.ai/ask_user_question`). */
 export interface AskUserPayload {
+  interactionId?: string;
   rpcId: number;
   sessionId: string;
   toolCallId?: string | null;
@@ -659,6 +662,60 @@ export interface AskUserPayload {
   /** Draft answers retained by Host after a failed Runtime response write. */
   partialAnswers?: Record<string, string> | null;
   raw?: unknown;
+}
+
+export type InteractionStatusV1 =
+  | "pending"
+  | "resolving"
+  | "resolved"
+  | "failed"
+  | "interrupted";
+
+export type InteractionPayloadV1 =
+  | {
+      kind: "permission";
+      toolName: string;
+      title: string;
+      preview: string;
+      scopeKey: string;
+      options: unknown;
+    }
+  | {
+      kind: "ask_user";
+      questions: AskUserQuestionItem[];
+      partialAnswers?: Record<string, string> | null;
+    }
+  | {
+      kind: "plan";
+      entries: unknown;
+      body?: string | null;
+    };
+
+export interface InteractionSnapshotV1 {
+  version: 1;
+  interactionId: string;
+  sessionId: string;
+  processId: string;
+  rpcId: number;
+  toolCallId?: string | null;
+  status: InteractionStatusV1;
+  createdAt: string;
+  updatedAt: string;
+  payload: InteractionPayloadV1;
+}
+
+export interface RuntimeEventEnvelopeV1 {
+  version: 1;
+  eventId: string;
+  sequence: number;
+  occurredAt: string;
+  sessionId: string;
+  agentSessionId?: string | null;
+  processId: string;
+  turnId?: string | null;
+  toolCallId?: string | null;
+  type: string;
+  payload: unknown;
 }
 
 export const IDLE_SNAPSHOT: SessionSnapshot = {
@@ -671,6 +728,13 @@ export const IDLE_SNAPSHOT: SessionSnapshot = {
   modelId: null,
   projectPath: null,
   title: "",
+  sandbox: {
+    requested: "off",
+    applied: "off",
+    verified: true,
+    state: "off",
+    platform: "other",
+  },
 };
 
 export function statusPresentation(state: SessionState): {
