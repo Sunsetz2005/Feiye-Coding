@@ -127,7 +127,26 @@ fn error_response(status: StatusCode, msg: &str) -> Response<Vec<u8>> {
         .status(status)
         .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
         .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+        .header("X-Content-Type-Options", "nosniff")
         .body(msg.as_bytes().to_vec())
+        .unwrap_or_else(|_| Response::new(Vec::new()))
+}
+
+fn options_response() -> Response<Vec<u8>> {
+    Response::builder()
+        .status(StatusCode::NO_CONTENT)
+        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+        .header(header::ACCESS_CONTROL_ALLOW_METHODS, "GET, HEAD, OPTIONS")
+        .header(
+            header::ACCESS_CONTROL_ALLOW_HEADERS,
+            "range, content-type, accept, origin",
+        )
+        .header(
+            header::ACCESS_CONTROL_EXPOSE_HEADERS,
+            "content-range, accept-ranges, content-length, content-type",
+        )
+        .header(header::ACCEPT_RANGES, "bytes")
+        .body(Vec::new())
         .unwrap_or_else(|_| Response::new(Vec::new()))
 }
 
@@ -135,24 +154,41 @@ fn error_response(status: StatusCode, msg: &str) -> Response<Vec<u8>> {
 pub fn handle_request(request: Request<Vec<u8>>) -> Response<Vec<u8>> {
     // CORS preflight
     if request.method() == Method::OPTIONS {
-        return Response::builder()
-            .status(StatusCode::NO_CONTENT)
-            .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-            .header(header::ACCESS_CONTROL_ALLOW_METHODS, "GET, HEAD, OPTIONS")
-            .header(
-                header::ACCESS_CONTROL_ALLOW_HEADERS,
-                "range, content-type, accept, origin",
-            )
-            .header(header::ACCESS_CONTROL_EXPOSE_HEADERS, "content-range, accept-ranges, content-length, content-type")
-            .header(header::ACCEPT_RANGES, "bytes")
-            .body(Vec::new())
-            .unwrap_or_else(|_| Response::new(Vec::new()));
+        return options_response();
     }
 
     let Some(path) = path_from_request(&request) else {
         return error_response(StatusCode::BAD_REQUEST, "missing path");
     };
 
+    let path = match crate::resource_handles::authorize_path(&path) {
+        Ok((path, _origin)) => path,
+        Err(error) => {
+            tracing::warn!(path = %path.display(), error = %error, "media protocol: denied");
+            return error_response(StatusCode::FORBIDDEN, "resource denied");
+        }
+    };
+    handle_file_request(request, path)
+}
+
+/// Handle an opaque `resource://` token. Unlike the legacy media protocol,
+/// the URL contains no filesystem path and cannot be forged into a new read.
+pub fn handle_resource_request(request: Request<Vec<u8>>) -> Response<Vec<u8>> {
+    if request.method() == Method::OPTIONS {
+        return options_response();
+    }
+    let Some(token) = path_from_request(&request) else {
+        return error_response(StatusCode::BAD_REQUEST, "missing resource handle");
+    };
+    let token = token.to_string_lossy();
+    let path = match crate::resource_handles::resolve_handle(&token) {
+        Ok(path) => path,
+        Err(_) => return error_response(StatusCode::FORBIDDEN, "resource handle expired"),
+    };
+    handle_file_request(request, path)
+}
+
+fn handle_file_request(request: Request<Vec<u8>>, path: PathBuf) -> Response<Vec<u8>> {
     if !path.is_file() {
         tracing::warn!(path = %path.display(), "media protocol: file not found");
         return error_response(StatusCode::NOT_FOUND, "file not found");
@@ -221,6 +257,7 @@ pub fn handle_request(request: Request<Vec<u8>>) -> Response<Vec<u8>> {
             .header(header::ACCEPT_RANGES, "bytes")
             .header(header::CONTENT_LENGTH, nbytes)
             .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+            .header("X-Content-Type-Options", "nosniff")
             .header(
                 header::ACCESS_CONTROL_EXPOSE_HEADERS,
                 "content-range, accept-ranges, content-length, content-type",
@@ -257,6 +294,7 @@ pub fn handle_request(request: Request<Vec<u8>>) -> Response<Vec<u8>> {
         .header(header::ACCEPT_RANGES, "bytes")
         .header(header::CONTENT_LENGTH, buf.len())
         .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+        .header("X-Content-Type-Options", "nosniff")
         .header(
             header::ACCESS_CONTROL_EXPOSE_HEADERS,
             "content-range, accept-ranges, content-length, content-type",

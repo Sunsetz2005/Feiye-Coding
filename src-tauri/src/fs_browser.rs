@@ -43,6 +43,9 @@ pub struct FsReadResult {
     /// Last modified time (ms since UNIX epoch) for dirty/conflict checks when editing.
     #[serde(default)]
     pub mtime_ms: u64,
+    /// Opaque, short-lived token for resource:// streaming.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_handle_id: Option<String>,
 }
 
 /// Result of writing a text file from the resource pane.
@@ -90,6 +93,7 @@ fn ok_result(
         truncated,
         error,
         mtime_ms: file_mtime_ms(path),
+        resource_handle_id: None,
     }
 }
 
@@ -564,8 +568,8 @@ fn write_text_at_path(
     })
 }
 
-/// Read any absolute filesystem path for chat → resource pane preview.
-/// Not limited to a project root (agent outputs, session media, etc.).
+/// Decode an already-authorized absolute path for resource-pane preview.
+/// Public commands must validate provenance or resolve a ResourceHandle first.
 pub fn read_absolute_file(absolute: &str) -> Result<FsReadResult, String> {
     let raw = absolute.trim();
     if raw.is_empty() {

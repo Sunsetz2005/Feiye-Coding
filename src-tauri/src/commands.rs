@@ -7,6 +7,7 @@ use tauri::State;
 
 use crate::cli_probe::{self, CliProbeResult};
 use crate::host_features::HostCapabilities;
+use crate::interactions::{InteractionSnapshotV1, ResolveInteractionRequestV1};
 use crate::session_manager::{SessionManager, SessionSnapshot, UiAskUserRequest};
 use crate::skill_draft::{SkillDraftSaveRequest, SkillDraftSaveResult};
 use crate::store::{self, AppSettings, Project, SessionMeta};
@@ -127,8 +128,11 @@ pub async fn session_resolve_plan(
     decision: String,
     feedback: Option<String>,
     rpc_id: Option<u64>,
+    session_id: Option<String>,
+    interaction_id: Option<String>,
 ) -> Result<SessionSnapshot, String> {
-    mgr.resolve_plan(app, decision, feedback, rpc_id).await
+    mgr.resolve_plan(app, decision, feedback, rpc_id, session_id, interaction_id)
+        .await
 }
 
 /// Recover a pending `_x.ai/ask_user_question` for the focused/specified session.
@@ -148,6 +152,25 @@ pub fn session_pending_interactions(
     Ok(mgr.pending_interactions())
 }
 
+/// Versioned query for permission, ask-user, and plan interactions.
+#[tauri::command]
+pub fn session_interactions_list(
+    mgr: State<'_, Arc<SessionManager>>,
+    session_id: Option<String>,
+) -> Result<Vec<InteractionSnapshotV1>, String> {
+    Ok(mgr.interactions_list(session_id.as_deref()))
+}
+
+/// Resolve one active interaction by stable interaction id.
+#[tauri::command]
+pub async fn session_resolve_interaction_v1(
+    app: tauri::AppHandle,
+    mgr: State<'_, Arc<SessionManager>>,
+    request: ResolveInteractionRequestV1,
+) -> Result<SessionSnapshot, String> {
+    mgr.resolve_interaction_v1(app, request).await
+}
+
 /// Answer or dismiss pending `_x.ai/ask_user_question`.
 #[tauri::command]
 pub async fn session_resolve_ask_user(
@@ -157,8 +180,9 @@ pub async fn session_resolve_ask_user(
     answers: Option<serde_json::Value>,
     rpc_id: Option<u64>,
     session_id: Option<String>,
+    interaction_id: Option<String>,
 ) -> Result<SessionSnapshot, String> {
-    mgr.resolve_ask_user(app, decision, answers, rpc_id, session_id)
+    mgr.resolve_ask_user(app, decision, answers, rpc_id, session_id, interaction_id)
         .await
 }
 
@@ -168,12 +192,43 @@ pub fn host_capabilities() -> HostCapabilities {
     crate::host_features::capabilities()
 }
 
+#[tauri::command]
+pub fn runtime_capabilities_v1(
+    mgr: State<'_, Arc<SessionManager>>,
+) -> crate::runtime_compat::RuntimeCapabilitiesV1 {
+    crate::runtime_compat::runtime_capabilities(mgr.active_sandbox_application())
+}
+
+#[tauri::command]
+pub async fn capability_manifest_export_v1(
+    mgr: State<'_, Arc<SessionManager>>,
+) -> Result<crate::capability_exchange::CapabilityManifestV1, String> {
+    let active_sandbox = mgr.active_sandbox_application();
+    tauri::async_runtime::spawn_blocking(move || {
+        let host = crate::host_features::capabilities();
+        let runtime = crate::runtime_compat::runtime_capabilities(active_sandbox);
+        let plugins = collect_plugins_list().unwrap_or_default();
+        Ok(crate::capability_exchange::build(host, runtime, plugins))
+    })
+    .await
+    .map_err(|error| format!("capability manifest task failed: {error}"))?
+}
+
+#[tauri::command]
+pub fn capability_manifest_validate_v1(
+    manifest: crate::capability_exchange::CapabilityManifestV1,
+) -> crate::capability_exchange::CapabilityManifestValidationV1 {
+    crate::capability_exchange::validate(&manifest)
+}
+
 /// Read the current Finder selection without shell interpolation.
 #[tauri::command]
 pub async fn finder_selected_paths() -> Result<Vec<String>, String> {
-    tauri::async_runtime::spawn_blocking(crate::host_features::finder_selected_paths)
+    let paths = tauri::async_runtime::spawn_blocking(crate::host_features::finder_selected_paths)
         .await
-        .map_err(|error| format!("Finder selection task failed: {error}"))?
+        .map_err(|error| format!("Finder selection task failed: {error}"))??;
+    crate::resource_handles::grant_user_selected(paths.iter());
+    Ok(paths)
 }
 
 /// Validate and atomically save a reviewed conversation-derived skill.
@@ -184,6 +239,32 @@ pub async fn skill_draft_save(
     tauri::async_runtime::spawn_blocking(move || crate::skill_draft::save(request))
         .await
         .map_err(|error| format!("Skill save task failed: {error}"))?
+}
+
+#[tauri::command]
+pub async fn skill_candidates_list_v1(
+) -> Result<Vec<crate::skill_candidates::SkillCandidateV1>, String> {
+    tauri::async_runtime::spawn_blocking(crate::skill_candidates::list)
+        .await
+        .map_err(|error| format!("Skill candidate list task failed: {error}"))?
+}
+
+#[tauri::command]
+pub async fn skill_candidate_approve_v1(
+    request: crate::skill_candidates::SkillCandidateApproveRequestV1,
+) -> Result<SkillDraftSaveResult, String> {
+    tauri::async_runtime::spawn_blocking(move || crate::skill_candidates::approve(request))
+        .await
+        .map_err(|error| format!("Skill candidate approval task failed: {error}"))?
+}
+
+#[tauri::command]
+pub async fn skill_candidate_reject_v1(
+    id: String,
+) -> Result<crate::skill_candidates::SkillCandidateV1, String> {
+    tauri::async_runtime::spawn_blocking(move || crate::skill_candidates::reject(&id))
+        .await
+        .map_err(|error| format!("Skill candidate reject task failed: {error}"))?
 }
 
 #[tauri::command]
@@ -210,9 +291,19 @@ pub async fn session_resolve_permission(
     decision: String,
     option_id: Option<String>,
     scope_key: Option<String>,
+    session_id: Option<String>,
+    interaction_id: Option<String>,
 ) -> Result<SessionSnapshot, String> {
-    mgr.resolve_permission(app, rpc_id, decision, option_id, scope_key)
-        .await
+    mgr.resolve_permission(
+        app,
+        rpc_id,
+        decision,
+        option_id,
+        scope_key,
+        session_id,
+        interaction_id,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -495,6 +586,31 @@ pub async fn session_messages(
     Ok(store::load_messages(&id))
 }
 
+#[tauri::command]
+pub async fn session_search_v1(
+    query: String,
+    limit: Option<usize>,
+) -> Result<Vec<crate::session_search::SessionSearchResultV1>, String> {
+    tauri::async_runtime::spawn_blocking(move || crate::session_search::search(&query, limit))
+        .await
+        .map_err(|e| format!("session search task: {e}"))?
+}
+
+#[tauri::command]
+pub async fn session_search_rebuild_v1(
+) -> Result<crate::session_search::SessionSearchRebuildResultV1, String> {
+    tauri::async_runtime::spawn_blocking(crate::session_search::rebuild)
+        .await
+        .map_err(|e| format!("session search rebuild task: {e}"))?
+}
+
+#[tauri::command]
+pub async fn session_search_delete_index_v1() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(crate::session_search::delete_index)
+        .await
+        .map_err(|e| format!("session search delete task: {e}"))?
+}
+
 /// Absolute path of the agent session folder under GROK_HOME (images/, etc.).
 /// Used to resolve short relative paths like `images/1.jpg` into image cards.
 #[tauri::command]
@@ -637,6 +753,28 @@ pub async fn automation_delete(id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub async fn automation_claim_complete_v1(
+    claim_id: String,
+    success: bool,
+    error: Option<String>,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::automation_scheduler::complete(&claim_id, success, error.as_deref())
+    })
+    .await
+    .map_err(|e| format!("automation completion task: {e}"))?
+}
+
+#[tauri::command]
+pub async fn automation_claim_bind_v1(claim_id: String, session_id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::automation_scheduler::bind_session(&claim_id, &session_id)
+    })
+    .await
+    .map_err(|e| format!("automation bind task: {e}"))?
+}
+
+#[tauri::command]
 pub async fn settings_get() -> Result<AppSettings, String> {
     Ok(store::load_settings())
 }
@@ -645,11 +783,15 @@ pub async fn settings_get() -> Result<AppSettings, String> {
 pub async fn settings_set(
     app: tauri::AppHandle,
     mgr: State<'_, Arc<SessionManager>>,
-    settings: AppSettings,
+    mut settings: AppSettings,
 ) -> Result<AppSettings, String> {
     let prev = store::load_settings();
-    let keychain_flip =
-        prev.store_api_keys_in_keychain != settings.store_api_keys_in_keychain;
+    settings.sandbox_profile =
+        crate::runtime_compat::SandboxProfileV1::parse(&settings.sandbox_profile)
+            .as_str()
+            .into();
+    let keychain_flip = prev.store_api_keys_in_keychain != settings.store_api_keys_in_keychain;
+    let sandbox_flip = prev.sandbox_profile != settings.sandbox_profile;
 
     store::save_settings(&settings)?;
 
@@ -663,6 +805,10 @@ pub async fn settings_set(
             let _ = store::save_settings(&rolled);
             return Err(e);
         }
+    }
+    if sandbox_flip {
+        mgr.apply_sandbox_profile(&app, &settings.sandbox_profile)
+            .await;
     }
 
     // Full permission apply: Host + agent-home + soft-respawn if needed
@@ -787,7 +933,8 @@ pub async fn fs_list_dir(
     project_path: String,
     relative: Option<String>,
 ) -> Result<Vec<crate::fs_browser::FsEntry>, String> {
-    crate::fs_browser::list_dir(&project_path, relative.as_deref().unwrap_or(""))
+    let root = crate::resource_handles::require_trusted_project_root(&project_path)?;
+    crate::fs_browser::list_dir(&root.to_string_lossy(), relative.as_deref().unwrap_or(""))
 }
 
 #[tauri::command]
@@ -795,7 +942,10 @@ pub async fn fs_read_file(
     project_path: String,
     relative: String,
 ) -> Result<crate::fs_browser::FsReadResult, String> {
-    crate::fs_browser::read_file(&project_path, &relative)
+    let root = crate::resource_handles::require_trusted_project_root(&project_path)?;
+    let mut result = crate::fs_browser::read_file(&root.to_string_lossy(), &relative)?;
+    crate::resource_handles::attach_handle(&mut result)?;
+    Ok(result)
 }
 
 /// Write UTF-8 text under the project root (resource pane Save).
@@ -807,8 +957,9 @@ pub async fn fs_write_file(
     content: String,
     expected_mtime_ms: Option<u64>,
 ) -> Result<crate::fs_browser::FsWriteResult, String> {
+    let root = crate::resource_handles::require_trusted_project_root(&project_path)?;
     crate::fs_browser::write_text_file(
-        &project_path,
+        &root.to_string_lossy(),
         &relative,
         &content,
         expected_mtime_ms,
@@ -822,15 +973,36 @@ pub async fn fs_write_absolute(
     content: String,
     expected_mtime_ms: Option<u64>,
 ) -> Result<crate::fs_browser::FsWriteResult, String> {
-    crate::fs_browser::write_text_absolute(&path, &content, expected_mtime_ms)
+    let (authorized, _origin) =
+        crate::resource_handles::authorize_path(std::path::Path::new(&path))?;
+    crate::fs_browser::write_text_absolute(
+        &authorized.to_string_lossy(),
+        &content,
+        expected_mtime_ms,
+    )
 }
 
 /// Read an absolute path for resource-pane preview (chat file cards, agent outputs).
 #[tauri::command]
-pub async fn fs_read_absolute(
+pub async fn fs_read_absolute(path: String) -> Result<crate::fs_browser::FsReadResult, String> {
+    let handle = crate::resource_handles::open_path(&path)?;
+    crate::resource_handles::read_handle(&handle.id)
+}
+
+/// Create a short-lived opaque handle after validating the resource provenance.
+#[tauri::command]
+pub async fn resource_open_v1(
     path: String,
+) -> Result<crate::resource_handles::ResourceHandleV1, String> {
+    crate::resource_handles::open_path(&path)
+}
+
+/// Read a previously authorized resource without accepting another path.
+#[tauri::command]
+pub async fn resource_read_v1(
+    handle_id: String,
 ) -> Result<crate::fs_browser::FsReadResult, String> {
-    crate::fs_browser::read_absolute_file(&path)
+    crate::resource_handles::read_handle(&handle_id)
 }
 
 /// Smart open for chat cards: absolute / project-relative / suffix search under project.
@@ -839,7 +1011,19 @@ pub async fn fs_open_path(
     path: String,
     project_path: Option<String>,
 ) -> Result<crate::fs_browser::FsReadResult, String> {
-    crate::fs_browser::open_path_smart(project_path.as_deref(), &path)
+    let trusted_root = project_path
+        .as_deref()
+        .map(crate::resource_handles::require_trusted_project_root)
+        .transpose()?;
+    let mut result = crate::fs_browser::open_path_smart(
+        trusted_root
+            .as_ref()
+            .map(|root| root.to_string_lossy())
+            .as_deref(),
+        &path,
+    )?;
+    crate::resource_handles::attach_handle(&mut result)?;
+    Ok(result)
 }
 
 /// Auto-name a session from the first user message.
@@ -1817,6 +2001,25 @@ pub struct PluginDto {
     pub provides: Option<PluginProvidesDto>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimePluginCatalogV1 {
+    pub version: u8,
+    pub source: String,
+    pub install_action_available: bool,
+    pub plugins: Vec<PluginDto>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeHookInventoryItemV1 {
+    pub version: u8,
+    pub plugin_name: String,
+    pub source: String,
+    pub path: Option<String>,
+}
+
 /// Run probed CLI with the given args. Returns (stdout, stderr, ok).
 fn run_grok_cli_args(args: &[&str], timeout_secs: u64) -> Result<(String, String, bool), String> {
     let settings = store::load_settings();
@@ -2214,6 +2417,69 @@ pub async fn plugins_list() -> Result<serde_json::Value, String> {
     }
 }
 
+/// Read-only Runtime plugin catalog. Installation intentionally remains a CLI
+/// workflow until the Runtime exposes a stable machine-readable install result.
+#[tauri::command]
+pub async fn runtime_plugins_catalog_v1(
+    query: Option<String>,
+) -> Result<RuntimePluginCatalogV1, String> {
+    let result = tauri::async_runtime::spawn_blocking(collect_plugins_list)
+        .await
+        .map_err(|e| e.to_string())?;
+    match result {
+        Ok(mut plugins) => {
+            if let Some(query) = query
+                .map(|value| value.trim().to_ascii_lowercase())
+                .filter(|value| !value.is_empty())
+            {
+                plugins.retain(|plugin| {
+                    [
+                        Some(plugin.name.as_str()),
+                        plugin.source.as_deref(),
+                        plugin.marketplace.as_deref(),
+                        plugin.scope.as_deref(),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .any(|value| value.to_ascii_lowercase().contains(&query))
+                });
+            }
+            Ok(RuntimePluginCatalogV1 {
+                version: 1,
+                source: "runtime_cli".into(),
+                install_action_available: false,
+                plugins,
+                error: None,
+            })
+        }
+        Err(error) => Ok(RuntimePluginCatalogV1 {
+            version: 1,
+            source: "runtime_cli".into(),
+            install_action_available: false,
+            plugins: Vec::new(),
+            error: Some(error),
+        }),
+    }
+}
+
+/// Read-only Hooks inventory derived from Runtime `inspect --json` metadata.
+#[tauri::command]
+pub async fn runtime_hooks_inventory_v1() -> Result<Vec<RuntimeHookInventoryItemV1>, String> {
+    let plugins = tauri::async_runtime::spawn_blocking(collect_plugins_list)
+        .await
+        .map_err(|e| e.to_string())??;
+    Ok(plugins
+        .into_iter()
+        .filter(|plugin| plugin.provides.as_ref().is_some_and(|value| value.hooks))
+        .map(|plugin| RuntimeHookInventoryItemV1 {
+            version: 1,
+            plugin_name: plugin.name,
+            source: "runtime_inspect".into(),
+            path: plugin.path,
+        })
+        .collect())
+}
+
 /// Enable a plugin by name (`grok plugin enable <name>`). Soft-respawns agent.
 #[tauri::command]
 pub async fn plugin_enable(
@@ -2502,11 +2768,9 @@ pub async fn pick_attach_files() -> Result<Vec<String>, String> {
     })
     .await
     .map_err(|e| e.to_string())?;
-    Ok(files
-        .unwrap_or_default()
-        .into_iter()
-        .map(|p| p.display().to_string())
-        .collect())
+    let files = files.unwrap_or_default().into_iter().collect::<Vec<_>>();
+    crate::resource_handles::grant_user_selected(files.iter());
+    Ok(files.into_iter().map(|p| p.display().to_string()).collect())
 }
 
 /// Native folder picker for attaching a directory as `@path` (optional).
@@ -2519,6 +2783,9 @@ pub async fn pick_attach_folder() -> Result<Option<String>, String> {
     })
     .await
     .map_err(|e| e.to_string())?;
+    if let Some(path) = folder.as_ref() {
+        crate::resource_handles::grant_user_selected([path]);
+    }
     Ok(folder.map(|p| p.display().to_string()))
 }
 

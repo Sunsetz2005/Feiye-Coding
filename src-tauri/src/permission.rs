@@ -90,35 +90,73 @@ pub struct PermissionRequest {
 
 /// Build scope_key = tool_name + ":" + normalize(path_or_command_prefix).
 pub fn scope_key(tool_name: &str, path_or_command: &str) -> String {
-    let norm = normalize_scope_target(path_or_command);
+    let norm = if is_shell_scope_tool(tool_name) {
+        normalize_command_scope(path_or_command)
+    } else {
+        normalize_resource_scope(path_or_command, None)
+    };
     format!("{tool_name}:{norm}")
 }
 
 pub fn normalize_scope_target(raw: &str) -> String {
+    normalize_command_scope(raw)
+}
+
+fn normalize_command_scope(raw: &str) -> String {
     let t = raw.trim();
     if t.is_empty() {
         return "*".into();
     }
-    // shell: executable basename only (strict-ish)
-    if !t.contains('/') && !t.contains('\\') {
-        return t.split_whitespace().next().unwrap_or(t).to_string();
+    // Preserve the complete command instead of widening `npm test` to every
+    // `npm` invocation. Only insignificant whitespace is collapsed.
+    t.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn is_shell_scope_tool(tool_name: &str) -> bool {
+    let tool = tool_name.trim().to_ascii_lowercase();
+    ["shell", "bash", "terminal", "command", "execute", "run"]
+        .iter()
+        .any(|part| tool.contains(part))
+}
+
+fn normalize_resource_scope(raw: &str, project_root: Option<&Path>) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return "*".into();
     }
-    let s = t.replace('\\', "/");
-    // collapse //
-    let mut out = String::new();
-    let mut prev_slash = false;
-    for ch in s.chars() {
-        if ch == '/' {
-            if !prev_slash {
-                out.push(ch);
-            }
-            prev_slash = true;
-        } else {
-            prev_slash = false;
-            out.push(ch);
-        }
-    }
-    out
+    let raw_path = PathBuf::from(trimmed);
+    let candidate = if raw_path.is_absolute() {
+        raw_path
+    } else if let Some(root) = project_root {
+        root.join(raw_path)
+    } else {
+        raw_path
+    };
+    candidate
+        .canonicalize()
+        .unwrap_or_else(|_| lexical_normalize(&candidate))
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+/// Build an exact, normalized scope for one permission request.
+pub fn permission_scope_key(
+    tool_name: &str,
+    path_target: &str,
+    shell_command: &str,
+    project_root: Option<&Path>,
+    _fallback_title: &str,
+) -> String {
+    let target = if is_shell_scope_tool(tool_name) && !shell_command.trim().is_empty() {
+        normalize_command_scope(shell_command)
+    } else if !path_target.trim().is_empty() {
+        normalize_resource_scope(path_target, project_root)
+    } else if !shell_command.trim().is_empty() {
+        normalize_command_scope(shell_command)
+    } else {
+        "*".into()
+    };
+    format!("{tool_name}:{target}")
 }
 
 /// Lexically resolve `.` / `..` without requiring the path to exist on disk.
@@ -234,205 +272,6 @@ pub fn extract_shell_command(raw: &serde_json::Value) -> String {
     String::new()
 }
 
-fn shell_has_token(cmd_lower: &str, token: &str) -> bool {
-    // Word-ish match so `curl` does not hit `curly`.
-    for part in cmd_lower.split(|c: char| {
-        c.is_whitespace() || c == '|' || c == '&' || c == ';' || c == '(' || c == ')'
-    }) {
-        let p = part.trim_start_matches(['\\', '/', '.']);
-        let base = p.rsplit('/').next().unwrap_or(p);
-        if base == token {
-            return true;
-        }
-    }
-    false
-}
-
-/// True when a curl short-option cluster writes a file (`-o`, `-O`, or combined e.g. `-sLo`).
-fn curl_has_output_flag(cmd_lower: &str) -> bool {
-    if cmd_lower.contains("--output") || cmd_lower.contains("--remote-name") {
-        return true;
-    }
-    let bytes = cmd_lower.as_bytes();
-    let mut i = 0usize;
-    while i < bytes.len() {
-        if bytes[i] == b'-' && i + 1 < bytes.len() && bytes[i + 1] != b'-' {
-            // short cluster: -sLo / -o / -O / -OJ
-            i += 1;
-            let start = i;
-            while i < bytes.len() && bytes[i].is_ascii_alphabetic() {
-                i += 1;
-            }
-            let cluster = &cmd_lower[start..i];
-            if cluster.contains('o') || cluster.contains('O') {
-                return true;
-            }
-            continue;
-        }
-        i += 1;
-    }
-    false
-}
-
-/// True when the shell command is primarily downloading remote content to a local file
-/// (curl -o/-O, wget, aria2c, …). Used to default-allow asset downloads into the project.
-pub fn is_download_command(cmd: &str) -> bool {
-    let lower = cmd.to_lowercase();
-    if lower.trim().is_empty() {
-        return false;
-    }
-    if shell_has_token(&lower, "curl") && curl_has_output_flag(&lower) {
-        return true;
-    }
-    if shell_has_token(&lower, "wget")
-        || shell_has_token(&lower, "aria2c")
-        || shell_has_token(&lower, "aria2")
-    {
-        return true;
-    }
-    false
-}
-
-fn read_shell_arg(cmd: &str, bytes: &[u8], i: &mut usize) -> Option<String> {
-    while *i < bytes.len() && bytes[*i].is_ascii_whitespace() {
-        *i += 1;
-    }
-    if *i >= bytes.len() {
-        return None;
-    }
-    let dest = if bytes[*i] == b'"' || bytes[*i] == b'\'' {
-        let q = bytes[*i];
-        *i += 1;
-        let start = *i;
-        while *i < bytes.len() && bytes[*i] != q {
-            *i += 1;
-        }
-        let s = cmd[start..*i].to_string();
-        if *i < bytes.len() {
-            *i += 1;
-        }
-        s
-    } else {
-        let start = *i;
-        while *i < bytes.len() && !bytes[*i].is_ascii_whitespace() {
-            *i += 1;
-        }
-        cmd[start..*i].to_string()
-    };
-    let dest = dest.trim().to_string();
-    if dest.is_empty() || dest == "-" {
-        None
-    } else {
-        Some(dest)
-    }
-}
-
-/// Best-effort local destinations from `curl -o` / `wget -O` / `aria2c -o` style flags.
-pub fn extract_download_destinations(cmd: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let bytes = cmd.as_bytes();
-    let mut i = 0usize;
-    while i < bytes.len() {
-        let rest = &cmd[i..];
-        if rest.starts_with("--output=") {
-            i += 9;
-            if let Some(d) = read_shell_arg(cmd, bytes, &mut i) {
-                out.push(d);
-            }
-            continue;
-        }
-        if rest.starts_with("--output")
-            && rest
-                .chars()
-                .nth(8)
-                .map(|c| c.is_whitespace() || c == '=')
-                .unwrap_or(false)
-        {
-            i += 8;
-            if i < bytes.len() && bytes[i] == b'=' {
-                i += 1;
-            }
-            if let Some(d) = read_shell_arg(cmd, bytes, &mut i) {
-                out.push(d);
-            }
-            continue;
-        }
-        // Short clusters: -o FILE, -sLo FILE, -O (remote name → no path)
-        if bytes[i] == b'-' && i + 1 < bytes.len() && bytes[i + 1] != b'-' {
-            i += 1;
-            let start = i;
-            while i < bytes.len() && bytes[i].is_ascii_alphabetic() {
-                i += 1;
-            }
-            let cluster = &cmd[start..i];
-            // Prefer lowercase `o` (output file). Capital `O` is remote-name (no path).
-            if let Some(pos) = cluster.rfind('o') {
-                if pos + 1 < cluster.len() {
-                    // Glued: -ofile.png
-                    let glued = cluster[pos + 1..].to_string();
-                    if !glued.is_empty() {
-                        out.push(glued);
-                    }
-                } else if let Some(d) = read_shell_arg(cmd, bytes, &mut i) {
-                    out.push(d);
-                }
-            }
-            continue;
-        }
-        i += 1;
-    }
-    out
-}
-
-/// Whether `dest` is under `project_root` for download auto-allow.
-/// Uses strict `is_outside_project` first; falls back to lexical prefix so that
-/// non-existent paths still match when macOS `/var` vs `/private/var` canonicalize differs.
-fn download_dest_in_project(project_root: &Path, dest: &str) -> bool {
-    if !is_outside_project(project_root, dest) {
-        return true;
-    }
-    let dest_n = lexical_normalize(Path::new(dest));
-    let root_n = lexical_normalize(project_root);
-    if dest_n.starts_with(&root_n) {
-        return true;
-    }
-    // Compare against canonical project if available (dest may already be canonical).
-    if let Ok(root_c) = project_root.canonicalize() {
-        let root_c = lexical_normalize(&root_c);
-        if dest_n.starts_with(&root_c) {
-            return true;
-        }
-    }
-    false
-}
-
-/// Default-allow download shell when destinations stay inside the project (or cwd download with a project).
-pub fn may_auto_allow_download(
-    policy: PermissionPolicy,
-    project_root: Option<&Path>,
-    command: &str,
-) -> bool {
-    if matches!(
-        policy,
-        PermissionPolicy::Deny | PermissionPolicy::DontAsk
-    ) {
-        return false;
-    }
-    if !is_download_command(command) {
-        return false;
-    }
-    let Some(root) = project_root else {
-        // No project bound — only YOLO downloads freely.
-        return matches!(policy, PermissionPolicy::AlwaysApprove);
-    };
-    let dests = extract_download_destinations(command);
-    if dests.is_empty() {
-        // wget without -O writes into cwd (project root when agent cwd = project).
-        return true;
-    }
-    dests.iter().all(|d| download_dest_in_project(root, d))
-}
-
 /// Decide whether Host may auto-approve without UI.
 ///
 /// Rules (H05 + §17.3 + Grok Build permission modes):
@@ -440,7 +279,6 @@ pub fn may_auto_allow_download(
 /// - Deny / DontAsk policy → never auto-allow
 /// - Session cache hit + in-project → auto (even when chip policy is Ask — "Allow for session")
 /// - AcceptEdits → auto for edit tools in-project
-/// - Download shell (curl -o / wget / …) into project → auto (default-allow asset download)
 /// - AlwaysApprove → auto (settings YOLO / bypassPermissions)
 /// - else → false (must prompt)
 pub fn may_auto_allow(
@@ -450,7 +288,7 @@ pub fn may_auto_allow(
     project_root: Option<&Path>,
     path_target: &str,
     tool_name: &str,
-    command: &str,
+    _command: &str,
 ) -> bool {
     let outside = if path_target.is_empty() {
         false
@@ -472,17 +310,21 @@ pub fn may_auto_allow(
         return false;
     }
 
+    // A Runtime payload shape we do not understand must not turn AcceptEdits
+    // into a project-external write bypass.
+    if matches!(policy, PermissionPolicy::AcceptEdits)
+        && is_edit_tool(tool_name)
+        && path_target.trim().is_empty()
+    {
+        return false;
+    }
+
     // H05: once user chose "Allow for session", cache hits auto-allow under Ask chip too.
-    if cache.is_allowed(scope) {
+    if !scope.ends_with(":*") && cache.is_allowed(scope) {
         return true;
     }
 
     if matches!(policy, PermissionPolicy::AcceptEdits) && is_edit_tool(tool_name) {
-        return true;
-    }
-
-    // Default-allow in-project downloads (image/asset fetch) so long turns don't stall on perm.
-    if may_auto_allow_download(policy, project_root, command) {
         return true;
     }
 
@@ -582,15 +424,72 @@ mod tests {
     use super::*;
 
     #[test]
-    fn scope_key_shell_uses_executable_name() {
-        assert_eq!(scope_key("shell", "npm install foo"), "shell:npm");
-        assert_eq!(scope_key("shell", "cargo test"), "shell:cargo");
+    fn scope_key_shell_preserves_normalized_command() {
+        assert_eq!(
+            scope_key("shell", " npm   install foo "),
+            "shell:npm install foo"
+        );
+        assert_eq!(scope_key("shell", "cargo test"), "shell:cargo test");
     }
 
     #[test]
     fn scope_key_fs_write_normalizes_path() {
         let k = scope_key("fs.write", "/Users/me/proj//src/a.rs");
         assert_eq!(k, "fs.write:/Users/me/proj/src/a.rs");
+    }
+
+    #[test]
+    fn permission_scope_resolves_relative_resource_against_project() {
+        let root = std::env::temp_dir().join("sunsetz-perm-scope-root");
+        let _ = std::fs::create_dir_all(root.join("src"));
+        let key = permission_scope_key("write", "src/../src/a.rs", "", Some(&root), "Write file");
+        assert_eq!(key, format!("write:{}/src/a.rs", root.to_string_lossy()));
+    }
+
+    #[test]
+    fn permission_scope_keeps_complete_compound_command() {
+        let first = permission_scope_key(
+            "run_terminal_command",
+            "",
+            "npm test && npm run build",
+            None,
+            "Run",
+        );
+        let second = permission_scope_key(
+            "run_terminal_command",
+            "",
+            "npm test && npm run deploy",
+            None,
+            "Run",
+        );
+        assert_ne!(first, second);
+        assert!(first.ends_with("npm test && npm run build"));
+
+        let with_location = permission_scope_key(
+            "run_terminal_command",
+            "/tmp/project",
+            "npm test && npm run build",
+            None,
+            "Run",
+        );
+        assert_eq!(with_location, first);
+    }
+
+    #[test]
+    fn unknown_scope_never_uses_session_auto_allow() {
+        let scope = permission_scope_key("custom_tool", "", "", None, "Generic action");
+        assert_eq!(scope, "custom_tool:*");
+        let mut cache = SessionAllowCache::default();
+        cache.allow(scope.clone());
+        assert!(!may_auto_allow(
+            PermissionPolicy::Ask,
+            &cache,
+            &scope,
+            None,
+            "",
+            "custom_tool",
+            "",
+        ));
     }
 
     #[test]
@@ -754,10 +653,19 @@ mod tests {
             "run_terminal_command",
             "ls -la",
         ));
+        assert!(!may_auto_allow(
+            PermissionPolicy::AcceptEdits,
+            &c,
+            "write:unknown",
+            Some(&root),
+            "",
+            "search_replace",
+            "",
+        ));
     }
 
     #[test]
-    fn download_into_project_is_auto_allowed() {
+    fn download_into_project_requires_explicit_approval() {
         let c = SessionAllowCache::default();
         let root = std::env::temp_dir().join("sunsetz-perm-dl");
         let _ = std::fs::create_dir_all(root.join("outputs"));
@@ -767,8 +675,7 @@ mod tests {
             root.display(),
             dest.display()
         );
-        assert!(is_download_command(&cmd));
-        assert!(may_auto_allow(
+        assert!(!may_auto_allow(
             PermissionPolicy::AllowForSession,
             &c,
             "execute:run_terminal_command",
@@ -777,7 +684,7 @@ mod tests {
             "run_terminal_command",
             &cmd,
         ));
-        assert!(may_auto_allow(
+        assert!(!may_auto_allow(
             PermissionPolicy::Ask,
             &c,
             "execute:run_terminal_command",
@@ -794,7 +701,6 @@ mod tests {
         let root = std::env::temp_dir().join("sunsetz-perm-dl-out");
         let _ = std::fs::create_dir_all(&root);
         let cmd = "curl -sL -o /etc/passwd https://example.com/x";
-        assert!(is_download_command(cmd));
         assert!(!may_auto_allow(
             PermissionPolicy::AllowForSession,
             &c,

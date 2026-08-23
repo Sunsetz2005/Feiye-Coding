@@ -27,24 +27,7 @@
     ],
     "macOSPrivateApi": true,
     "security": {
-      "csp": null,
-      "assetProtocol": {
-        "enable": true,
-        "scope": {
-          "allow": [
-            "**",
-            "$HOME/**",
-            "$DOCUMENT/**",
-            "$DOWNLOAD/**",
-            "$DESKTOP/**",
-            "$APPDATA/**",
-            "$RESOURCE/**",
-            "$TEMP/**",
-            "$CACHE/**"
-          ],
-          "deny": []
-        }
-      }
+      "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost resource: http://resource.localhost https: http: ws: wss:; img-src 'self' media: http://media.localhost resource: http://resource.localhost https: http: data: blob:; media-src 'self' media: http://media.localhost resource: http://resource.localhost https: http: data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; font-src 'self' data:; frame-src 'self' resource: http://resource.localhost https: http: data: blob:; worker-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'none'"
     }
   },
   "bundle": {

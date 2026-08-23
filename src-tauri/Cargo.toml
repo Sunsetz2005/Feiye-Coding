@@ -18,7 +18,7 @@ tauri-build = { version = "2", features = [] }
 #   (transparent titlebar + window-vibrancy). Keep the feature on all targets so
 #   cargo-xwin Windows cross-builds pass tauri-build feature allowlist checks;
 #   runtime effect is macOS-only.
-tauri = { version = "2", features = ["protocol-asset", "macos-private-api", "tray-icon", "image-png", "unstable"] }
+tauri = { version = "2", features = ["macos-private-api", "tray-icon", "image-png", "unstable"] }
 tauri-plugin-store = "2"
 # Second launch focuses existing window (Dock multi-open reports).
 tauri-plugin-single-instance = "2"
@@ -53,11 +53,13 @@ keyring = { version = "3.6", features = [
 arboard = "3"
 image = { version = "0.25", default-features = false, features = ["png"] }
 fs2 = "0.4"
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
+    "Win32_Storage_FileSystem",
 ] }
 
 [profile.release]

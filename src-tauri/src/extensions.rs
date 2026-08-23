@@ -207,11 +207,15 @@ pub fn load_prefs() -> ExtensionsPrefs {
 pub fn save_prefs(prefs: &ExtensionsPrefs) -> Result<(), String> {
     let _ = ensure_app_dirs();
     let path = extensions_file();
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
     let raw = serde_json::to_string_pretty(prefs).map_err(|e| e.to_string())?;
-    fs::write(&path, raw).map_err(|e| e.to_string())
+    crate::store_lock::write_bytes_atomic(&path, raw.as_bytes())
+}
+
+fn update_prefs<R>(
+    update: impl FnOnce(&mut ExtensionsPrefs) -> Result<R, String>,
+) -> Result<R, String> {
+    let _ = ensure_app_dirs();
+    crate::store_lock::update_json_locked(&extensions_file(), ExtensionsPrefs::default, update)
 }
 
 // ── MCP definition discovery ─────────────────────────────────────────────────
@@ -813,18 +817,17 @@ pub fn sync_mcp_enabled_to_agent_config(
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    let existing = fs::read_to_string(&path).unwrap_or_default();
-    let mut next = existing.clone();
-    // Apply every known pref key.
-    for (name, enabled) in &prefs.mcp {
-        next = set_mcp_enabled_in_toml(&next, name, *enabled);
-    }
-    if next != existing {
-        fs::write(&path, next).map_err(|e| e.to_string())?;
-        tracing::info!(
-            "extensions: synced mcp enabled flags → {}",
-            path.display()
-        );
+    let changed = crate::store_lock::update_text_locked(&path, |existing| {
+        let mut next = existing.clone();
+        // Apply every known pref key.
+        for (name, enabled) in &prefs.mcp {
+            next = set_mcp_enabled_in_toml(&next, name, *enabled);
+        }
+        let changed = next != existing;
+        Ok((next, changed))
+    })?;
+    if changed {
+        tracing::info!("extensions: synced mcp enabled flags → {}", path.display());
     }
     invalidate_mcp_cache();
     Ok(())
@@ -832,9 +835,10 @@ pub fn sync_mcp_enabled_to_agent_config(
 
 /// Apply a single MCP enable toggle: prefs + agent config + return updated prefs.
 pub fn set_mcp_enabled(name: &str, enabled: bool) -> Result<ExtensionsPrefs, String> {
-    let mut prefs = load_prefs();
-    set_enabled(&mut prefs.mcp, name, enabled);
-    save_prefs(&prefs)?;
+    let prefs = update_prefs(|prefs| {
+        set_enabled(&mut prefs.mcp, name, enabled);
+        Ok(prefs.clone())
+    })?;
     let settings = store::load_settings();
     let _ = sync_mcp_enabled_to_agent_config(&settings.session_data_mode, &prefs);
     Ok(prefs)
@@ -842,17 +846,18 @@ pub fn set_mcp_enabled(name: &str, enabled: bool) -> Result<ExtensionsPrefs, Str
 
 /// Apply a single skill enable toggle (App filter only).
 pub fn set_skill_enabled(name: &str, enabled: bool) -> Result<ExtensionsPrefs, String> {
-    let mut prefs = load_prefs();
-    set_enabled(&mut prefs.skills, name, enabled);
-    save_prefs(&prefs)?;
-    Ok(prefs)
+    update_prefs(|prefs| {
+        set_enabled(&mut prefs.skills, name, enabled);
+        Ok(prefs.clone())
+    })
 }
 
 /// Enable every known MCP server name.
 pub fn enable_all_mcp(names: &[String]) -> Result<ExtensionsPrefs, String> {
-    let mut prefs = load_prefs();
-    enable_all(&mut prefs.mcp, names);
-    save_prefs(&prefs)?;
+    let prefs = update_prefs(|prefs| {
+        enable_all(&mut prefs.mcp, names);
+        Ok(prefs.clone())
+    })?;
     let settings = store::load_settings();
     let _ = sync_mcp_enabled_to_agent_config(&settings.session_data_mode, &prefs);
     Ok(prefs)
@@ -860,10 +865,10 @@ pub fn enable_all_mcp(names: &[String]) -> Result<ExtensionsPrefs, String> {
 
 /// Enable every known skill name.
 pub fn enable_all_skills(names: &[String]) -> Result<ExtensionsPrefs, String> {
-    let mut prefs = load_prefs();
-    enable_all(&mut prefs.skills, names);
-    save_prefs(&prefs)?;
-    Ok(prefs)
+    update_prefs(|prefs| {
+        enable_all(&mut prefs.skills, names);
+        Ok(prefs.clone())
+    })
 }
 
 #[cfg(test)]

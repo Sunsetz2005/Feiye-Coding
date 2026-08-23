@@ -92,6 +92,10 @@ pub fn automations_file() -> PathBuf {
     app_data_root().join("automations.json")
 }
 
+pub fn automation_runs_file() -> PathBuf {
+    app_data_root().join("automation-runs.v1.json")
+}
+
 /// App MCP/Skills enable prefs (`extensions.json`).
 pub fn extensions_file() -> PathBuf {
     app_data_root().join("extensions.json")

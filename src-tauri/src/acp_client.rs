@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -16,6 +17,37 @@ use tokio::sync::{mpsc, oneshot, Mutex as AsyncMutex};
 use tracing::{debug, error, info, warn};
 
 use crate::error::{AgentError, AgentErrorCode};
+
+fn loopback_socket_addr(addr: &str) -> Result<std::net::SocketAddr, String> {
+    let addr = addr.trim();
+    if addr.is_empty() {
+        return Err("ACP server address is empty".into());
+    }
+    if let Ok(socket) = std::net::SocketAddr::from_str(addr) {
+        if socket.port() == 0 {
+            return Err("ACP server port must be non-zero".into());
+        }
+        return socket.ip().is_loopback().then_some(socket).ok_or_else(|| {
+            "Direct remote ACP is disabled; use localhost through SSH local port forwarding"
+                .to_string()
+        });
+    }
+    let Some(port) = addr.strip_prefix("localhost:") else {
+        return Err(
+            "Direct remote ACP is disabled; use localhost through SSH local port forwarding".into(),
+        );
+    };
+    let port = port
+        .parse::<u16>()
+        .map_err(|_| "ACP server address must be localhost:port".to_string())?;
+    if port == 0 {
+        return Err("ACP server port must be non-zero".into());
+    }
+    Ok(std::net::SocketAddr::from((
+        std::net::Ipv4Addr::LOCALHOST,
+        port,
+    )))
+}
 
 #[derive(Debug, Clone)]
 pub enum AcpEvent {
@@ -101,6 +133,12 @@ pub enum AcpEvent {
     ProcessExited {
         code: Option<i32>,
     },
+    /// Future Runtime notification/request retained in a bounded, redacted v1
+    /// envelope. Requests with an id are still rejected on the wire.
+    Unknown {
+        method: String,
+        payload: Value,
+    },
 }
 
 /// Host circuit-breaker: after this many provider retries, cancel the turn
@@ -143,6 +181,7 @@ pub struct AcpClient {
     reader_alive: AtomicBool,
     /// Recent stderr lines for crash diagnostics (ring, newest last).
     stderr_tail: ParkingMutex<Vec<String>>,
+    sandbox_application: crate::runtime_compat::SandboxApplicationV1,
 }
 
 /// Options applied at agent process start (CLI flags).
@@ -152,6 +191,8 @@ pub struct SpawnOptions {
     pub effort: Option<String>,
     /// App permission policy id (ask / accept_edits / …).
     pub permission_policy: Option<String>,
+    /// Runtime subprocess sandbox profile (off | workspace_write | read_only).
+    pub sandbox_profile: Option<String>,
 }
 
 /// Map App policy → CLI `--permission-mode` value.
@@ -197,6 +238,9 @@ impl AcpClient {
         session_data_mode: &str,
         opts: SpawnOptions,
     ) -> Result<(Arc<Self>, mpsc::UnboundedReceiver<AcpEvent>), AgentError> {
+        let sandbox_profile = crate::runtime_compat::SandboxProfileV1::parse(
+            opts.sandbox_profile.as_deref().unwrap_or("off"),
+        );
         // API mode: if an ACP server address is configured, connect over TCP
         // instead of spawning a local CLI. The server drives an agent running
         // elsewhere (WSL/SSH/container) but speaks the identical ACP protocol.
@@ -206,6 +250,12 @@ impl AcpClient {
             .map(str::trim)
             .filter(|s| !s.is_empty())
         {
+            if sandbox_profile != crate::runtime_compat::SandboxProfileV1::Off {
+                return Err(AgentError::new(
+                    AgentErrorCode::ConnectFailed,
+                    "SANDBOX_UNAVAILABLE: Host cannot apply or verify a sandbox for a tunneled ACP Runtime",
+                ));
+            }
             return Self::connect_tcp(addr, cwd);
         }
 
@@ -249,7 +299,15 @@ impl AcpClient {
         //   top-level: `grok --no-auto-update agent …`
         //   agent opts: `--model` / `--reasoning-effort` / `--always-approve` before `stdio`
         // Skip background update checks so ACP handshakes are not delayed on launch.
-        let mut cmd = Command::new(&cli_path);
+        let sandbox_plan = crate::runtime_compat::sandbox_launch_plan(
+            &cli_path,
+            &cwd,
+            &grok_home,
+            sandbox_profile,
+        )
+        .map_err(|message| AgentError::new(AgentErrorCode::ConnectFailed, message))?;
+        let mut cmd = Command::new(&sandbox_plan.executable);
+        cmd.args(&sandbox_plan.prefix_args);
         cmd.arg("--no-auto-update");
         cmd.arg("agent");
         if !spawn_model.is_empty() {
@@ -279,7 +337,7 @@ impl AcpClient {
         }
         cmd.env("GROK_HOME", &grok_home);
         tracing::info!(
-            "acp: spawn GROK_HOME={} mode={} auth_present={} route={:?} composer_model={:?} spawn_model={} yolo={}",
+            "acp: spawn GROK_HOME={} mode={} auth_present={} route={:?} composer_model={:?} spawn_model={} yolo={} sandbox_requested={} sandbox_applied={} sandbox_verified={}",
             grok_home.display(),
             session_data_mode,
             grok_home.join("auth.json").is_file(),
@@ -289,7 +347,10 @@ impl AcpClient {
             opts.permission_policy
                 .as_deref()
                 .map(cli_permission_mode)
-                == Some("bypassPermissions")
+                == Some("bypassPermissions"),
+            sandbox_plan.application.requested,
+            sandbox_plan.application.applied,
+            sandbox_plan.application.verified,
         );
 
         let mut child = cmd.spawn().map_err(|e| {
@@ -321,6 +382,7 @@ impl AcpClient {
             stopped: AtomicBool::new(false),
             reader_alive: AtomicBool::new(true),
             stderr_tail: ParkingMutex::new(Vec::new()),
+            sandbox_application: sandbox_plan.application,
         });
 
         client.start_read_loop(Box::new(stdout));
@@ -351,12 +413,11 @@ impl AcpClient {
         Ok((client, event_rx))
     }
 
-    /// **API mode.** Connect to a remote ACP server over TCP (host:port)
+    /// **API mode.** Connect to a loopback ACP server over TCP.
     /// instead of spawning `grok agent stdio`. The server speaks the exact
     /// same newline-delimited JSON-RPC ACP protocol on the socket — this lets
-    /// the app drive an agent running elsewhere (a WSL/SSH/container agent, a
-    /// shared build host, or a `socat`-fronted CLI). No child process, no
-    /// stderr stream; the read half is wired to the same line reader.
+    /// Remote agents must be exposed through a user-managed local tunnel. No
+    /// child process or stderr stream; the read half uses the same line reader.
     ///
     /// Sync (uses a blocking connect + `from_std`) to match `spawn_with_home`;
     /// must be called from within the Tokio runtime.
@@ -364,12 +425,16 @@ impl AcpClient {
         addr: &str,
         cwd: PathBuf,
     ) -> Result<(Arc<Self>, mpsc::UnboundedReceiver<AcpEvent>), AgentError> {
-        let std_stream = std::net::TcpStream::connect(addr).map_err(|e| {
-            AgentError::new(
-                AgentErrorCode::CliNotFound,
-                format!("failed to connect ACP server {addr}: {e}"),
-            )
-        })?;
+        let socket = loopback_socket_addr(addr)
+            .map_err(|message| AgentError::new(AgentErrorCode::ConnectFailed, message))?;
+        let std_stream =
+            std::net::TcpStream::connect_timeout(&socket, std::time::Duration::from_secs(5))
+                .map_err(|e| {
+                    AgentError::new(
+                        AgentErrorCode::ConnectFailed,
+                        format!("failed to connect ACP server {addr}: {e}"),
+                    )
+                })?;
         std_stream.set_nonblocking(true).map_err(|e| {
             AgentError::new(AgentErrorCode::AgentCrashed, format!("socket setup: {e}"))
         })?;
@@ -394,6 +459,7 @@ impl AcpClient {
             stopped: AtomicBool::new(false),
             reader_alive: AtomicBool::new(true),
             stderr_tail: ParkingMutex::new(Vec::new()),
+            sandbox_application: crate::runtime_compat::SandboxApplicationV1::off(),
         });
         client.start_read_loop(Box::new(read_half));
         Ok((client, event_rx))
@@ -616,6 +682,10 @@ impl AcpClient {
                     self.schedule_prompt_complete_fallback(stop);
                 } else {
                     debug!("acp notification ignored method={method}");
+                    let _ = self.event_tx.send(AcpEvent::Unknown {
+                        method: method.to_string(),
+                        payload: msg.get("params").cloned().unwrap_or(Value::Null),
+                    });
                 }
                 return;
             }
@@ -623,6 +693,10 @@ impl AcpClient {
             // Unhandled server→client request with id: reply so agent does not hang.
             let id = req_id.unwrap();
             warn!("acp unhandled server request method={method} id={id}");
+            let _ = self.event_tx.send(AcpEvent::Unknown {
+                method: method.to_string(),
+                payload: msg.get("params").cloned().unwrap_or(Value::Null),
+            });
             let err = json!({
                 "jsonrpc": "2.0",
                 "id": id,
@@ -876,6 +950,10 @@ impl AcpClient {
     /// Working directory this process was spawned with.
     pub fn cwd(&self) -> &std::path::Path {
         &self.cwd
+    }
+
+    pub fn sandbox_application(&self) -> crate::runtime_compat::SandboxApplicationV1 {
+        self.sandbox_application.clone()
     }
 
     /// Initialize + auth, then open a session.
@@ -1320,8 +1398,8 @@ pub enum AskUserOutcome {
 /// Host → agent `initialize` params. Golden: `handshake_initialize.json`.
 pub fn wire_initialize_params() -> Value {
     json!({
-        "protocolVersion": 1,
-        "clientInfo": { "name": "sunsetz", "version": "0.1.0" },
+        "protocolVersion": crate::runtime_compat::ACP_PROTOCOL_VERSION,
+        "clientInfo": { "name": "sunsetz", "version": env!("CARGO_PKG_VERSION") },
         "capabilities": {}
     })
 }
@@ -2206,7 +2284,11 @@ impl AcpProbeResult {
 pub async fn probe_acp_server(addr: &str) -> AcpProbeResult {
     use tokio::time::{timeout, Duration};
 
-    let stream = match timeout(Duration::from_secs(5), TcpStream::connect(addr)).await {
+    let socket = match loopback_socket_addr(addr) {
+        Ok(socket) => socket,
+        Err(error) => return AcpProbeResult::fail(error),
+    };
+    let stream = match timeout(Duration::from_secs(5), TcpStream::connect(socket)).await {
         Ok(Ok(s)) => s,
         Ok(Err(e)) => return AcpProbeResult::fail(format!("connect failed: {e}")),
         Err(_) => return AcpProbeResult::fail("connect timed out (5s)"),
@@ -2250,6 +2332,22 @@ pub async fn probe_acp_server(addr: &str) -> AcpProbeResult {
         }
         Ok(Err(e)) => AcpProbeResult::fail(format!("read failed: {e}")),
         Err(_) => AcpProbeResult::fail("connected, but no ACP response within 20s"),
+    }
+}
+
+#[cfg(test)]
+mod loopback_address_tests {
+    use super::loopback_socket_addr;
+
+    #[test]
+    fn accepts_only_literal_or_named_loopback() {
+        assert!(loopback_socket_addr("127.0.0.1:7000").is_ok());
+        assert!(loopback_socket_addr("127.25.1.9:7000").is_ok());
+        assert!(loopback_socket_addr("[::1]:7000").is_ok());
+        assert!(loopback_socket_addr("localhost:7000").is_ok());
+        assert!(loopback_socket_addr("192.168.1.20:7000").is_err());
+        assert!(loopback_socket_addr("example.com:7000").is_err());
+        assert!(loopback_socket_addr("localhost:0").is_err());
     }
 }
 

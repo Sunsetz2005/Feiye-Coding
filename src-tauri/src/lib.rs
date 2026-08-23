@@ -45,6 +45,16 @@ mod store;
 mod tray;
 mod tray_i18n;
 
+// Incremental migration modules. Keep these isolated so each capability can be
+// reverted without replacing the ACP/Grok Runtime core.
+mod automation_scheduler;
+mod capability_exchange;
+mod interactions;
+mod resource_handles;
+mod runtime_events;
+mod session_search;
+mod skill_candidates;
+
 use std::sync::Arc;
 
 use session_manager::SessionManager;
@@ -121,9 +131,22 @@ pub fn run() {
                 responder.respond(response);
             });
         })
+        // Opaque-handle equivalent used by new previews. The URL never contains
+        // an absolute filesystem path.
+        .register_asynchronous_uri_scheme_protocol("resource", |_ctx, request, responder| {
+            std::thread::spawn(move || {
+                let response = media_protocol::handle_resource_request(request);
+                responder.respond(response);
+            });
+        })
         // Close button / Alt+F4 → hide to tray only (no Dock / taskbar icon).
         // Full exit: tray "Quit Sunsetz" or Cmd+Q.
         .on_window_event(|window, event| {
+            if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
+                // This event is produced by the native windowing layer, so it is
+                // valid provenance for a temporary user-selected resource grant.
+                resource_handles::grant_user_selected(paths.iter());
+            }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 use tauri::Manager;
                 api.prevent_close();
@@ -168,6 +191,7 @@ pub fn run() {
                 mgr.start_idle_watchdog(app.handle().clone());
                 mgr.start_stream_stall_watchdog(app.handle().clone());
             }
+            automation_scheduler::start(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -181,10 +205,18 @@ pub fn run() {
             commands::session_resolve_plan,
             commands::session_get_pending_ask_user,
             commands::session_pending_interactions,
+            commands::session_interactions_list,
+            commands::session_resolve_interaction_v1,
             commands::session_resolve_ask_user,
             commands::host_capabilities,
+            commands::runtime_capabilities_v1,
+            commands::capability_manifest_export_v1,
+            commands::capability_manifest_validate_v1,
             commands::finder_selected_paths,
             commands::skill_draft_save,
+            commands::skill_candidates_list_v1,
+            commands::skill_candidate_approve_v1,
+            commands::skill_candidate_reject_v1,
             commands::probe_cli,
             commands::acp_test_connection,
             commands::cli_install_latest,
@@ -213,6 +245,9 @@ pub fn run() {
             commands::session_set_project,
             commands::session_set_scheduled,
             commands::session_messages,
+            commands::session_search_v1,
+            commands::session_search_rebuild_v1,
+            commands::session_search_delete_index_v1,
             commands::session_media_root,
             commands::session_resolve_relative_media,
             commands::settings_get,
@@ -243,6 +278,8 @@ pub fn run() {
             commands::extensions_enable_all_mcp,
             commands::extensions_enable_all_skills,
             commands::plugins_list,
+            commands::runtime_plugins_catalog_v1,
+            commands::runtime_hooks_inventory_v1,
             commands::plugin_enable,
             commands::plugin_disable,
             commands::plugin_uninstall,
@@ -265,6 +302,8 @@ pub fn run() {
             commands::fs_write_absolute,
             tray::tray_refresh,
             commands::fs_read_absolute,
+            commands::resource_open_v1,
+            commands::resource_read_v1,
             commands::fs_open_path,
             commands::session_auto_title,
             commands::automations_list,
@@ -273,6 +312,8 @@ pub fn run() {
             commands::automation_set_enabled,
             commands::automation_mark_run,
             commands::automation_delete,
+            commands::automation_claim_bind_v1,
+            commands::automation_claim_complete_v1,
             commands::account_status,
             commands::account_login,
             commands::account_login_cancel,

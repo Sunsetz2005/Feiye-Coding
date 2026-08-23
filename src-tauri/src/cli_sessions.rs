@@ -344,13 +344,7 @@ pub fn import_cli_session(
     store::save_messages(&meta.id, &msgs)?;
     meta.updated_at = now;
     // Persist agent_session_id link.
-    let mut list = store::load_sessions_index();
-    if let Some(row) = list.iter_mut().find(|s| s.id == meta.id) {
-        row.agent_session_id = meta.agent_session_id.clone();
-        row.updated_at = now;
-        meta = row.clone();
-    }
-    store::save_sessions_index(&list)?;
+    store::update_session_meta(&meta)?;
     Ok(meta)
 }
 

@@ -16,7 +16,7 @@ const MAX_REFERENCE_BYTES: usize = 256 * 1024;
 const MAX_TOTAL_BYTES: usize = 1024 * 1024;
 const MAX_REFERENCES: usize = 24;
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum SkillDraftScope {
     Project,
@@ -30,7 +30,7 @@ pub struct SkillDraftReference {
     pub content: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SkillDraftSaveRequest {
     pub name: String,

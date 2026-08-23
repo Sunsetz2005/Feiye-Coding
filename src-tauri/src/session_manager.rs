@@ -24,11 +24,12 @@ use crate::acp_client::{
 };
 use crate::cli_probe;
 use crate::error::{AgentError, AgentErrorCode};
+use crate::interactions::{InteractionPayloadV1, InteractionSnapshotV1, InteractionStatusV1};
 use crate::journal_throttle::{is_paragraph_break, JournalWriteThrottle};
 use crate::mock_acp::{self, MockConnectMode, MockStreamHandle, StreamChunk};
 use crate::permission::{
-    extract_path_target, extract_shell_command, may_auto_allow, may_auto_deny, pick_option_id,
-    scope_key, PermissionPolicy, SessionAllowCache,
+    extract_path_target, extract_shell_command, may_auto_allow, may_auto_deny,
+    permission_scope_key, pick_option_id, PermissionPolicy, SessionAllowCache,
 };
 use crate::process_limits::{
     can_spawn_process, is_idle_expired, normalize_idle_minutes, normalize_max_concurrent,
@@ -105,6 +106,7 @@ pub struct SessionSnapshot {
     pub project_path: Option<String>,
     pub title: String,
     pub context_usage: Option<store::SessionTokenUsage>,
+    pub sandbox: crate::runtime_compat::SandboxApplicationV1,
 }
 
 /// One user-prompt checkpoint for the rewind timeline UI.
@@ -131,6 +133,7 @@ pub struct RewindExecuteResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UiPermissionRequest {
+    pub interaction_id: String,
     pub rpc_id: u64,
     pub session_id: String,
     pub tool_call_id: String,
@@ -145,6 +148,7 @@ pub struct UiPermissionRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct UiAskUserRequest {
+    pub interaction_id: String,
     pub rpc_id: u64,
     pub session_id: String,
     pub tool_call_id: Option<String>,
@@ -163,6 +167,7 @@ pub struct UiAskUserRequest {
 /// schema: it is meaningful only while its owning ACP connection is alive.
 #[derive(Debug, Clone)]
 struct PendingAskUser {
+    interaction: InteractionSnapshotV1,
     rpc_id: u64,
     tool_call_id: Option<String>,
     activity_id: String,
@@ -176,6 +181,7 @@ struct PendingAskUser {
 impl PendingAskUser {
     fn ui_payload(&self, session_id: &str) -> UiAskUserRequest {
         UiAskUserRequest {
+            interaction_id: self.interaction.interaction_id.clone(),
             rpc_id: self.rpc_id,
             session_id: session_id.to_string(),
             tool_call_id: self.tool_call_id.clone(),
@@ -184,6 +190,42 @@ impl PendingAskUser {
             raw: self.raw.clone(),
         }
     }
+}
+
+#[derive(Debug, Clone)]
+struct PendingPermission {
+    interaction: InteractionSnapshotV1,
+}
+
+impl PendingPermission {
+    fn ui_payload(&self) -> UiPermissionRequest {
+        let InteractionPayloadV1::Permission {
+            tool_name,
+            title,
+            preview,
+            scope_key,
+            options,
+        } = &self.interaction.payload
+        else {
+            unreachable!("pending permission payload kind")
+        };
+        UiPermissionRequest {
+            interaction_id: self.interaction.interaction_id.clone(),
+            rpc_id: self.interaction.rpc_id,
+            session_id: self.interaction.session_id.clone(),
+            tool_call_id: self.interaction.tool_call_id.clone().unwrap_or_default(),
+            tool_name: tool_name.clone(),
+            title: title.clone(),
+            preview: preview.clone(),
+            scope_key: scope_key.clone(),
+            options: options.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PendingPlan {
+    interaction: InteractionSnapshotV1,
 }
 
 fn ask_user_activity_id(tool_call_id: Option<&str>, rpc_id: u64) -> String {
@@ -237,19 +279,15 @@ fn answered_question_count(answers: &serde_json::Value, question_count: usize) -
 
 fn claim_pending_ask(
     pending: &mut PendingAskUser,
+    requested_interaction_id: Option<&str>,
     requested_rpc_id: Option<u64>,
 ) -> Result<u64, String> {
-    if let Some(requested_rpc_id) = requested_rpc_id {
-        if requested_rpc_id != pending.rpc_id {
-            return Err(format!(
-                "stale ask_user_question: expected rpc {}, got {}",
-                pending.rpc_id, requested_rpc_id
-            ));
-        }
-    }
     if pending.resolving {
         return Err("ask_user_question is already resolving".into());
     }
+    pending
+        .interaction
+        .claim(requested_interaction_id, requested_rpc_id)?;
     pending.resolving = true;
     Ok(pending.rpc_id)
 }
@@ -266,6 +304,9 @@ fn restore_pending_ask_after_failure(
         return false;
     };
     if pending.rpc_id != rpc_id || !pending.resolving {
+        return false;
+    }
+    if !pending.interaction.restore_pending() {
         return false;
     }
     pending.resolving = false;
@@ -285,6 +326,11 @@ fn clear_pending_ask_after_success(
         .as_ref()
         .is_some_and(|pending| pending.rpc_id == rpc_id && pending.resolving);
     if matches {
+        if let Some(pending) = session.pending_ask_user.as_mut() {
+            if !pending.interaction.resolve() {
+                return false;
+            }
+        }
         session.pending_ask_user = None;
     }
     matches
@@ -329,7 +375,9 @@ struct LiveSession {
     /// After session/new (load failed), first prompt should carry journal history.
     needs_history_bootstrap: bool,
     /// Pending `_x.ai/exit_plan_mode` JSON-RPC id awaiting user Approve / revise.
-    pending_plan_rpc_id: Option<u64>,
+    pending_plan: Option<PendingPlan>,
+    /// Pending `session/request_permission` awaiting a Host/UI response.
+    pending_permission: Option<PendingPermission>,
     /// Pending `_x.ai/ask_user_question` payload awaiting user answers.
     pending_ask_user: Option<PendingAskUser>,
     /// Last user/agent activity (send, stream, permission, connect).
@@ -365,6 +413,29 @@ fn take_pending_ask_activity(session: &mut LiveSession) -> Option<PendingAskActi
         activity_id: pending.activity_id,
         question_count: pending.questions.len(),
     })
+}
+
+fn interrupt_pending_interactions(session: &mut LiveSession) -> Vec<InteractionSnapshotV1> {
+    let mut interrupted = Vec::new();
+    if let Some(mut pending) = session.pending_permission.take() {
+        pending
+            .interaction
+            .set_status(InteractionStatusV1::Interrupted);
+        interrupted.push(pending.interaction);
+    }
+    if let Some(mut pending) = session.pending_plan.take() {
+        pending
+            .interaction
+            .set_status(InteractionStatusV1::Interrupted);
+        interrupted.push(pending.interaction);
+    }
+    if let Some(pending) = session.pending_ask_user.as_mut() {
+        pending
+            .interaction
+            .set_status(InteractionStatusV1::Interrupted);
+        interrupted.push(pending.interaction.clone());
+    }
+    interrupted
 }
 
 /// Ready agent process parked while another App session is focused (I01/I02).
@@ -913,17 +984,10 @@ fn persist_tool_step(
     if session_id.is_empty() || tool_call_id.is_empty() {
         return;
     }
-    let mut messages = store::load_messages(session_id);
-    upsert_tool_step_message(
-        &mut messages,
-        tool_call_id,
-        status,
-        kind,
-        title,
-        detail,
-        path,
-    );
-    if let Err(error) = store::save_messages(session_id, &messages) {
+    if let Err(error) = store::update_messages(session_id, |messages| {
+        upsert_tool_step_message(messages, tool_call_id, status, kind, title, detail, path);
+        Ok(())
+    }) {
         tracing::warn!(
             "persist tool activity failed session={session_id} tool={tool_call_id}: {error}"
         );
@@ -999,9 +1063,10 @@ fn persist_context_compact(session_id: &str, message_id: &str, content: &str) {
     if session_id.is_empty() || message_id.is_empty() {
         return;
     }
-    let mut messages = store::load_messages(session_id);
-    upsert_context_compact_message(&mut messages, message_id, content);
-    if let Err(error) = store::save_messages(session_id, &messages) {
+    if let Err(error) = store::update_messages(session_id, |messages| {
+        upsert_context_compact_message(messages, message_id, content);
+        Ok(())
+    }) {
         tracing::warn!(
             "persist context compact failed session={session_id} message={message_id}: {error}"
         );
@@ -1039,15 +1104,16 @@ fn record_ask_user_activity(
         return;
     }
     let title = ask_user_activity_title(status, question_count, answered_count);
-    let mut messages = store::load_messages(session_id);
-    upsert_ask_user_activity_message(
-        &mut messages,
-        activity_id,
-        status,
-        question_count,
-        answered_count,
-    );
-    if let Err(error) = store::save_messages(session_id, &messages) {
+    if let Err(error) = store::update_messages(session_id, |messages| {
+        upsert_ask_user_activity_message(
+            messages,
+            activity_id,
+            status,
+            question_count,
+            answered_count,
+        );
+        Ok(())
+    }) {
         tracing::warn!(
             "persist ask_user activity failed session={session_id} activity={activity_id}: {error}"
         );
@@ -1082,6 +1148,23 @@ struct AskUserResolveTarget {
     rpc_id: u64,
     activity_id: String,
     question_count: usize,
+    acp: Arc<AcpClient>,
+    snapshot: InteractionSnapshotV1,
+}
+
+struct PermissionResolveTarget {
+    session_id: String,
+    process_id: ProcessId,
+    interaction_id: String,
+    rpc_id: u64,
+    acp: Arc<AcpClient>,
+}
+
+struct PlanResolveTarget {
+    session_id: String,
+    process_id: ProcessId,
+    interaction_id: String,
+    rpc_id: u64,
     acp: Arc<AcpClient>,
 }
 
@@ -1169,7 +1252,7 @@ impl SessionManager {
         let awaiting_perm = s.fsm.state() == SessionState::AwaitingPermission;
         if should_defer_prompt_complete(
             awaiting_perm,
-            s.pending_plan_rpc_id.is_some(),
+            s.pending_plan.is_some(),
             s.pending_ask_user.is_some(),
             s.open_tool_ids.len(),
         ) {
@@ -1179,6 +1262,14 @@ impl SessionManager {
         s.deferred_prompt_complete = None;
         // Force-flush assistant turn (I04 end-of-turn path).
         Self::maybe_flush_stream_journal(s, true, false);
+        if s.tools_this_turn > 0 {
+            if let Err(error) = crate::skill_candidates::create_for_session(&s.app_session_id) {
+                tracing::warn!(
+                    "skill candidate generation failed session={}: {error}",
+                    s.app_session_id
+                );
+            }
+        }
         s.stream_buf.clear();
         s.stream_thought.clear();
         s.stream_last_was_assistant = false;
@@ -1608,7 +1699,8 @@ impl SessionManager {
             provider_retry_attempt: 0,
             provider_retry_aborted: false,
             needs_history_bootstrap: parked.needs_history_bootstrap,
-            pending_plan_rpc_id: None,
+            pending_plan: None,
+            pending_permission: None,
             pending_ask_user: None,
             last_activity: now,
             last_stream_progress: now,
@@ -1715,6 +1807,8 @@ impl SessionManager {
     }
 
     pub fn snapshot(&self) -> SessionSnapshot {
+        let settings = store::load_settings();
+        let requested = crate::runtime_compat::SandboxProfileV1::parse(&settings.sandbox_profile);
         let guard = self.inner.lock();
         match guard.as_ref() {
             None => SessionSnapshot {
@@ -1728,20 +1822,45 @@ impl SessionManager {
                 project_path: None,
                 title: String::new(),
                 context_usage: None,
+                sandbox: crate::runtime_compat::sandbox_support(requested),
             },
-            Some(s) => SessionSnapshot {
-                session_id: Some(s.app_session_id.clone()),
-                agent_session_id: s.meta.agent_session_id.clone(),
-                state: s.fsm.state(),
-                last_error: s.fsm.last_error().cloned(),
-                streaming_message_id: s.streaming_message_id.clone(),
-                backend: s.backend.clone(),
-                model_id: s.model_id.clone(),
-                project_path: s.project_path.clone(),
-                title: s.meta.title.clone(),
-                context_usage: s.meta.context_usage.clone(),
-            },
+            Some(s) => {
+                let mut sandbox = s
+                    .acp
+                    .as_ref()
+                    .map(|client| client.sandbox_application())
+                    .unwrap_or_else(|| crate::runtime_compat::sandbox_support(requested));
+                if sandbox.requested != requested.as_str() {
+                    sandbox.requested = requested.as_str().into();
+                    sandbox.state = "restart_required".into();
+                    sandbox.reason =
+                        Some("Sandbox profile changed; the active Runtime must restart".into());
+                }
+                SessionSnapshot {
+                    session_id: Some(s.app_session_id.clone()),
+                    agent_session_id: s.meta.agent_session_id.clone(),
+                    state: s.fsm.state(),
+                    last_error: s.fsm.last_error().cloned(),
+                    streaming_message_id: s.streaming_message_id.clone(),
+                    backend: s.backend.clone(),
+                    model_id: s.model_id.clone(),
+                    project_path: s.project_path.clone(),
+                    title: s.meta.title.clone(),
+                    context_usage: s.meta.context_usage.clone(),
+                    sandbox,
+                }
+            }
         }
+    }
+
+    pub fn active_sandbox_application(
+        &self,
+    ) -> Option<crate::runtime_compat::SandboxApplicationV1> {
+        self.inner
+            .lock()
+            .as_ref()
+            .and_then(|session| session.acp.as_ref())
+            .map(|client| client.sandbox_application())
     }
 
     /// Runtime diagnostics for a session export package (live or parked).
@@ -1830,6 +1949,17 @@ impl SessionManager {
 
     fn emit_state(app: &AppHandle, snap: &SessionSnapshot) {
         let _ = app.emit("session://state", snap);
+    }
+
+    fn publish_interaction(app: &AppHandle, snapshot: &InteractionSnapshotV1) {
+        if let Err(error) = crate::interactions::record(snapshot) {
+            tracing::warn!(
+                session = %snapshot.session_id,
+                interaction = %snapshot.interaction_id,
+                "persist interaction snapshot: {error}"
+            );
+        }
+        let _ = app.emit("session://interaction", snapshot);
     }
 
     /// Persist + push a chat-visible error for a failed turn (retries exhausted, RPC fail, …).
@@ -1938,12 +2068,12 @@ impl SessionManager {
         };
 
         // Resolve model / effort / permission / mode for this project+session scope.
-        let prefs = store::resolve_composer_prefs(
-            meta.project_id.as_deref(),
-            Some(meta.id.as_str()),
-        );
+        let prefs =
+            store::resolve_composer_prefs(meta.project_id.as_deref(), Some(meta.id.as_str()));
         let policy = PermissionPolicy::parse(&prefs.permission_policy);
         let agent_model = crate::providers::agent_spawn_model_id(&prefs.model_id);
+        let sandbox_profile =
+            crate::runtime_compat::SandboxProfileV1::parse(&settings.sandbox_profile);
 
         // Already live on this App session with a healthy agent → no-op (or soft re-bind prefs).
         {
@@ -1955,12 +2085,12 @@ impl SessionManager {
                     && matches!(s.fsm.state(), SessionState::Ready)
                     && s.streaming_message_id.is_none()
                     && s.effort.as_deref() == Some(prefs.effort.as_str())
+                    && s.acp.as_ref().is_some_and(|client| {
+                        client.sandbox_application().requested == sandbox_profile.as_str()
+                    })
                 {
                     Self::touch_activity_locked(s);
-                    tracing::info!(
-                        "acp connect no-op: already ready session={}",
-                        meta.id
-                    );
+                    tracing::info!("acp connect no-op: already ready session={}", meta.id);
                     return Ok(self.snapshot());
                 }
             }
@@ -1983,6 +2113,15 @@ impl SessionManager {
 
         // Target already parked (warm multi-session) → unpark.
         if self.parked.lock().contains_key(&meta.id) {
+            let stale = self.parked.lock().get(&meta.id).is_some_and(|parked| {
+                parked.acp.sandbox_application().requested != sandbox_profile.as_str()
+            });
+            if stale {
+                let stale_client = { self.parked.lock().remove(&meta.id).map(|parked| parked.acp) };
+                if let Some(client) = stale_client {
+                    client.kill().await;
+                }
+            }
             // Park current live if needed (busy → demote to background / park).
             if let Err(e) = self.try_park_live() {
                 Self::emit_process_limit(&app, Some(&meta.id), max_concurrent);
@@ -2030,7 +2169,14 @@ impl SessionManager {
             if same_focus {
                 None
             } else {
-                Self::take_reusable_acp(&self.inner, &cwd, &project_path, &prefs, policy)
+                Self::take_reusable_acp(
+                    &self.inner,
+                    &cwd,
+                    &project_path,
+                    &prefs,
+                    policy,
+                    sandbox_profile,
+                )
             }
         };
 
@@ -2116,7 +2262,8 @@ impl SessionManager {
                 provider_retry_attempt: 0,
                 provider_retry_aborted: false,
                 needs_history_bootstrap: false,
-                pending_plan_rpc_id: None,
+                pending_plan: None,
+                pending_permission: None,
                 pending_ask_user: None,
                 last_activity: now,
                 last_stream_progress: now,
@@ -2203,6 +2350,7 @@ impl SessionManager {
                 model_id: Some(agent_model.clone()),
                 effort: Some(prefs.effort.clone()),
                 permission_policy: Some(prefs.permission_policy.clone()),
+                sandbox_profile: Some(sandbox_profile.as_str().into()),
             };
 
             let (client, mut events) =
@@ -2314,6 +2462,7 @@ impl SessionManager {
         project_path: &Option<String>,
         prefs: &store::ComposerPrefs,
         next_policy: PermissionPolicy,
+        sandbox_profile: crate::runtime_compat::SandboxProfileV1,
     ) -> Option<(ProcessId, Arc<AcpClient>)> {
         let mut guard = inner.lock();
         let s = guard.as_mut()?;
@@ -2328,6 +2477,9 @@ impl SessionManager {
         }
         let client = s.acp.as_ref()?;
         if !client.is_alive() {
+            return None;
+        }
+        if client.sandbox_application().requested != sandbox_profile.as_str() {
             return None;
         }
         // Effort is a spawn flag — mismatch requires cold respawn.
@@ -2392,24 +2544,45 @@ impl SessionManager {
     async fn handle_acp_event(self: &Arc<Self>, app: &AppHandle, process_id: &str, ev: AcpEvent) {
         // Route events to the focused live session **or** a background busy session
         // (multi-session parallel streaming). Idle parked agents should not emit.
-        let is_live = self
-            .inner
-            .lock()
-            .as_ref()
-            .map(|s| s.process_id == process_id)
-            .unwrap_or(false);
-        let bg_sid = if !is_live {
-            self.background
-                .lock()
-                .iter()
-                .find(|(_, s)| s.process_id == process_id)
-                .map(|(id, _)| id.clone())
+        let live_context = self.inner.lock().as_ref().and_then(|s| {
+            (s.process_id == process_id).then(|| {
+                (
+                    s.app_session_id.clone(),
+                    s.meta.agent_session_id.clone(),
+                    s.streaming_message_id.clone(),
+                )
+            })
+        });
+        let is_live = live_context.is_some();
+        let bg_context = if !is_live {
+            self.background.lock().iter().find_map(|(id, s)| {
+                (s.process_id == process_id).then(|| {
+                    (
+                        id.clone(),
+                        s.meta.agent_session_id.clone(),
+                        s.streaming_message_id.clone(),
+                    )
+                })
+            })
         } else {
             None
         };
 
+        if let Some((session_id, agent_session_id, turn_id)) =
+            live_context.as_ref().or(bg_context.as_ref())
+        {
+            crate::runtime_events::emit(
+                app,
+                session_id,
+                agent_session_id.clone(),
+                process_id,
+                turn_id.clone(),
+                &ev,
+            );
+        }
+
         if !is_live {
-            if let Some(sid) = bg_sid {
+            if let Some((sid, _, _)) = bg_context {
                 self.handle_acp_event_on_background(app, &sid, ev).await;
                 return;
             }
@@ -2515,7 +2688,7 @@ impl SessionManager {
                                     "acp prompt_complete deferred stop={stop_reason} tools={} perm={} plan={} ask={}",
                                     s.open_tool_ids.len(),
                                     s.fsm.state() == SessionState::AwaitingPermission,
-                                    s.pending_plan_rpc_id.is_some(),
+                                    s.pending_plan.is_some(),
                                     s.pending_ask_user.is_some(),
                                 );
                                 None
@@ -2540,23 +2713,21 @@ impl SessionManager {
                 let preview = raw.to_string();
                 let path_target = extract_path_target(&raw);
                 let shell_command = extract_shell_command(&raw);
-                let sk_source = if path_target.is_empty() {
-                    title.clone()
-                } else {
-                    path_target.clone()
-                };
-                let sk = scope_key(&tool_name, &sk_source);
-                let (auto, auto_deny, session_id, project_path) = {
+                let (auto, auto_deny, request, snapshot) = {
                     let mut guard = self.inner.lock();
                     if let Some(s) = guard.as_mut() {
                         Self::touch_activity_locked(s);
                         let _ = s.fsm.await_permission();
                         // Use live session policy (updated by chip / settings_set / set_policy).
                         // Do NOT re-read only global settings — project/session scope would break.
-                        let root = s
-                            .project_path
-                            .as_ref()
-                            .map(std::path::PathBuf::from);
+                        let root = s.project_path.as_ref().map(std::path::PathBuf::from);
+                        let sk = permission_scope_key(
+                            &tool_name,
+                            &path_target,
+                            &shell_command,
+                            root.as_deref(),
+                            &title,
+                        );
                         let auto = may_auto_allow(
                             s.policy,
                             &s.allow_cache,
@@ -2567,87 +2738,69 @@ impl SessionManager {
                             &shell_command,
                         );
                         let auto_deny = !auto && may_auto_deny(s.policy);
-                        (
-                            auto,
-                            auto_deny,
-                            s.app_session_id.clone(),
-                            s.project_path.clone(),
-                        )
+                        let snapshot = InteractionSnapshotV1::new(
+                            &s.app_session_id,
+                            &s.process_id,
+                            rpc_id,
+                            Some(tool_call_id),
+                            InteractionPayloadV1::Permission {
+                                tool_name,
+                                title,
+                                preview: preview.chars().take(2000).collect(),
+                                scope_key: sk,
+                                options,
+                            },
+                        );
+                        let pending = PendingPermission {
+                            interaction: snapshot.clone(),
+                        };
+                        let request = pending.ui_payload();
+                        s.pending_permission = Some(pending);
+                        (auto, auto_deny, request, snapshot)
                     } else {
                         return;
                     }
                 };
-                let _ = project_path; // reserved for future UI badge
-                if auto {
-                    let acp = self.inner.lock().as_ref().and_then(|s| s.acp.clone());
-                    if let Some(acp) = acp {
-                        // Grok Build shell prompts use underscore optionIds (allow_once /
-                        // allow_command_always / reject). Hyphenated ACP-style fallbacks
-                        // are rejected as "unknown permission option".
-                        let option_id = pick_option_id(&options, "allow_once")
-                            .or_else(|| pick_option_id(&options, "allow_always"))
-                            .or_else(|| pick_option_id(&options, "allow_command_always"))
-                            .or_else(|| pick_option_id(&options, "always_allow_all_sessions"))
-                            .or_else(|| pick_option_id(&options, "allow"))
-                            .unwrap_or_else(|| "allow_once".into());
-                        let _ = acp
-                            .respond_permission(
-                                rpc_id,
-                                PermissionOutcome::Selected { option_id },
-                            )
-                            .await;
-                        let empty = {
-                            let mut guard = self.inner.lock();
-                            if let Some(s) = guard.as_mut() {
-                                if s.fsm.state() == SessionState::AwaitingPermission {
-                                    let _ = s.fsm.permission_resolved_continue();
-                                }
-                                Self::try_finish_deferred_prompt_complete(s).flatten()
-                            } else {
-                                None
-                            }
-                        };
-                        Self::emit_empty_run_if_any(app, empty);
-                    }
+                Self::publish_interaction(app, &snapshot);
+                let automatic_option = if auto {
+                    pick_option_id(&request.options, "allow_once")
+                        .or_else(|| pick_option_id(&request.options, "allow_always"))
+                        .or_else(|| pick_option_id(&request.options, "allow_command_always"))
+                        .or_else(|| pick_option_id(&request.options, "always_allow_all_sessions"))
+                        .or_else(|| pick_option_id(&request.options, "allow"))
+                        .map(|option_id| ("allow", option_id))
                 } else if auto_deny {
-                    let acp = self.inner.lock().as_ref().and_then(|s| s.acp.clone());
-                    if let Some(acp) = acp {
-                        let option_id = pick_option_id(&options, "reject_once")
-                            .or_else(|| pick_option_id(&options, "reject_always"))
-                            .or_else(|| pick_option_id(&options, "reject"))
-                            .or_else(|| pick_option_id(&options, "deny"))
-                            .unwrap_or_else(|| "reject".into());
-                        let _ = acp
-                            .respond_permission(
-                                rpc_id,
-                                PermissionOutcome::Selected { option_id },
-                            )
-                            .await;
-                        let empty = {
-                            let mut guard = self.inner.lock();
-                            if let Some(s) = guard.as_mut() {
-                                if s.fsm.state() == SessionState::AwaitingPermission {
-                                    let _ = s.fsm.permission_resolved_continue();
-                                }
-                                Self::try_finish_deferred_prompt_complete(s).flatten()
-                            } else {
-                                None
-                            }
-                        };
-                        Self::emit_empty_run_if_any(app, empty);
+                    Some((
+                        "deny",
+                        pick_option_id(&request.options, "reject_once")
+                            .or_else(|| pick_option_id(&request.options, "reject_always"))
+                            .or_else(|| pick_option_id(&request.options, "reject"))
+                            .or_else(|| pick_option_id(&request.options, "deny"))
+                            .unwrap_or_else(|| "reject".into()),
+                    ))
+                } else {
+                    None
+                };
+
+                if let Some((decision, option_id)) = automatic_option {
+                    if let Err(error) = self
+                        .resolve_permission(
+                            app.clone(),
+                            rpc_id,
+                            decision.to_string(),
+                            Some(option_id),
+                            None,
+                            Some(request.session_id.clone()),
+                            Some(request.interaction_id.clone()),
+                        )
+                        .await
+                    {
+                        tracing::warn!("automatic permission response failed: {error}");
+                        let _ = app.emit("session://permission", &request);
+                        Self::emit_state(app, &self.snapshot());
                     }
                 } else {
-                    let req = UiPermissionRequest {
-                        rpc_id,
-                        session_id,
-                        tool_call_id,
-                        tool_name,
-                        title,
-                        preview: preview.chars().take(2000).collect(),
-                        scope_key: sk,
-                        options,
-                    };
-                    let _ = app.emit("session://permission", &req);
+                    let _ = app.emit("session://permission", &request);
                     Self::emit_state(app, &self.snapshot());
                 }
             }
@@ -2826,17 +2979,33 @@ impl SessionManager {
                 rpc_id,
                 tool_call_id,
             } => {
-                let app_sid = {
+                let (app_sid, interaction) = {
                     let mut guard = self.inner.lock();
                     if let Some(s) = guard.as_mut() {
-                        if let Some(id) = rpc_id {
-                            s.pending_plan_rpc_id = Some(id);
-                        }
-                        s.app_session_id.clone()
+                        let interaction = rpc_id.map(|id| {
+                            let snapshot = InteractionSnapshotV1::new(
+                                &s.app_session_id,
+                                &s.process_id,
+                                id,
+                                tool_call_id.clone(),
+                                InteractionPayloadV1::Plan {
+                                    entries: entries.clone(),
+                                    body: body.clone(),
+                                },
+                            );
+                            s.pending_plan = Some(PendingPlan {
+                                interaction: snapshot.clone(),
+                            });
+                            snapshot
+                        });
+                        (s.app_session_id.clone(), interaction)
                     } else {
-                        String::new()
+                        (String::new(), None)
                     }
                 };
+                if let Some(interaction) = interaction.as_ref() {
+                    Self::publish_interaction(app, interaction);
+                }
                 let _ = app.emit(
                     "session://plan",
                     serde_json::json!({
@@ -2855,16 +3024,25 @@ impl SessionManager {
                 questions,
                 raw,
             } => {
-                let activity_id =
-                    ask_user_activity_id(tool_call_id.as_deref(), rpc_id);
+                let activity_id = ask_user_activity_id(tool_call_id.as_deref(), rpc_id);
                 let question_count = questions.len();
-                let (payload, completed_phase_id, app_session_id) = {
+                let (payload, completed_phase_id, app_session_id, interaction) = {
                     let mut guard = self.inner.lock();
                     if let Some(s) = guard.as_mut() {
                         Self::touch_stream_progress_locked(s);
-                        let completed_phase_id =
-                            Self::begin_tool_boundary(s, &activity_id);
+                        let completed_phase_id = Self::begin_tool_boundary(s, &activity_id);
+                        let interaction = InteractionSnapshotV1::new(
+                            &s.app_session_id,
+                            &s.process_id,
+                            rpc_id,
+                            tool_call_id.clone(),
+                            InteractionPayloadV1::AskUser {
+                                questions: questions.clone(),
+                                partial_answers: None,
+                            },
+                        );
                         s.pending_ask_user = Some(PendingAskUser {
+                            interaction: interaction.clone(),
                             rpc_id,
                             tool_call_id,
                             activity_id: activity_id.clone(),
@@ -2881,11 +3059,15 @@ impl SessionManager {
                             payload,
                             completed_phase_id,
                             s.app_session_id.clone(),
+                            Some(interaction),
                         )
                     } else {
-                        (None, None, String::new())
+                        (None, None, String::new(), None)
                     }
                 };
+                if let Some(interaction) = interaction.as_ref() {
+                    Self::publish_interaction(app, interaction);
+                }
                 if let Some(payload) = payload {
                     if let Some(Some(message_id)) = completed_phase_id {
                         let _ = app.emit(
@@ -2913,18 +3095,22 @@ impl SessionManager {
                 }
             }
             AcpEvent::Error { error } => {
-                let ask_activity = {
+                let (ask_activity, interrupted) = {
                     let mut guard = self.inner.lock();
                     if let Some(s) = guard.as_mut() {
                         if !s.provider_retry_aborted {
                             Self::record_turn_error(s, app, &error);
                         }
                         let _ = s.fsm.fail_with(error);
-                        take_pending_ask_activity(s)
+                        let interrupted = interrupt_pending_interactions(s);
+                        (take_pending_ask_activity(s), interrupted)
                     } else {
-                        None
+                        (None, Vec::new())
                     }
                 };
+                for snapshot in interrupted {
+                    Self::publish_interaction(app, &snapshot);
+                }
                 if let Some(activity) = ask_activity {
                     record_ask_user_activity(
                         app,
@@ -2938,7 +3124,7 @@ impl SessionManager {
                 Self::emit_state(app, &self.snapshot());
             }
             AcpEvent::ProcessExited { .. } => {
-                let ask_activity = {
+                let (ask_activity, interrupted) = {
                     let mut guard = self.inner.lock();
                     if let Some(s) = guard.as_mut() {
                         let st = s.fsm.state();
@@ -2988,11 +3174,15 @@ impl SessionManager {
                             let _ = s.fsm.crash("Agent process exited");
                         }
                         s.acp = None;
-                        take_pending_ask_activity(s)
+                        let interrupted = interrupt_pending_interactions(s);
+                        (take_pending_ask_activity(s), interrupted)
                     } else {
-                        None
+                        (None, Vec::new())
                     }
                 };
+                for snapshot in interrupted {
+                    Self::publish_interaction(app, &snapshot);
+                }
                 if let Some(activity) = ask_activity {
                     record_ask_user_activity(
                         app,
@@ -3196,6 +3386,9 @@ impl SessionManager {
                 );
                 Self::emit_state(app, &self.snapshot());
             }
+            AcpEvent::Unknown { method, .. } => {
+                tracing::debug!("runtime event retained as unknown method={method}");
+            }
         }
     }
 
@@ -3288,7 +3481,7 @@ impl SessionManager {
                                     stop_reason,
                                     s.open_tool_ids.len(),
                                     s.fsm.state() == SessionState::AwaitingPermission,
-                                    s.pending_plan_rpc_id.is_some(),
+                                    s.pending_plan.is_some(),
                                     s.pending_ask_user.is_some(),
                                 );
                                 (false, None)
@@ -3316,18 +3509,19 @@ impl SessionManager {
                 let preview = raw.to_string();
                 let path_target = extract_path_target(&raw);
                 let shell_command = extract_shell_command(&raw);
-                let sk_source = if path_target.is_empty() {
-                    title.clone()
-                } else {
-                    path_target.clone()
-                };
-                let sk = scope_key(&tool_name, &sk_source);
-                let (auto, auto_deny, session_id, project_path, acp) = {
+                let (auto, auto_deny, request, snapshot) = {
                     let mut bg = self.background.lock();
                     if let Some(s) = bg.get_mut(app_session_id) {
                         Self::touch_activity_locked(s);
                         let _ = s.fsm.await_permission();
                         let root = s.project_path.as_ref().map(std::path::PathBuf::from);
+                        let sk = permission_scope_key(
+                            &tool_name,
+                            &path_target,
+                            &shell_command,
+                            root.as_deref(),
+                            &title,
+                        );
                         let auto = may_auto_allow(
                             s.policy,
                             &s.allow_cache,
@@ -3338,100 +3532,75 @@ impl SessionManager {
                             &shell_command,
                         );
                         let auto_deny = may_auto_deny(s.policy) && !auto;
-                        (
-                            auto,
-                            auto_deny,
-                            s.app_session_id.clone(),
-                            s.project_path.clone(),
-                            s.acp.clone(),
-                        )
+                        let snapshot = InteractionSnapshotV1::new(
+                            &s.app_session_id,
+                            &s.process_id,
+                            rpc_id,
+                            Some(tool_call_id),
+                            InteractionPayloadV1::Permission {
+                                tool_name,
+                                title,
+                                preview: preview.chars().take(2000).collect(),
+                                scope_key: sk,
+                                options,
+                            },
+                        );
+                        let pending = PendingPermission {
+                            interaction: snapshot.clone(),
+                        };
+                        let request = pending.ui_payload();
+                        s.pending_permission = Some(pending);
+                        (auto, auto_deny, request, snapshot)
                     } else {
                         return;
                     }
                 };
-                let _ = project_path;
-                if auto {
-                    if let Some(acp) = acp {
-                        let option_id = pick_option_id(&options, "allow_once")
-                            .or_else(|| pick_option_id(&options, "allow"))
-                            .unwrap_or_else(|| "allow_once".into());
-                        let resolved = acp
-                            .respond_permission(
-                                rpc_id,
-                                PermissionOutcome::Selected { option_id },
-                            )
-                            .await;
-                        if resolved.is_ok() {
-                            let (finished, empty) = {
-                                let mut bg = self.background.lock();
-                                if let Some(s) = bg.get_mut(app_session_id) {
-                                    if s.fsm.state() == SessionState::AwaitingPermission {
-                                        let _ = s.fsm.permission_resolved_continue();
-                                    }
-                                    match Self::try_finish_deferred_prompt_complete(s) {
-                                        Some(empty) => (true, empty),
-                                        None => (false, None),
-                                    }
-                                } else {
-                                    (false, None)
-                                }
-                            };
-                            Self::emit_empty_run_if_any(app, empty);
-                            if finished {
-                                self.promote_background_ready_to_parked(app_session_id);
-                                Self::emit_state(app, &self.snapshot());
-                            }
-                        }
-                    }
+                Self::publish_interaction(app, &snapshot);
+                let automatic_option = if auto {
+                    pick_option_id(&request.options, "allow_once")
+                        .or_else(|| pick_option_id(&request.options, "allow_always"))
+                        .or_else(|| pick_option_id(&request.options, "allow_command_always"))
+                        .or_else(|| pick_option_id(&request.options, "always_allow_all_sessions"))
+                        .or_else(|| pick_option_id(&request.options, "allow"))
+                        .map(|option_id| ("allow", option_id))
                 } else if auto_deny {
-                    if let Some(acp) = acp {
-                        let option_id = pick_option_id(&options, "reject_once")
-                            .or_else(|| pick_option_id(&options, "reject"))
-                            .unwrap_or_else(|| "reject".into());
-                        let resolved = acp
-                            .respond_permission(
-                                rpc_id,
-                                PermissionOutcome::Selected { option_id },
-                            )
-                            .await;
-                        if resolved.is_ok() {
-                            let (finished, empty) = {
-                                let mut bg = self.background.lock();
-                                if let Some(s) = bg.get_mut(app_session_id) {
-                                    if s.fsm.state() == SessionState::AwaitingPermission {
-                                        let _ = s.fsm.permission_resolved_continue();
-                                    }
-                                    match Self::try_finish_deferred_prompt_complete(s) {
-                                        Some(empty) => (true, empty),
-                                        None => (false, None),
-                                    }
-                                } else {
-                                    (false, None)
-                                }
-                            };
-                            Self::emit_empty_run_if_any(app, empty);
-                            if finished {
-                                self.promote_background_ready_to_parked(app_session_id);
-                                Self::emit_state(app, &self.snapshot());
-                            }
-                        }
+                    Some((
+                        "deny",
+                        pick_option_id(&request.options, "reject_once")
+                            .or_else(|| pick_option_id(&request.options, "reject_always"))
+                            .or_else(|| pick_option_id(&request.options, "reject"))
+                            .or_else(|| pick_option_id(&request.options, "deny"))
+                            .unwrap_or_else(|| "reject".into()),
+                    ))
+                } else {
+                    None
+                };
+                if let Some((decision, option_id)) = automatic_option {
+                    if let Err(error) = self
+                        .resolve_permission(
+                            app.clone(),
+                            rpc_id,
+                            decision.to_string(),
+                            Some(option_id),
+                            None,
+                            Some(request.session_id.clone()),
+                            Some(request.interaction_id.clone()),
+                        )
+                        .await
+                    {
+                        tracing::warn!("automatic background permission response failed: {error}");
+                        let _ = app.emit("session://permission", &request);
+                        let _ = app.emit(
+                            "session://background_permission",
+                            serde_json::json!({ "sessionId": request.session_id }),
+                        );
+                        Self::emit_state(app, &self.snapshot());
                     }
                 } else {
-                    let req = UiPermissionRequest {
-                        rpc_id,
-                        session_id: session_id.clone(),
-                        tool_call_id,
-                        tool_name,
-                        title,
-                        preview: preview.chars().take(2000).collect(),
-                        scope_key: sk,
-                        options,
-                    };
-                    let _ = app.emit("session://permission", &req);
-                    // Tell UI this permission belongs to a non-focused session.
+                    let _ = app.emit("session://permission", &request);
                     let _ = app.emit(
                         "session://background_permission",
-                        serde_json::json!({ "sessionId": session_id }),
+                        serde_json::json!({ "sessionId": request.session_id }),
                     );
                     Self::emit_state(app, &self.snapshot());
                 }
@@ -3591,24 +3760,76 @@ impl SessionManager {
                     Self::emit_state(app, &self.snapshot());
                 }
             }
+            AcpEvent::Plan {
+                entries,
+                body,
+                rpc_id,
+                tool_call_id,
+            } => {
+                let (session_id, interaction) = {
+                    let mut background = self.background.lock();
+                    let Some(session) = background.get_mut(app_session_id) else {
+                        return;
+                    };
+                    let interaction = rpc_id.map(|id| {
+                        let snapshot = InteractionSnapshotV1::new(
+                            &session.app_session_id,
+                            &session.process_id,
+                            id,
+                            tool_call_id.clone(),
+                            InteractionPayloadV1::Plan {
+                                entries: entries.clone(),
+                                body: body.clone(),
+                            },
+                        );
+                        session.pending_plan = Some(PendingPlan {
+                            interaction: snapshot.clone(),
+                        });
+                        snapshot
+                    });
+                    (session.app_session_id.clone(), interaction)
+                };
+                if let Some(interaction) = interaction.as_ref() {
+                    Self::publish_interaction(app, interaction);
+                }
+                let payload = serde_json::json!({
+                    "sessionId": session_id,
+                    "entries": entries,
+                    "body": body,
+                    "rpcId": rpc_id,
+                    "toolCallId": tool_call_id,
+                    "waiting": rpc_id.is_none(),
+                });
+                let _ = app.emit("session://plan", &payload);
+                let _ = app.emit("session://background_plan", &payload);
+            }
             AcpEvent::AskUserQuestion {
                 rpc_id,
                 tool_call_id,
                 questions,
                 raw,
             } => {
-                let activity_id =
-                    ask_user_activity_id(tool_call_id.as_deref(), rpc_id);
+                let activity_id = ask_user_activity_id(tool_call_id.as_deref(), rpc_id);
                 let question_count = questions.len();
-                let (payload, completed_phase_id) = {
+                let (payload, completed_phase_id, interaction) = {
                     let mut background = self.background.lock();
                     let Some(session) = background.get_mut(app_session_id) else {
                         return;
                     };
                     Self::touch_stream_progress_locked(session);
-                    let completed_phase_id =
-                        Self::begin_tool_boundary(session, &activity_id);
+                    let completed_phase_id = Self::begin_tool_boundary(session, &activity_id);
+                    let interaction = InteractionSnapshotV1::new(
+                        &session.app_session_id,
+                        &session.process_id,
+                        rpc_id,
+                        tool_call_id.clone(),
+                        InteractionPayloadV1::AskUser {
+                            questions: questions.clone(),
+                            partial_answers: None,
+                        },
+                    );
                     session.pending_ask_user = Some(PendingAskUser {
+                        interaction: interaction.clone(),
                         rpc_id,
                         tool_call_id,
                         activity_id: activity_id.clone(),
@@ -3621,8 +3842,11 @@ impl SessionManager {
                         .pending_ask_user
                         .as_ref()
                         .map(|pending| pending.ui_payload(&session.app_session_id));
-                    (payload, completed_phase_id)
+                    (payload, completed_phase_id, Some(interaction))
                 };
+                if let Some(interaction) = interaction.as_ref() {
+                    Self::publish_interaction(app, interaction);
+                }
                 if let Some(payload) = payload {
                     if let Some(Some(message_id)) = completed_phase_id {
                         let _ = app.emit(
@@ -3654,16 +3878,20 @@ impl SessionManager {
                 }
             }
             AcpEvent::ProcessExited { .. } => {
-                let ask_activity = {
+                let (ask_activity, interrupted) = {
                     let mut bg = self.background.lock();
                     if let Some(mut s) = bg.remove(app_session_id) {
                         let _ = s.fsm.crash("Agent process exited (background)");
                         s.acp = None;
-                        take_pending_ask_activity(&mut s)
+                        let interrupted = interrupt_pending_interactions(&mut s);
+                        (take_pending_ask_activity(&mut s), interrupted)
                     } else {
-                        None
+                        (None, Vec::new())
                     }
                 };
+                for snapshot in interrupted {
+                    Self::publish_interaction(app, &snapshot);
+                }
                 if let Some(activity) = ask_activity {
                     record_ask_user_activity(
                         app,
@@ -3677,16 +3905,20 @@ impl SessionManager {
                 Self::emit_state(app, &self.snapshot());
             }
             AcpEvent::Error { error } => {
-                let ask_activity = {
+                let (ask_activity, interrupted) = {
                     let mut bg = self.background.lock();
                     if let Some(s) = bg.get_mut(app_session_id) {
                         Self::record_turn_error(s, app, &error);
                         let _ = s.fsm.fail_with(error);
-                        take_pending_ask_activity(s)
+                        let interrupted = interrupt_pending_interactions(s);
+                        (take_pending_ask_activity(s), interrupted)
                     } else {
-                        None
+                        (None, Vec::new())
                     }
                 };
+                for snapshot in interrupted {
+                    Self::publish_interaction(app, &snapshot);
+                }
                 if let Some(activity) = ask_activity {
                     record_ask_user_activity(
                         app,
@@ -3870,16 +4102,17 @@ impl SessionManager {
         }
 
         // Local journal: keep messages strictly before the last user message.
-        let msgs = store::load_messages(&app_sid);
-        let mut cut = msgs.len();
-        for (i, m) in msgs.iter().enumerate().rev() {
-            if m.role == "user" {
-                cut = i;
-                break;
+        store::update_messages(&app_sid, |msgs| {
+            let mut cut = msgs.len();
+            for (i, m) in msgs.iter().enumerate().rev() {
+                if m.role == "user" {
+                    cut = i;
+                    break;
+                }
             }
-        }
-        let kept: Vec<_> = msgs.into_iter().take(cut).collect();
-        store::save_messages(&app_sid, &kept)?;
+            msgs.truncate(cut);
+            Ok(())
+        })?;
 
         {
             let mut guard = self.inner.lock();
@@ -4022,9 +4255,12 @@ impl SessionManager {
             agent_error = Some("session not live; local journal only".into());
         }
 
-        let kept = store::truncate_through_user_prompt(&msgs, target_prompt_index)?;
-        let kept_count = kept.len();
-        store::save_messages(&app_sid, &kept)?;
+        let kept_count = store::update_messages(&app_sid, |messages| {
+            let kept = store::truncate_through_user_prompt(messages, target_prompt_index)?;
+            let kept_count = kept.len();
+            *messages = kept;
+            Ok(kept_count)
+        })?;
 
         // Touch meta updated_at for index sort.
         if let Some(mut meta) = store::load_sessions_index()
@@ -4182,6 +4418,13 @@ impl SessionManager {
                     }
                     drop(guard);
                     if chunk.done {
+                        if let Err(error) = crate::automation_scheduler::complete_for_session(
+                            &chunk.session_id,
+                            true,
+                            None,
+                        ) {
+                            tracing::warn!("complete mock automation claim: {error}");
+                        }
                         SessionManager::emit_state(&app_done, &mgr.snapshot());
                     }
                 },
@@ -4195,19 +4438,39 @@ impl SessionManager {
         let acp = acp.ok_or("ACP client missing")?;
         let mgr = Arc::clone(self);
         let app2 = app.clone();
+        let automation_session_id = app_sid.clone();
         tokio::spawn(async move {
-            if let Err(e) = acp.prompt(&agent_prompt).await {
-                {
-                    let mut guard = mgr.inner.lock();
-                    if let Some(s) = guard.as_mut() {
-                        // Skip if host already recorded a retry-exhausted error this turn.
-                        if !s.provider_retry_aborted {
-                            SessionManager::record_turn_error(s, &app2, &e);
-                            let _ = s.fsm.fail_with(e);
-                        }
+            match acp.prompt(&agent_prompt).await {
+                Ok(_) => {
+                    if let Err(error) = crate::automation_scheduler::complete_for_session(
+                        &automation_session_id,
+                        true,
+                        None,
+                    ) {
+                        tracing::warn!("complete automation claim: {error}");
                     }
                 }
-                SessionManager::emit_state(&app2, &mgr.snapshot());
+                Err(e) => {
+                    let automation_error = e.message.clone();
+                    {
+                        let mut guard = mgr.inner.lock();
+                        if let Some(s) = guard.as_mut() {
+                            // Skip if host already recorded a retry-exhausted error this turn.
+                            if !s.provider_retry_aborted {
+                                SessionManager::record_turn_error(s, &app2, &e);
+                                let _ = s.fsm.fail_with(e);
+                            }
+                        }
+                    }
+                    if let Err(error) = crate::automation_scheduler::complete_for_session(
+                        &automation_session_id,
+                        false,
+                        Some(&automation_error),
+                    ) {
+                        tracing::warn!("fail automation claim: {error}");
+                    }
+                    SessionManager::emit_state(&app2, &mgr.snapshot());
+                }
             }
         });
 
@@ -4215,7 +4478,7 @@ impl SessionManager {
     }
 
     pub async fn stop(self: &Arc<Self>, app: AppHandle) -> Result<SessionSnapshot, String> {
-        let (acp, ask_activity) = {
+        let (acp, ask_activity, interrupted) = {
             let mut guard = self.inner.lock();
             let s = guard.as_mut().ok_or("no active session")?;
             if let Some(h) = s.mock_stream.take() {
@@ -4270,9 +4533,13 @@ impl SessionManager {
             s.journal_throttle.reset();
             s.open_tool_ids.clear();
             s.last_stall_emit = None;
+            let interrupted = interrupt_pending_interactions(s);
             let ask_activity = take_pending_ask_activity(s);
-            (s.acp.clone(), ask_activity)
+            (s.acp.clone(), ask_activity, interrupted)
         };
+        for snapshot in interrupted {
+            Self::publish_interaction(&app, &snapshot);
+        }
         if let Some(activity) = ask_activity {
             record_ask_user_activity(
                 &app,
@@ -4325,6 +4592,38 @@ impl SessionManager {
         if let Some(acp) = acp {
             acp.kill().await;
             Self::emit_state(app, &self.snapshot());
+        }
+    }
+
+    /// A sandbox profile is spawn-critical. Drop the live process and every
+    /// mismatched warm process so none can be reused under the new request.
+    pub async fn apply_sandbox_profile(&self, app: &AppHandle, profile: &str) {
+        let requested = crate::runtime_compat::SandboxProfileV1::parse(profile);
+        let live_mismatch = self
+            .inner
+            .lock()
+            .as_ref()
+            .and_then(|session| session.acp.as_ref())
+            .is_some_and(|client| client.sandbox_application().requested != requested.as_str());
+        if live_mismatch {
+            self.soft_respawn(app).await;
+        }
+
+        let stale = {
+            let mut parked = self.parked.lock();
+            let ids: Vec<String> = parked
+                .iter()
+                .filter(|(_, entry)| {
+                    entry.acp.sandbox_application().requested != requested.as_str()
+                })
+                .map(|(id, _)| id.clone())
+                .collect();
+            ids.into_iter()
+                .filter_map(|id| parked.remove(&id).map(|entry| entry.acp))
+                .collect::<Vec<_>>()
+        };
+        for client in stale {
+            client.kill().await;
         }
     }
 
@@ -4481,6 +4780,156 @@ impl SessionManager {
         }
     }
 
+    fn prepare_permission_resolution(
+        &self,
+        session_id: Option<&str>,
+        rpc_id: Option<u64>,
+        interaction_id: Option<&str>,
+    ) -> Result<(PermissionResolveTarget, InteractionSnapshotV1), String> {
+        fn prepare(
+            session: &mut LiveSession,
+            rpc_id: Option<u64>,
+            interaction_id: Option<&str>,
+        ) -> Result<(PermissionResolveTarget, InteractionSnapshotV1), String> {
+            let acp = session
+                .acp
+                .clone()
+                .ok_or_else(|| "ACP client missing".to_string())?;
+            let pending = session
+                .pending_permission
+                .as_mut()
+                .ok_or_else(|| "no pending permission request".to_string())?;
+            pending.interaction.claim(interaction_id, rpc_id)?;
+            let snapshot = pending.interaction.clone();
+            SessionManager::touch_activity_locked(session);
+            Ok((
+                PermissionResolveTarget {
+                    session_id: session.app_session_id.clone(),
+                    process_id: session.process_id.clone(),
+                    interaction_id: snapshot.interaction_id.clone(),
+                    rpc_id: snapshot.rpc_id,
+                    acp,
+                },
+                snapshot,
+            ))
+        }
+
+        let requested = session_id.map(str::trim).filter(|value| !value.is_empty());
+        {
+            let mut live = self.inner.lock();
+            if let Some(session) = live.as_mut() {
+                if requested.is_none_or(|id| id == session.app_session_id) {
+                    return prepare(session, rpc_id, interaction_id);
+                }
+            } else if requested.is_none() {
+                return Err("no session".into());
+            }
+        }
+        let requested = requested.ok_or_else(|| "no pending permission request".to_string())?;
+        let mut background = self.background.lock();
+        let session = background
+            .get_mut(requested)
+            .ok_or_else(|| format!("session not active: {requested}"))?;
+        prepare(session, rpc_id, interaction_id)
+    }
+
+    fn restore_permission_after_write_failure(
+        &self,
+        target: &PermissionResolveTarget,
+    ) -> Option<InteractionSnapshotV1> {
+        fn restore(
+            session: &mut LiveSession,
+            target: &PermissionResolveTarget,
+        ) -> Option<InteractionSnapshotV1> {
+            if session.process_id != target.process_id {
+                return None;
+            }
+            let pending = session.pending_permission.as_mut()?;
+            if pending.interaction.interaction_id != target.interaction_id
+                || pending.interaction.rpc_id != target.rpc_id
+                || !pending.interaction.restore_pending()
+            {
+                return None;
+            }
+            Some(pending.interaction.clone())
+        }
+
+        {
+            let mut live = self.inner.lock();
+            if let Some(session) = live.as_mut() {
+                if session.app_session_id == target.session_id {
+                    if let Some(snapshot) = restore(session, target) {
+                        return Some(snapshot);
+                    }
+                }
+            }
+        }
+        let mut background = self.background.lock();
+        background
+            .get_mut(&target.session_id)
+            .and_then(|session| restore(session, target))
+    }
+
+    fn clear_resolved_permission(
+        &self,
+        target: &PermissionResolveTarget,
+        cache_scope: Option<&str>,
+    ) -> (
+        Option<InteractionSnapshotV1>,
+        bool,
+        Option<(String, String, String)>,
+        bool,
+    ) {
+        fn clear(
+            session: &mut LiveSession,
+            target: &PermissionResolveTarget,
+            cache_scope: Option<&str>,
+        ) -> Option<(
+            InteractionSnapshotV1,
+            bool,
+            Option<(String, String, String)>,
+        )> {
+            if session.process_id != target.process_id {
+                return None;
+            }
+            let pending = session.pending_permission.as_mut()?;
+            if pending.interaction.interaction_id != target.interaction_id
+                || pending.interaction.rpc_id != target.rpc_id
+                || !pending.interaction.resolve()
+            {
+                return None;
+            }
+            let snapshot = pending.interaction.clone();
+            session.pending_permission = None;
+            if let Some(scope) = cache_scope {
+                session.allow_cache.allow(scope.to_string());
+            }
+            if session.fsm.state() == SessionState::AwaitingPermission {
+                let _ = session.fsm.permission_resolved_continue();
+            }
+            let finish = SessionManager::try_finish_deferred_prompt_complete(session);
+            Some((snapshot, finish.is_some(), finish.flatten()))
+        }
+
+        {
+            let mut live = self.inner.lock();
+            if let Some(session) = live.as_mut() {
+                if session.app_session_id == target.session_id {
+                    if let Some((snapshot, finished, empty)) = clear(session, target, cache_scope) {
+                        return (Some(snapshot), finished, empty, false);
+                    }
+                }
+            }
+        }
+        let mut background = self.background.lock();
+        if let Some(session) = background.get_mut(&target.session_id) {
+            if let Some((snapshot, finished, empty)) = clear(session, target, cache_scope) {
+                return (Some(snapshot), finished, empty, true);
+            }
+        }
+        (None, false, None, false)
+    }
+
     pub async fn resolve_permission(
         self: &Arc<Self>,
         app: AppHandle,
@@ -4488,40 +4937,40 @@ impl SessionManager {
         decision: String,
         option_id: Option<String>,
         scope: Option<String>,
+        session_id: Option<String>,
+        interaction_id: Option<String>,
     ) -> Result<SessionSnapshot, String> {
-        let acp = {
-            let mut guard = self.inner.lock();
-            let s = guard.as_mut().ok_or("no session")?;
-            Self::touch_activity_locked(s);
-            // "allow_session" decision caches scope_key for H05 (works under Ask chip too)
-            if decision == "allow_session" || decision == "allow_for_session" {
-                if let Some(sk) = scope {
-                    s.allow_cache.allow(sk);
-                }
-            }
-            if s.fsm.state() == SessionState::AwaitingPermission {
-                let _ = s.fsm.permission_resolved_continue();
-            }
-            // Permission cleared — may finish a deferred prompt_complete (#52).
-            let empty = Self::try_finish_deferred_prompt_complete(s).flatten();
-            (s.acp.clone(), empty)
+        let (target, resolving) = self.prepare_permission_resolution(
+            session_id.as_deref(),
+            Some(rpc_id),
+            interaction_id.as_deref(),
+        )?;
+        Self::publish_interaction(&app, &resolving);
+        let outcome = match decision.as_str() {
+            "cancel" => PermissionOutcome::Cancelled,
+            "deny" => PermissionOutcome::Selected {
+                option_id: option_id.unwrap_or_else(|| "reject".into()),
+            },
+            _ => PermissionOutcome::Selected {
+                option_id: option_id.unwrap_or_else(|| "allow_once".into()),
+            },
         };
-
-        let (acp, empty_run) = acp;
-        if let Some(acp) = acp {
-            let outcome = match decision.as_str() {
-                "cancel" => PermissionOutcome::Cancelled,
-                "deny" => PermissionOutcome::Selected {
-                    option_id: option_id.unwrap_or_else(|| "reject".into()),
-                },
-                _ => PermissionOutcome::Selected {
-                    // Prefer client-supplied optionId from Agent options list
-                    option_id: option_id.unwrap_or_else(|| "allow_once".into()),
-                },
-            };
-            acp.respond_permission(rpc_id, outcome)
-                .await
-                .map_err(|e| e)?;
+        if let Err(error) = target.acp.respond_permission(target.rpc_id, outcome).await {
+            if let Some(restored) = self.restore_permission_after_write_failure(&target) {
+                Self::publish_interaction(&app, &restored);
+            }
+            return Err(error);
+        }
+        let cache_scope = matches!(decision.as_str(), "allow_session" | "allow_for_session")
+            .then_some(scope.as_deref())
+            .flatten();
+        let (resolved, finished, empty_run, was_background) =
+            self.clear_resolved_permission(&target, cache_scope);
+        if let Some(resolved) = resolved.as_ref() {
+            Self::publish_interaction(&app, resolved);
+        }
+        if finished && was_background {
+            self.promote_background_ready_to_parked(&target.session_id);
         }
         let snap = self.snapshot();
         Self::emit_state(&app, &snap);
@@ -4539,25 +4988,153 @@ impl SessionManager {
         decision: String,
         feedback: Option<String>,
         rpc_id: Option<u64>,
+        session_id: Option<String>,
+        interaction_id: Option<String>,
     ) -> Result<SessionSnapshot, String> {
-        let (acp, id) = {
-            let mut guard = self.inner.lock();
-            let s = guard.as_mut().ok_or("no session")?;
-            Self::touch_activity_locked(s);
-            let id = rpc_id.or(s.pending_plan_rpc_id.take());
-            (s.acp.clone(), id)
-        };
-        let id = id.ok_or_else(|| "no pending plan approval".to_string())?;
-        let acp = acp.ok_or_else(|| "ACP client missing".to_string())?;
-        acp.respond_exit_plan_mode(id, &decision, feedback).await?;
-        let empty_run = {
-            let mut guard = self.inner.lock();
-            if let Some(s) = guard.as_mut() {
-                Self::try_finish_deferred_prompt_complete(s).flatten()
+        fn prepare(
+            session: &mut LiveSession,
+            rpc_id: Option<u64>,
+            interaction_id: Option<&str>,
+        ) -> Result<(PlanResolveTarget, InteractionSnapshotV1), String> {
+            let acp = session
+                .acp
+                .clone()
+                .ok_or_else(|| "ACP client missing".to_string())?;
+            let pending = session
+                .pending_plan
+                .as_mut()
+                .ok_or_else(|| "no pending plan approval".to_string())?;
+            pending.interaction.claim(interaction_id, rpc_id)?;
+            let snapshot = pending.interaction.clone();
+            SessionManager::touch_activity_locked(session);
+            Ok((
+                PlanResolveTarget {
+                    session_id: session.app_session_id.clone(),
+                    process_id: session.process_id.clone(),
+                    interaction_id: snapshot.interaction_id.clone(),
+                    rpc_id: snapshot.rpc_id,
+                    acp,
+                },
+                snapshot,
+            ))
+        }
+
+        let requested = session_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let prepared = {
+            let mut live = self.inner.lock();
+            if let Some(session) = live.as_mut() {
+                if requested.is_none_or(|id| id == session.app_session_id) {
+                    Some(prepare(session, rpc_id, interaction_id.as_deref()))
+                } else {
+                    None
+                }
             } else {
                 None
             }
         };
+        let (target, resolving) = if let Some(prepared) = prepared {
+            prepared?
+        } else {
+            let requested = requested.ok_or_else(|| "no pending plan approval".to_string())?;
+            let mut background = self.background.lock();
+            let session = background
+                .get_mut(requested)
+                .ok_or_else(|| format!("session not active: {requested}"))?;
+            prepare(session, rpc_id, interaction_id.as_deref())?
+        };
+        Self::publish_interaction(&app, &resolving);
+
+        if let Err(error) = target
+            .acp
+            .respond_exit_plan_mode(target.rpc_id, &decision, feedback)
+            .await
+        {
+            let restored = {
+                let mut live = self.inner.lock();
+                live.as_mut().and_then(|session| {
+                    if session.app_session_id != target.session_id
+                        || session.process_id != target.process_id
+                    {
+                        return None;
+                    }
+                    let pending = session.pending_plan.as_mut()?;
+                    if pending.interaction.interaction_id != target.interaction_id
+                        || !pending.interaction.restore_pending()
+                    {
+                        return None;
+                    }
+                    Some(pending.interaction.clone())
+                })
+            }
+            .or_else(|| {
+                let mut background = self.background.lock();
+                let session = background.get_mut(&target.session_id)?;
+                if session.process_id != target.process_id {
+                    return None;
+                }
+                let pending = session.pending_plan.as_mut()?;
+                if pending.interaction.interaction_id != target.interaction_id
+                    || !pending.interaction.restore_pending()
+                {
+                    return None;
+                }
+                Some(pending.interaction.clone())
+            });
+            if let Some(restored) = restored.as_ref() {
+                Self::publish_interaction(&app, restored);
+            }
+            return Err(error);
+        }
+
+        let (resolved, finished, empty_run, was_background) = {
+            let mut live = self.inner.lock();
+            let live_result = live.as_mut().and_then(|session| {
+                if session.app_session_id != target.session_id
+                    || session.process_id != target.process_id
+                {
+                    return None;
+                }
+                let pending = session.pending_plan.as_mut()?;
+                if pending.interaction.interaction_id != target.interaction_id
+                    || !pending.interaction.resolve()
+                {
+                    return None;
+                }
+                let snapshot = pending.interaction.clone();
+                session.pending_plan = None;
+                let finish = SessionManager::try_finish_deferred_prompt_complete(session);
+                Some((snapshot, finish.is_some(), finish.flatten(), false))
+            });
+            drop(live);
+            if let Some(result) = live_result {
+                result
+            } else {
+                let mut background = self.background.lock();
+                let result = background.get_mut(&target.session_id).and_then(|session| {
+                    if session.process_id != target.process_id {
+                        return None;
+                    }
+                    let pending = session.pending_plan.as_mut()?;
+                    if pending.interaction.interaction_id != target.interaction_id
+                        || !pending.interaction.resolve()
+                    {
+                        return None;
+                    }
+                    let snapshot = pending.interaction.clone();
+                    session.pending_plan = None;
+                    let finish = SessionManager::try_finish_deferred_prompt_complete(session);
+                    Some((snapshot, finish.is_some(), finish.flatten(), true))
+                });
+                result.ok_or_else(|| "stale plan resolution".to_string())?
+            }
+        };
+        Self::publish_interaction(&app, &resolved);
+        if finished && was_background {
+            self.promote_background_ready_to_parked(&target.session_id);
+        }
         let snap = self.snapshot();
         Self::emit_state(&app, &snap);
         Self::emit_empty_run_if_any(&app, empty_run);
@@ -4629,15 +5206,158 @@ impl SessionManager {
         pending
     }
 
+    fn active_interaction_snapshots(&self) -> Vec<InteractionSnapshotV1> {
+        fn collect(session: &LiveSession, out: &mut Vec<InteractionSnapshotV1>) {
+            if let Some(pending) = session.pending_permission.as_ref() {
+                out.push(pending.interaction.clone());
+            }
+            if let Some(pending) = session.pending_plan.as_ref() {
+                out.push(pending.interaction.clone());
+            }
+            if let Some(pending) = session.pending_ask_user.as_ref() {
+                out.push(pending.interaction.clone());
+            }
+        }
+
+        let mut snapshots = Vec::new();
+        {
+            let live = self.inner.lock();
+            if let Some(session) = live.as_ref() {
+                collect(session, &mut snapshots);
+            }
+        }
+        {
+            let background = self.background.lock();
+            for session in background.values() {
+                collect(session, &mut snapshots);
+            }
+        }
+        snapshots.sort_by(|left, right| {
+            left.session_id
+                .cmp(&right.session_id)
+                .then(left.created_at.cmp(&right.created_at))
+        });
+        snapshots
+    }
+
+    /// Versioned interaction query. Without a session id it returns only live
+    /// pending/resolving interactions; with a session id it also returns the
+    /// bounded on-disk audit trail and marks orphaned process-bound rows interrupted.
+    pub fn interactions_list(&self, session_id: Option<&str>) -> Vec<InteractionSnapshotV1> {
+        let active = self.active_interaction_snapshots();
+        let requested = session_id.map(str::trim).filter(|value| !value.is_empty());
+        let Some(requested) = requested else {
+            return active;
+        };
+
+        let active: Vec<_> = active
+            .into_iter()
+            .filter(|snapshot| snapshot.session_id == requested)
+            .collect();
+        let active_ids: HashSet<_> = active
+            .iter()
+            .map(|snapshot| snapshot.interaction_id.as_str())
+            .collect();
+        let mut rows = crate::interactions::load(requested);
+        let mut interrupted = Vec::new();
+        for row in rows.iter_mut() {
+            if matches!(
+                row.status,
+                InteractionStatusV1::Pending | InteractionStatusV1::Resolving
+            ) && !active_ids.contains(row.interaction_id.as_str())
+            {
+                row.set_status(InteractionStatusV1::Interrupted);
+                interrupted.push(row.clone());
+            }
+        }
+        for row in interrupted {
+            if let Err(error) = crate::interactions::record(&row) {
+                tracing::warn!("persist interrupted interaction: {error}");
+            }
+        }
+        for snapshot in active {
+            if let Some(row) = rows
+                .iter_mut()
+                .find(|row| row.interaction_id == snapshot.interaction_id)
+            {
+                *row = snapshot;
+            } else {
+                rows.push(snapshot);
+            }
+        }
+        rows.sort_by(|left, right| left.created_at.cmp(&right.created_at));
+        rows
+    }
+
+    fn active_interaction(
+        &self,
+        session_id: &str,
+        interaction_id: &str,
+    ) -> Option<InteractionSnapshotV1> {
+        self.active_interaction_snapshots()
+            .into_iter()
+            .find(|snapshot| {
+                snapshot.session_id == session_id && snapshot.interaction_id == interaction_id
+            })
+    }
+
+    pub async fn resolve_interaction_v1(
+        self: &Arc<Self>,
+        app: AppHandle,
+        request: crate::interactions::ResolveInteractionRequestV1,
+    ) -> Result<SessionSnapshot, String> {
+        let snapshot = self
+            .active_interaction(&request.session_id, &request.interaction_id)
+            .ok_or_else(|| "interaction is not active".to_string())?;
+        match snapshot.payload {
+            InteractionPayloadV1::Permission { .. } => {
+                self.resolve_permission(
+                    app,
+                    snapshot.rpc_id,
+                    request.decision,
+                    request.option_id,
+                    request.scope_key,
+                    Some(request.session_id),
+                    Some(request.interaction_id),
+                )
+                .await
+            }
+            InteractionPayloadV1::Plan { .. } => {
+                self.resolve_plan(
+                    app,
+                    request.decision,
+                    request.feedback,
+                    Some(snapshot.rpc_id),
+                    Some(request.session_id),
+                    Some(request.interaction_id),
+                )
+                .await
+            }
+            InteractionPayloadV1::AskUser { .. } => {
+                self.resolve_ask_user(
+                    app,
+                    request.decision,
+                    request.answers,
+                    Some(snapshot.rpc_id),
+                    Some(request.session_id),
+                    Some(request.interaction_id),
+                )
+                .await
+            }
+        }
+    }
+
     fn prepare_ask_user_resolution(
         &self,
         session_id: Option<&str>,
         rpc_id: Option<u64>,
+        interaction_id: Option<&str>,
         partial_answers: Option<&serde_json::Value>,
     ) -> Result<AskUserResolveTarget, String> {
         fn prepare(
             session: &mut LiveSession,
             rpc_id: Option<u64>,
+            interaction_id: Option<&str>,
             partial_answers: Option<&serde_json::Value>,
         ) -> Result<AskUserResolveTarget, String> {
             let acp = session
@@ -4648,10 +5368,18 @@ impl SessionManager {
                 .pending_ask_user
                 .as_mut()
                 .ok_or_else(|| "no pending ask_user_question".to_string())?;
-            let pending_rpc_id = claim_pending_ask(pending, rpc_id)?;
+            let pending_rpc_id = claim_pending_ask(pending, interaction_id, rpc_id)?;
             pending.partial_answers = partial_answers.cloned();
+            if let InteractionPayloadV1::AskUser {
+                partial_answers: stored,
+                ..
+            } = &mut pending.interaction.payload
+            {
+                *stored = partial_answers.cloned();
+            }
             let activity_id = pending.activity_id.clone();
             let question_count = pending.questions.len();
+            let snapshot = pending.interaction.clone();
             SessionManager::touch_activity_locked(session);
             Ok(AskUserResolveTarget {
                 session_id: session.app_session_id.clone(),
@@ -4660,6 +5388,7 @@ impl SessionManager {
                 activity_id,
                 question_count,
                 acp,
+                snapshot,
             })
         }
 
@@ -4668,7 +5397,7 @@ impl SessionManager {
             let mut live = self.inner.lock();
             if let Some(session) = live.as_mut() {
                 if requested.is_none_or(|id| id == session.app_session_id) {
-                    return prepare(session, rpc_id, partial_answers);
+                    return prepare(session, rpc_id, interaction_id, partial_answers);
                 }
             } else if requested.is_none() {
                 return Err("no session".into());
@@ -4680,74 +5409,82 @@ impl SessionManager {
         let session = background
             .get_mut(requested)
             .ok_or_else(|| format!("session not active: {requested}"))?;
-        prepare(session, rpc_id, partial_answers)
+        prepare(session, rpc_id, interaction_id, partial_answers)
     }
 
-    fn restore_ask_user_after_write_failure(&self, target: &AskUserResolveTarget) {
+    fn restore_ask_user_after_write_failure(
+        &self,
+        target: &AskUserResolveTarget,
+    ) -> Option<InteractionSnapshotV1> {
         {
             let mut live = self.inner.lock();
             if let Some(session) = live.as_mut() {
                 if session.app_session_id == target.session_id
                     && session.process_id == target.process_id
                 {
-                    restore_pending_ask_after_failure(
-                        session,
-                        &target.process_id,
-                        target.rpc_id,
-                    );
-                    return;
+                    if restore_pending_ask_after_failure(session, &target.process_id, target.rpc_id)
+                    {
+                        return session
+                            .pending_ask_user
+                            .as_ref()
+                            .map(|pending| pending.interaction.clone());
+                    }
+                    return None;
                 }
             }
         }
         let mut background = self.background.lock();
         if let Some(session) = background.get_mut(&target.session_id) {
-            restore_pending_ask_after_failure(
-                session,
-                &target.process_id,
-                target.rpc_id,
-            );
+            if restore_pending_ask_after_failure(session, &target.process_id, target.rpc_id) {
+                return session
+                    .pending_ask_user
+                    .as_ref()
+                    .map(|pending| pending.interaction.clone());
+            }
         }
+        None
     }
 
     /// Compare-and-clear a successfully written reverse-request, even if its
     /// session moved between focused and background while the write awaited.
-    /// Returns `(cleared, finished_deferred_turn, empty_run, was_background)`.
+    /// Returns `(resolved_snapshot, finished_deferred_turn, empty_run, was_background)`.
     fn clear_resolved_ask_user(
         &self,
         target: &AskUserResolveTarget,
-    ) -> (bool, bool, Option<(String, String, String)>, bool) {
+    ) -> (
+        Option<InteractionSnapshotV1>,
+        bool,
+        Option<(String, String, String)>,
+        bool,
+    ) {
         {
             let mut live = self.inner.lock();
             if let Some(session) = live.as_mut() {
                 if session.app_session_id == target.session_id
                     && session.process_id == target.process_id
                 {
-                    if clear_pending_ask_after_success(
-                        session,
-                        &target.process_id,
-                        target.rpc_id,
-                    ) {
+                    if clear_pending_ask_after_success(session, &target.process_id, target.rpc_id) {
+                        let mut snapshot = target.snapshot.clone();
+                        snapshot.set_status(InteractionStatusV1::Resolved);
                         let finish = Self::try_finish_deferred_prompt_complete(session);
-                        return (true, finish.is_some(), finish.flatten(), false);
+                        return (Some(snapshot), finish.is_some(), finish.flatten(), false);
                     }
-                    return (false, false, None, false);
+                    return (None, false, None, false);
                 }
             }
         }
         let mut background = self.background.lock();
         if let Some(session) = background.get_mut(&target.session_id) {
             if session.process_id == target.process_id {
-                if clear_pending_ask_after_success(
-                    session,
-                    &target.process_id,
-                    target.rpc_id,
-                ) {
+                if clear_pending_ask_after_success(session, &target.process_id, target.rpc_id) {
+                    let mut snapshot = target.snapshot.clone();
+                    snapshot.set_status(InteractionStatusV1::Resolved);
                     let finish = Self::try_finish_deferred_prompt_complete(session);
-                    return (true, finish.is_some(), finish.flatten(), true);
+                    return (Some(snapshot), finish.is_some(), finish.flatten(), true);
                 }
             }
         }
-        (false, false, None, false)
+        (None, false, None, false)
     }
 
     /// Resolve pending `_x.ai/ask_user_question` (answers or cancel).
@@ -4762,25 +5499,19 @@ impl SessionManager {
         answers: Option<serde_json::Value>,
         rpc_id: Option<u64>,
         session_id: Option<String>,
+        interaction_id: Option<String>,
     ) -> Result<SessionSnapshot, String> {
-        let accepted = matches!(
-            decision.as_str(),
-            "accepted" | "answered" | "accept"
-        );
-        let accepted_answers =
-            answers.unwrap_or_else(|| serde_json::json!({}));
+        let accepted = matches!(decision.as_str(), "accepted" | "answered" | "accept");
+        let accepted_answers = answers.unwrap_or_else(|| serde_json::json!({}));
         let target = self.prepare_ask_user_resolution(
             session_id.as_deref(),
             rpc_id,
+            interaction_id.as_deref(),
             accepted.then_some(&accepted_answers),
         )?;
-        let answered_count = accepted
-            .then(|| {
-                answered_question_count(
-                    &accepted_answers,
-                    target.question_count,
-                )
-            });
+        Self::publish_interaction(&app, &target.snapshot);
+        let answered_count =
+            accepted.then(|| answered_question_count(&accepted_answers, target.question_count));
         let outcome = if accepted {
             AskUserOutcome::Accepted {
                 answers: accepted_answers,
@@ -4793,12 +5524,14 @@ impl SessionManager {
             .respond_ask_user_question(target.rpc_id, outcome)
             .await
         {
-            self.restore_ask_user_after_write_failure(&target);
+            if let Some(restored) = self.restore_ask_user_after_write_failure(&target) {
+                Self::publish_interaction(&app, &restored);
+            }
             return Err(error);
         }
-        let (cleared, finished, empty_run, was_background) =
-            self.clear_resolved_ask_user(&target);
-        if cleared {
+        let (resolved, finished, empty_run, was_background) = self.clear_resolved_ask_user(&target);
+        if let Some(resolved) = resolved.as_ref() {
+            Self::publish_interaction(&app, resolved);
             record_ask_user_activity(
                 &app,
                 &target.session_id,
@@ -4818,7 +5551,7 @@ impl SessionManager {
     }
 
     async fn disconnect_inner(&self, app: &AppHandle) {
-        let (acp, ask_activity) = {
+        let (acp, ask_activity, interrupted) = {
             let mut guard = self.inner.lock();
             if let Some(mut s) = guard.take() {
                 if let Some(h) = s.mock_stream.take() {
@@ -4826,12 +5559,16 @@ impl SessionManager {
                 }
                 // I04: flush any in-flight stream before dropping the process.
                 Self::maybe_flush_stream_journal(&mut s, true, false);
+                let interrupted = interrupt_pending_interactions(&mut s);
                 let ask_activity = take_pending_ask_activity(&mut s);
-                (s.acp.take(), ask_activity)
+                (s.acp.take(), ask_activity, interrupted)
             } else {
-                (None, None)
+                (None, None, Vec::new())
             }
         };
+        for snapshot in interrupted {
+            Self::publish_interaction(app, &snapshot);
+        }
         if let Some(activity) = ask_activity {
             record_ask_user_activity(
                 app,
@@ -4929,7 +5666,8 @@ mod tests {
             provider_retry_attempt: 0,
             provider_retry_aborted: false,
             needs_history_bootstrap: false,
-            pending_plan_rpc_id: None,
+            pending_plan: None,
+            pending_permission: None,
             pending_ask_user: None,
             last_activity: now,
             last_stream_progress: now,
@@ -4943,16 +5681,27 @@ mod tests {
     }
 
     fn pending_ask(session_id: &str, rpc_id: u64) -> PendingAskUser {
+        let questions = vec![AskUserQuestionItem {
+            id: "q-1".into(),
+            question: "Choose?".into(),
+            options: Vec::new(),
+            multi_select: false,
+        }];
         PendingAskUser {
+            interaction: InteractionSnapshotV1::new(
+                session_id,
+                &format!("process-{session_id}"),
+                rpc_id,
+                Some(format!("tool-{session_id}")),
+                InteractionPayloadV1::AskUser {
+                    questions: questions.clone(),
+                    partial_answers: None,
+                },
+            ),
             rpc_id,
             tool_call_id: Some(format!("tool-{session_id}")),
             activity_id: format!("tool-{session_id}"),
-            questions: vec![AskUserQuestionItem {
-                id: "q-1".into(),
-                question: "Choose?".into(),
-                options: Vec::new(),
-                multi_select: false,
-            }],
+            questions,
             partial_answers: None,
             raw: json!({
                 "sessionId": format!("runtime-{session_id}"),
@@ -5314,11 +6063,7 @@ mod tests {
         );
         let waiting_content = messages[0].content.clone();
 
-        claim_pending_ask(
-            session.pending_ask_user.as_mut().unwrap(),
-            Some(23),
-        )
-        .unwrap();
+        claim_pending_ask(session.pending_ask_user.as_mut().unwrap(), None, Some(23)).unwrap();
         assert!(restore_pending_ask_after_failure(
             &mut session,
             "process-ask-retry",
@@ -5335,24 +6080,35 @@ mod tests {
     #[test]
     fn pending_ask_terminal_metadata_is_stable_and_clears_dead_request() {
         let mut session = test_live_session("dead-ask");
+        let questions = vec![
+            AskUserQuestionItem {
+                id: "q-1".into(),
+                question: "One?".into(),
+                options: Vec::new(),
+                multi_select: false,
+            },
+            AskUserQuestionItem {
+                id: "q-2".into(),
+                question: "Two?".into(),
+                options: Vec::new(),
+                multi_select: false,
+            },
+        ];
         session.pending_ask_user = Some(PendingAskUser {
+            interaction: InteractionSnapshotV1::new(
+                "dead-ask",
+                "process-dead-ask",
+                71,
+                None,
+                InteractionPayloadV1::AskUser {
+                    questions: questions.clone(),
+                    partial_answers: None,
+                },
+            ),
             rpc_id: 71,
             tool_call_id: None,
             activity_id: ask_user_activity_id(None, 71),
-            questions: vec![
-                AskUserQuestionItem {
-                    id: "q-1".into(),
-                    question: "One?".into(),
-                    options: Vec::new(),
-                    multi_select: false,
-                },
-                AskUserQuestionItem {
-                    id: "q-2".into(),
-                    question: "Two?".into(),
-                    options: Vec::new(),
-                    multi_select: false,
-                },
-            ],
+            questions,
             partial_answers: None,
             raw: json!({}),
             resolving: false,
@@ -5414,13 +6170,13 @@ mod tests {
     #[test]
     fn pending_ask_claim_rejects_stale_and_duplicate_resolves() {
         let mut pending = pending_ask("a", 7);
-        let stale = claim_pending_ask(&mut pending, Some(8)).unwrap_err();
-        assert!(stale.contains("expected rpc 7"));
+        let stale = claim_pending_ask(&mut pending, None, Some(8)).unwrap_err();
+        assert!(stale.contains("expected 7"));
         assert!(!pending.resolving);
 
-        assert_eq!(claim_pending_ask(&mut pending, Some(7)).unwrap(), 7);
+        assert_eq!(claim_pending_ask(&mut pending, None, Some(7)).unwrap(), 7);
         assert!(pending.resolving);
-        assert!(claim_pending_ask(&mut pending, Some(7))
+        assert!(claim_pending_ask(&mut pending, None, Some(7))
             .unwrap_err()
             .contains("already resolving"));
     }
@@ -5431,7 +6187,7 @@ mod tests {
         session.pending_ask_user = Some(pending_ask("a", 7));
         {
             let pending = session.pending_ask_user.as_mut().unwrap();
-            claim_pending_ask(pending, Some(7)).unwrap();
+            claim_pending_ask(pending, None, Some(7)).unwrap();
             pending.partial_answers = Some(json!({ "Choose?": "Keep me" }));
         }
 
@@ -5453,7 +6209,7 @@ mod tests {
             Some(json!({ "Choose?": "Keep me" }))
         );
 
-        claim_pending_ask(session.pending_ask_user.as_mut().unwrap(), Some(7)).unwrap();
+        claim_pending_ask(session.pending_ask_user.as_mut().unwrap(), None, Some(7)).unwrap();
         // A replacement arriving during the write is not the request we claimed.
         session.pending_ask_user = Some(pending_ask("a", 7));
         assert!(!clear_pending_ask_after_success(
@@ -5463,7 +6219,7 @@ mod tests {
         ));
         assert!(session.pending_ask_user.is_some());
 
-        claim_pending_ask(session.pending_ask_user.as_mut().unwrap(), Some(7)).unwrap();
+        claim_pending_ask(session.pending_ask_user.as_mut().unwrap(), None, Some(7)).unwrap();
         assert!(clear_pending_ask_after_success(
             &mut session,
             "process-a",

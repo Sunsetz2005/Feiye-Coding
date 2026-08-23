@@ -69,35 +69,21 @@ pub fn capabilities() -> HostCapabilities {
         if finder_selection {
             HostCapability::available("1")
         } else {
-            HostCapability::unsupported_platform(
-                "Finder selection is available only on macOS",
-            )
+            HostCapability::unsupported_platform("Finder selection is available only on macOS")
         },
     );
     capability_map.insert(
         "speechRecognition".to_string(),
         HostCapability::unavailable("No native speech adapter is registered"),
     );
-    capability_map.insert(
-        "skillDraftSave".to_string(),
-        HostCapability::available("1"),
-    );
-    capability_map.insert(
-        "sessionPreview".to_string(),
-        HostCapability::unavailable("No bounded session preview command is registered"),
-    );
-    capability_map.insert(
-        "projectPreview".to_string(),
-        HostCapability::unavailable("No bounded project preview command is registered"),
-    );
+    capability_map.insert("skillDraftSave".to_string(), HostCapability::available("1"));
+    capability_map.insert("sessionPreview".to_string(), HostCapability::available("1"));
+    capability_map.insert("projectPreview".to_string(), HostCapability::available("1"));
     capability_map.insert(
         "projectGitSummary".to_string(),
-        HostCapability::unavailable("No bounded project Git summary command is registered"),
+        HostCapability::available("1"),
     );
-    capability_map.insert(
-        "resourceReview".to_string(),
-        HostCapability::unavailable("No resource review adapter is registered"),
-    );
+    capability_map.insert("resourceReview".to_string(), HostCapability::available("1"));
     capability_map.insert(
         "nativeSpeech".to_string(),
         HostCapability::unavailable("No native speech adapter is registered"),
@@ -112,7 +98,7 @@ pub fn capabilities() -> HostCapabilities {
     );
     capability_map.insert(
         "backgroundScheduler".to_string(),
-        HostCapability::unavailable("No persistent background scheduler is registered"),
+        HostCapability::available("1"),
     );
     HostCapabilities {
         version: 2,
@@ -239,24 +225,33 @@ mod tests {
         );
         assert_eq!(
             value["capabilities"]["backgroundScheduler"]["state"],
-            "unavailable"
+            "available"
         );
-        assert!(value["capabilities"]["backgroundScheduler"]["reason"].is_string());
+        assert!(value["capabilities"]["backgroundScheduler"]["reason"].is_null());
     }
 
     #[test]
-    fn future_capabilities_stay_declared_but_unavailable() {
+    fn implemented_preview_capabilities_are_available() {
         let caps = capabilities();
         for id in [
             "sessionPreview",
             "projectPreview",
             "projectGitSummary",
             "resourceReview",
-            "nativeSpeech",
-            "smartCapture",
-            "computerControl",
             "backgroundScheduler",
         ] {
+            assert_eq!(
+                caps.capabilities[id].state,
+                CapabilityState::Available,
+                "{id}"
+            );
+        }
+    }
+
+    #[test]
+    fn future_capabilities_stay_declared_but_unavailable() {
+        let caps = capabilities();
+        for id in ["nativeSpeech", "smartCapture", "computerControl"] {
             let capability = caps.capabilities.get(id).unwrap();
             assert_eq!(capability.state, CapabilityState::Unavailable, "{id}");
             assert!(capability.reason.is_some(), "{id}");

@@ -178,6 +178,9 @@ pub struct AppSettings {
     /// Pure stream silence before cancel prompt (I06). Default 120 seconds.
     #[serde(default = "default_stream_stall_seconds")]
     pub stream_stall_seconds: u32,
+    /// Runtime subprocess sandbox: off | workspace_write | read_only.
+    #[serde(default = "default_sandbox_profile")]
+    pub sandbox_profile: String,
     /// Store App API keys in the OS keychain (macOS Keychain / Win Cred / Secret Service).
     /// Default **false**: keys stay in `secrets.json` (0600) so cold start does not
     /// trigger system password prompts. Official CLI login still uses `auth.json`.
@@ -205,6 +208,10 @@ fn default_stream_stall_seconds() -> u32 {
     crate::stream_stall::DEFAULT_STREAM_STALL_SECONDS
 }
 
+fn default_sandbox_profile() -> String {
+    "off".into()
+}
+
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
@@ -226,6 +233,7 @@ impl Default for AppSettings {
             max_concurrent_agents: default_max_concurrent_agents(),
             agent_idle_minutes: default_agent_idle_minutes(),
             stream_stall_seconds: default_stream_stall_seconds(),
+            sandbox_profile: default_sandbox_profile(),
             store_api_keys_in_keychain: false,
         }
     }
@@ -562,6 +570,13 @@ pub fn save_sessions_index(list: &[SessionMeta]) -> Result<(), String> {
     write_json(&sessions_index_file(), &list)
 }
 
+fn update_sessions_index<R>(
+    update: impl FnOnce(&mut Vec<SessionMeta>) -> Result<R, String>,
+) -> Result<R, String> {
+    let _ = ensure_app_dirs();
+    crate::store_lock::update_json_locked(&sessions_index_file(), Vec::<SessionMeta>::new, update)
+}
+
 pub fn create_session(
     project_id: Option<String>,
     title: Option<String>,
@@ -584,9 +599,10 @@ pub fn create_session(
         scheduled,
         context_usage: None,
     };
-    let mut list = load_sessions_index();
-    list.insert(0, meta.clone());
-    save_sessions_index(&list)?;
+    update_sessions_index(|list| {
+        list.insert(0, meta.clone());
+        Ok(())
+    })?;
     let dir = session_dir(&id);
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     write_json(&dir.join("messages.json"), &Vec::<ChatMessageStored>::new())?;
@@ -594,21 +610,26 @@ pub fn create_session(
 }
 
 pub fn update_session_meta(meta: &SessionMeta) -> Result<(), String> {
-    let mut list = load_sessions_index();
-    if let Some(s) = list.iter_mut().find(|s| s.id == meta.id) {
-        *s = meta.clone();
-    } else {
-        list.insert(0, meta.clone());
-    }
-    save_sessions_index(&list)
+    update_sessions_index(|list| {
+        if let Some(s) = list.iter_mut().find(|s| s.id == meta.id) {
+            *s = meta.clone();
+        } else {
+            list.insert(0, meta.clone());
+        }
+        Ok(())
+    })
 }
 
 pub fn delete_session(id: &str) -> Result<(), String> {
-    let mut list = load_sessions_index();
-    list.retain(|s| s.id != id);
-    save_sessions_index(&list)?;
+    update_sessions_index(|list| {
+        list.retain(|s| s.id != id);
+        Ok(())
+    })?;
     let dir = session_dir(id);
     let _ = fs::remove_dir_all(dir);
+    if let Err(error) = crate::session_search::remove_session(id) {
+        tracing::warn!("session search remove failed id={id}: {error}");
+    }
     Ok(())
 }
 
@@ -617,42 +638,39 @@ pub fn rename_session(id: &str, title: &str) -> Result<SessionMeta, String> {
     if title.is_empty() {
         return Err("title empty".into());
     }
-    let mut list = load_sessions_index();
-    let s = list
-        .iter_mut()
-        .find(|s| s.id == id)
-        .ok_or_else(|| "session not found".to_string())?;
-    s.title = title.to_string();
-    s.updated_at = Utc::now();
-    let clone = s.clone();
-    save_sessions_index(&list)?;
-    Ok(clone)
+    update_sessions_index(|list| {
+        let s = list
+            .iter_mut()
+            .find(|s| s.id == id)
+            .ok_or_else(|| "session not found".to_string())?;
+        s.title = title.to_string();
+        s.updated_at = Utc::now();
+        Ok(s.clone())
+    })
 }
 
 pub fn set_session_scheduled(id: &str, scheduled: bool) -> Result<SessionMeta, String> {
-    let mut list = load_sessions_index();
-    let s = list
-        .iter_mut()
-        .find(|s| s.id == id)
-        .ok_or_else(|| "session not found".to_string())?;
-    s.scheduled = scheduled;
-    s.updated_at = Utc::now();
-    let clone = s.clone();
-    save_sessions_index(&list)?;
-    Ok(clone)
+    update_sessions_index(|list| {
+        let s = list
+            .iter_mut()
+            .find(|s| s.id == id)
+            .ok_or_else(|| "session not found".to_string())?;
+        s.scheduled = scheduled;
+        s.updated_at = Utc::now();
+        Ok(s.clone())
+    })
 }
 
 pub fn set_session_archived(id: &str, archived: bool) -> Result<SessionMeta, String> {
-    let mut list = load_sessions_index();
-    let s = list
-        .iter_mut()
-        .find(|s| s.id == id)
-        .ok_or_else(|| "session not found".to_string())?;
-    s.archived = archived;
-    s.updated_at = Utc::now();
-    let clone = s.clone();
-    save_sessions_index(&list)?;
-    Ok(clone)
+    update_sessions_index(|list| {
+        let s = list
+            .iter_mut()
+            .find(|s| s.id == id)
+            .ok_or_else(|| "session not found".to_string())?;
+        s.archived = archived;
+        s.updated_at = Utc::now();
+        Ok(s.clone())
+    })
 }
 
 /// Bind (or clear) a session's project folder. Used to attach orphan / legacy
@@ -671,31 +689,30 @@ pub fn set_session_project(
             return Err(format!("project not found: {p}"));
         }
     }
-    let mut list = load_sessions_index();
-    let s = list
-        .iter_mut()
-        .find(|s| s.id == id)
-        .ok_or_else(|| "session not found".to_string())?;
-    s.project_id = pid;
-    s.updated_at = Utc::now();
-    let clone = s.clone();
-    save_sessions_index(&list)?;
-    Ok(clone)
+    update_sessions_index(|list| {
+        let s = list
+            .iter_mut()
+            .find(|s| s.id == id)
+            .ok_or_else(|| "session not found".to_string())?;
+        s.project_id = pid;
+        s.updated_at = Utc::now();
+        Ok(s.clone())
+    })
 }
 
 /// Archive every non-archived session under a project.
 pub fn archive_project_sessions(project_id: &str) -> Result<usize, String> {
-    let mut list = load_sessions_index();
-    let mut n = 0usize;
-    for s in list.iter_mut() {
-        if s.project_id.as_deref() == Some(project_id) && !s.archived {
-            s.archived = true;
-            s.updated_at = Utc::now();
-            n += 1;
+    update_sessions_index(|list| {
+        let mut n = 0usize;
+        for s in list.iter_mut() {
+            if s.project_id.as_deref() == Some(project_id) && !s.archived {
+                s.archived = true;
+                s.updated_at = Utc::now();
+                n += 1;
+            }
         }
-    }
-    save_sessions_index(&list)?;
-    Ok(n)
+        Ok(n)
+    })
 }
 
 pub fn load_messages(session_id: &str) -> Vec<ChatMessageStored> {
@@ -703,19 +720,41 @@ pub fn load_messages(session_id: &str) -> Vec<ChatMessageStored> {
 }
 
 pub fn save_messages(session_id: &str, messages: &[ChatMessageStored]) -> Result<(), String> {
-    write_json(&session_dir(session_id).join("messages.json"), &messages)
+    write_json(&session_dir(session_id).join("messages.json"), &messages)?;
+    if let Err(error) = crate::session_search::reindex_session(session_id) {
+        tracing::warn!("session search update failed id={session_id}: {error}");
+    }
+    Ok(())
+}
+
+pub(crate) fn update_messages<R>(
+    session_id: &str,
+    update: impl FnOnce(&mut Vec<ChatMessageStored>) -> Result<R, String>,
+) -> Result<R, String> {
+    let result = crate::store_lock::update_json_locked(
+        &session_dir(session_id).join("messages.json"),
+        Vec::<ChatMessageStored>::new,
+        update,
+    );
+    if result.is_ok() {
+        if let Err(error) = crate::session_search::reindex_session(session_id) {
+            tracing::warn!("session search update failed id={session_id}: {error}");
+        }
+    }
+    result
 }
 
 pub fn append_message(session_id: &str, msg: ChatMessageStored) -> Result<(), String> {
-    let mut msgs = load_messages(session_id);
-    // Upsert by id — never double-insert the same host message (stream complete +
-    // reconnect edge cases). Keeps journal length honest for multi-turn chats.
-    if let Some(slot) = msgs.iter_mut().find(|m| m.id == msg.id) {
-        *slot = msg;
-    } else {
-        msgs.push(msg);
-    }
-    save_messages(session_id, &msgs)
+    update_messages(session_id, |msgs| {
+        // Upsert by id — never double-insert the same host message (stream complete +
+        // reconnect edge cases). Keeps journal length honest for multi-turn chats.
+        if let Some(slot) = msgs.iter_mut().find(|m| m.id == msg.id) {
+            *slot = msg;
+        } else {
+            msgs.push(msg);
+        }
+        Ok(())
+    })
 }
 
 /// End index (exclusive) of the full turn for `user_prompt_index` (0-based).
@@ -881,6 +920,34 @@ pub fn save_automations(list: &[Automation]) -> Result<(), String> {
     write_json(&automations_file(), &list)
 }
 
+pub(crate) fn update_automations<R>(
+    update: impl FnOnce(&mut Vec<Automation>) -> Result<R, String>,
+) -> Result<R, String> {
+    let _ = ensure_app_dirs();
+    crate::store_lock::update_json_locked(&automations_file(), Vec::<Automation>::new, update)
+}
+
+pub(crate) fn scheduler_advance_automation(
+    id: &str,
+    attempted_at: DateTime<Utc>,
+    next_run_at: Option<DateTime<Utc>>,
+    disable: bool,
+) -> Result<Automation, String> {
+    update_automations(|list| {
+        let automation = list
+            .iter_mut()
+            .find(|automation| automation.id == id)
+            .ok_or_else(|| "automation not found".to_string())?;
+        automation.last_run_at = Some(attempted_at);
+        automation.next_run_at = next_run_at;
+        if disable {
+            automation.enabled = false;
+        }
+        automation.updated_at = Utc::now();
+        Ok(automation.clone())
+    })
+}
+
 pub fn create_automation(input: AutomationInput) -> Result<Automation, String> {
     let title = input.title.trim().to_string();
     if title.is_empty() {
@@ -916,18 +983,13 @@ pub fn create_automation(input: AutomationInput) -> Result<Automation, String> {
         last_run_at: None,
         next_run_at: input.next_run_at,
     };
-    let mut list = load_automations();
-    list.insert(0, auto.clone());
-    save_automations(&list)?;
-    Ok(auto)
+    update_automations(|list| {
+        list.insert(0, auto.clone());
+        Ok(auto)
+    })
 }
 
 pub fn update_automation(id: &str, input: AutomationInput) -> Result<Automation, String> {
-    let mut list = load_automations();
-    let auto = list
-        .iter_mut()
-        .find(|a| a.id == id)
-        .ok_or_else(|| "automation not found".to_string())?;
     let title = input.title.trim();
     if title.is_empty() {
         return Err("title empty".into());
@@ -936,46 +998,51 @@ pub fn update_automation(id: &str, input: AutomationInput) -> Result<Automation,
     if prompt.is_empty() {
         return Err("prompt empty".into());
     }
-    auto.title = title.to_string();
-    auto.prompt = prompt.to_string();
-    if let Some(e) = input.enabled {
-        auto.enabled = e;
-    }
-    auto.project_id = input.project_id;
-    auto.model_id = input.model_id;
-    auto.effort = input.effort;
-    if let Some(f) = input.frequency {
-        auto.frequency = f.trim().to_string();
-    }
-    if let Some(t) = input.time {
-        auto.time = t.trim().to_string();
-    }
-    if let Some(w) = input.weekdays {
-        auto.weekdays = w;
-    }
-    if let Some(n) = input.notify {
-        auto.notify = n.trim().to_string();
-    }
-    if input.next_run_at.is_some() {
-        auto.next_run_at = input.next_run_at;
-    }
-    auto.updated_at = Utc::now();
-    let clone = auto.clone();
-    save_automations(&list)?;
-    Ok(clone)
+    let title = title.to_string();
+    let prompt = prompt.to_string();
+    update_automations(|list| {
+        let auto = list
+            .iter_mut()
+            .find(|a| a.id == id)
+            .ok_or_else(|| "automation not found".to_string())?;
+        auto.title = title;
+        auto.prompt = prompt;
+        if let Some(e) = input.enabled {
+            auto.enabled = e;
+        }
+        auto.project_id = input.project_id;
+        auto.model_id = input.model_id;
+        auto.effort = input.effort;
+        if let Some(f) = input.frequency {
+            auto.frequency = f.trim().to_string();
+        }
+        if let Some(t) = input.time {
+            auto.time = t.trim().to_string();
+        }
+        if let Some(w) = input.weekdays {
+            auto.weekdays = w;
+        }
+        if let Some(n) = input.notify {
+            auto.notify = n.trim().to_string();
+        }
+        if input.next_run_at.is_some() {
+            auto.next_run_at = input.next_run_at;
+        }
+        auto.updated_at = Utc::now();
+        Ok(auto.clone())
+    })
 }
 
 pub fn set_automation_enabled(id: &str, enabled: bool) -> Result<Automation, String> {
-    let mut list = load_automations();
-    let auto = list
-        .iter_mut()
-        .find(|a| a.id == id)
-        .ok_or_else(|| "automation not found".to_string())?;
-    auto.enabled = enabled;
-    auto.updated_at = Utc::now();
-    let clone = auto.clone();
-    save_automations(&list)?;
-    Ok(clone)
+    update_automations(|list| {
+        let auto = list
+            .iter_mut()
+            .find(|a| a.id == id)
+            .ok_or_else(|| "automation not found".to_string())?;
+        auto.enabled = enabled;
+        auto.updated_at = Utc::now();
+        Ok(auto.clone())
+    })
 }
 
 pub fn mark_automation_run(
@@ -983,27 +1050,27 @@ pub fn mark_automation_run(
     last_run_at: DateTime<Utc>,
     next_run_at: Option<DateTime<Utc>>,
 ) -> Result<Automation, String> {
-    let mut list = load_automations();
-    let auto = list
-        .iter_mut()
-        .find(|a| a.id == id)
-        .ok_or_else(|| "automation not found".to_string())?;
-    auto.last_run_at = Some(last_run_at);
-    auto.next_run_at = next_run_at;
-    auto.updated_at = Utc::now();
-    let clone = auto.clone();
-    save_automations(&list)?;
-    Ok(clone)
+    update_automations(|list| {
+        let auto = list
+            .iter_mut()
+            .find(|a| a.id == id)
+            .ok_or_else(|| "automation not found".to_string())?;
+        auto.last_run_at = Some(last_run_at);
+        auto.next_run_at = next_run_at;
+        auto.updated_at = Utc::now();
+        Ok(auto.clone())
+    })
 }
 
 pub fn delete_automation(id: &str) -> Result<(), String> {
-    let mut list = load_automations();
-    let before = list.len();
-    list.retain(|a| a.id != id);
-    if list.len() == before {
-        return Err("automation not found".into());
-    }
-    save_automations(&list)
+    update_automations(|list| {
+        let before = list.len();
+        list.retain(|a| a.id != id);
+        if list.len() == before {
+            return Err("automation not found".into());
+        }
+        Ok(())
+    })
 }
 
 /// Load app secrets (API keys). Backend-agnostic: OS keychain preferred, file fallback.
@@ -1250,23 +1317,26 @@ pub fn save_composer_prefs(
         ComposerPrefsScope::Session => {
             let sid = session_id.filter(|s| !s.is_empty());
             if let Some(sid) = sid {
-                let mut list = load_sessions_index();
-                if let Some(sess) = list.iter_mut().find(|s| s.id == sid) {
-                    if let Some(v) = model_id {
+                let updated = update_sessions_index(|list| {
+                    let Some(sess) = list.iter_mut().find(|s| s.id == sid) else {
+                        return Ok(false);
+                    };
+                    if let Some(v) = model_id.clone() {
                         sess.model_id = Some(v);
                     }
-                    if let Some(v) = effort {
+                    if let Some(v) = effort.clone() {
                         sess.effort = Some(v);
                     }
-                    if let Some(v) = mode {
+                    if let Some(v) = mode.clone() {
                         sess.mode = Some(v);
                     }
-                    if let Some(v) = permission_policy {
+                    if let Some(v) = permission_policy.clone() {
                         sess.permission_policy = Some(v);
                     }
                     sess.updated_at = Utc::now();
-                    save_sessions_index(&list)?;
-                } else {
+                    Ok(true)
+                })?;
+                if !updated {
                     // No session row yet — fall back to global so the chip still sticks.
                     let mut s = load_settings();
                     if let Some(v) = model_id {
