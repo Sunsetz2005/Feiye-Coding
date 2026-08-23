@@ -28,6 +28,35 @@ const apiListenerCapture = vi.hoisted(() => ({
   handlers: new Map<string, EventHandler>(),
   tauri: false,
   resolvePlan: vi.fn(async () => undefined),
+  sessionState: {
+    sessionId: null as string | null,
+    agentSessionId: null,
+    state: "idle",
+    lastError: null,
+    streamingMessageId: null,
+    backend: "grok_agent_stdio",
+    title: "",
+  },
+  sessions: [] as Array<Record<string, unknown>>,
+  interactionRows: [] as Array<Record<string, unknown>>,
+  candidateResponses: [] as Array<Array<Record<string, unknown>>>,
+  searchHits: [] as Array<Record<string, unknown>>,
+  sessionCreate: vi.fn(async () => ({ id: "scheduled-session", title: "Scheduled" })),
+  sessionDisconnect: vi.fn(async () => undefined),
+  sessionConnect: vi.fn(async (args: { sessionId?: string }) => ({
+    sessionId: args.sessionId ?? "scheduled-session",
+    agentSessionId: "agent",
+    state: "ready",
+    lastError: null,
+    streamingMessageId: null,
+    backend: "grok_agent_stdio",
+    title: "Scheduled",
+  })),
+  sessionSend: vi.fn(async () => undefined),
+  automationBind: vi.fn(async () => undefined),
+  automationComplete: vi.fn(async () => undefined),
+  sessionSearch: vi.fn(async () => [] as Array<Record<string, unknown>>),
+  settingsSet: vi.fn(async () => undefined),
 }));
 
 vi.mock("@/lib/api", async (importOriginal) => {
@@ -45,7 +74,7 @@ vi.mock("@/lib/api", async (importOriginal) => {
     }),
     sessionResolvePlan: apiListenerCapture.resolvePlan,
     projectsList: vi.fn(async () => []),
-    sessionsList: vi.fn(async () => []),
+    sessionsList: vi.fn(async () => apiListenerCapture.sessions),
     settingsGet: vi.fn(async () => ({
       locale: "zh",
       setupWizardCompleted: true,
@@ -67,6 +96,19 @@ vi.mock("@/lib/api", async (importOriginal) => {
       hasRelayKey: false,
     })),
     sessionPendingInteractions: vi.fn(async () => []),
+    sessionInteractionsList: vi.fn(async () => apiListenerCapture.interactionRows),
+    sessionGetState: vi.fn(async () => apiListenerCapture.sessionState),
+    skillCandidatesListV1: vi.fn(async () =>
+      apiListenerCapture.candidateResponses.shift() ?? [],
+    ),
+    sessionSearchV1: apiListenerCapture.sessionSearch,
+    sessionCreate: apiListenerCapture.sessionCreate,
+    sessionDisconnect: apiListenerCapture.sessionDisconnect,
+    sessionConnect: apiListenerCapture.sessionConnect,
+    sessionSend: apiListenerCapture.sessionSend,
+    automationClaimBindV1: apiListenerCapture.automationBind,
+    automationClaimCompleteV1: apiListenerCapture.automationComplete,
+    settingsSet: apiListenerCapture.settingsSet,
     trayRefresh: vi.fn(async () => undefined),
   };
 });
@@ -139,6 +181,22 @@ beforeAll(() => {
 
 beforeEach(() => {
   window.location.hash = "";
+  apiListenerCapture.sessionState = {
+    sessionId: null,
+    agentSessionId: null,
+    state: "idle",
+    lastError: null,
+    streamingMessageId: null,
+    backend: "grok_agent_stdio",
+    title: "",
+  };
+  apiListenerCapture.sessions = [];
+  apiListenerCapture.interactionRows = [];
+  apiListenerCapture.candidateResponses = [];
+  apiListenerCapture.searchHits = [];
+  apiListenerCapture.sessionSearch.mockImplementation(async () =>
+    apiListenerCapture.searchHits,
+  );
 });
 
 afterEach(() => {
@@ -148,6 +206,14 @@ afterEach(() => {
   apiListenerCapture.handlers.clear();
   apiListenerCapture.tauri = false;
   apiListenerCapture.resolvePlan.mockClear();
+  apiListenerCapture.sessionCreate.mockClear();
+  apiListenerCapture.sessionDisconnect.mockClear();
+  apiListenerCapture.sessionConnect.mockClear();
+  apiListenerCapture.sessionSend.mockClear();
+  apiListenerCapture.automationBind.mockClear();
+  apiListenerCapture.automationComplete.mockClear();
+  apiListenerCapture.sessionSearch.mockClear();
+  apiListenerCapture.settingsSet.mockClear();
   delete (window as Window & { __TAURI_INTERNALS__?: unknown })
     .__TAURI_INTERNALS__;
 });
@@ -354,6 +420,263 @@ describe("App workbench integration", () => {
       expect(screen.queryByText(/Plan ready|计划待审阅/)).toBeNull();
       expect(screen.getByTestId("plan-artifact-card")).toBeTruthy();
       expect(screen.queryByTestId("resource-viewer-mock")).toBeNull();
+    },
+    20_000,
+  );
+
+  it(
+    "reduces foreground and background interaction snapshots across all kinds",
+    async () => {
+      apiListenerCapture.tauri = true;
+      apiListenerCapture.sessionState = {
+        ...apiListenerCapture.sessionState,
+        sessionId: "s1",
+        state: "ready",
+        title: "Task one",
+      };
+      const { default: App } = await import("./App");
+      render(<App />);
+      await waitFor(() => {
+        expect(apiListenerCapture.handlers.has("session://interaction")).toBe(true);
+      });
+
+      const emit = (payload: Record<string, unknown>) =>
+        act(() => apiListenerCapture.handlers.get("session://interaction")?.(payload));
+      const common = {
+        version: 1,
+        processId: "p1",
+        rpcId: 1,
+        createdAt: "2026-01-01T00:00:00Z",
+        updatedAt: "2026-01-01T00:00:00Z",
+      };
+
+      emit({
+        ...common,
+        interactionId: "perm",
+        sessionId: "s1",
+        status: "pending",
+        payload: {
+          kind: "permission",
+          toolName: "write",
+          title: "Write migration file",
+          preview: "preview",
+          scopeKey: "write:/project/a",
+          options: [],
+        },
+      });
+      expect(await screen.findByText("Write migration file")).toBeTruthy();
+      emit({
+        ...common,
+        interactionId: "perm",
+        sessionId: "s1",
+        status: "resolved",
+        payload: {
+          kind: "permission",
+          toolName: "write",
+          title: "Write migration file",
+          preview: "preview",
+          scopeKey: "write:/project/a",
+          options: [],
+        },
+      });
+      await waitFor(() => expect(screen.queryByText("Write migration file")).toBeNull());
+
+      emit({
+        ...common,
+        interactionId: "ask",
+        sessionId: "s1",
+        status: "resolving",
+        payload: {
+          kind: "ask_user",
+          questions: [{ id: "q", question: "Choose migration?", options: [], multiSelect: false }],
+          partialAnswers: { q: "yes" },
+        },
+      });
+      expect(await screen.findByText("Choose migration?")).toBeTruthy();
+      emit({
+        ...common,
+        interactionId: "ask",
+        sessionId: "s1",
+        status: "interrupted",
+        payload: { kind: "ask_user", questions: [] },
+      });
+
+      emit({
+        ...common,
+        interactionId: "plan",
+        sessionId: "s1",
+        status: "pending",
+        payload: { kind: "plan", entries: [], body: "Migration plan body" },
+      });
+      expect(await screen.findByText("Migration plan body")).toBeTruthy();
+      emit({
+        ...common,
+        interactionId: "background",
+        sessionId: "s2",
+        status: "pending",
+        payload: { kind: "ask_user", questions: [] },
+      });
+      await waitFor(() => {
+        expect(sidebarCapture.current?.tree.pendingAskSessionIds.has("s2")).toBe(true);
+      });
+      emit({
+        ...common,
+        interactionId: "background",
+        sessionId: "s2",
+        status: "failed",
+        payload: { kind: "ask_user", questions: [] },
+      });
+      await waitFor(() => {
+        expect(sidebarCapture.current?.tree.pendingAskSessionIds.has("s2")).toBe(false);
+      });
+    },
+    20_000,
+  );
+
+  it(
+    "runs only unbound Host automation claims and binds before sending",
+    async () => {
+      apiListenerCapture.tauri = true;
+      apiListenerCapture.sessionState = {
+        ...apiListenerCapture.sessionState,
+        sessionId: "s1",
+        state: "ready",
+      };
+      const { default: App } = await import("./App");
+      render(<App />);
+      await waitFor(() => {
+        expect(apiListenerCapture.handlers.has("automation://claim_v1")).toBe(true);
+      });
+      const automation = {
+        id: "auto",
+        title: "Daily audit",
+        prompt: "Run audit",
+        enabled: true,
+        projectId: null,
+        modelId: null,
+        effort: null,
+        frequency: "daily",
+        time: "09:00",
+        weekdays: [],
+        notify: "none",
+        createdAt: "2026-01-01T00:00:00Z",
+        updatedAt: "2026-01-01T00:00:00Z",
+      };
+      act(() => {
+        apiListenerCapture.handlers.get("automation://claim_v1")?.({
+          version: 1,
+          claimId: "bound",
+          sessionId: "existing",
+          scheduledFor: "2026-01-01T00:00:00Z",
+          catchUp: false,
+          automation,
+        });
+      });
+      expect(apiListenerCapture.sessionCreate).not.toHaveBeenCalled();
+
+      act(() => {
+        apiListenerCapture.handlers.get("automation://claim_v1")?.({
+          version: 1,
+          claimId: "fresh",
+          sessionId: null,
+          scheduledFor: "2026-01-01T00:00:00Z",
+          catchUp: true,
+          automation,
+        });
+      });
+      await waitFor(() => {
+        expect(apiListenerCapture.automationBind).toHaveBeenCalledWith(
+          "fresh",
+          "scheduled-session",
+        );
+        expect(apiListenerCapture.sessionSend).toHaveBeenCalledWith(
+          "[Scheduled: Daily audit]\n\nRun audit",
+        );
+      });
+      expect(apiListenerCapture.automationComplete).not.toHaveBeenCalled();
+    },
+    20_000,
+  );
+
+  it(
+    "merges FTS content hits into session search results",
+    async () => {
+      apiListenerCapture.tauri = true;
+      apiListenerCapture.sessions = [
+        {
+          id: "s-content",
+          title: "Unrelated title",
+          projectId: null,
+          updatedAt: "2026-01-01T00:00:00Z",
+          archived: false,
+        },
+      ];
+      apiListenerCapture.searchHits = [
+        {
+          version: 1,
+          sessionId: "s-content",
+          sessionTitle: "Unrelated title",
+          messageId: "m1",
+          role: "assistant",
+          snippet: "migration needle",
+          rank: 0,
+        },
+      ];
+      const { default: App } = await import("./App");
+      render(<App />);
+      await screen.findByTestId("workbench-shell");
+      await waitFor(() => {
+        expect(
+          sidebarCapture.current?.tree.orphanSessions.some(
+            (session) => session.id === "s-content",
+          ),
+        ).toBe(true);
+      });
+      await act(async () => sidebarCapture.current?.navigation.onSearch());
+      const input = await screen.findByPlaceholderText(
+        /Search chats \/ projects|搜索会话 \/ 项目/,
+      );
+      fireEvent.change(input, { target: { value: "needle" } });
+      await waitFor(() => expect(apiListenerCapture.sessionSearch).toHaveBeenCalled());
+      await waitFor(() => {
+        expect(
+          screen.getByRole("dialog", { name: /Search|搜索/ }).textContent,
+        ).toContain("migration needle");
+      });
+    },
+    20_000,
+  );
+
+  it(
+    "opens a newly generated pending Skill candidate for review",
+    async () => {
+      apiListenerCapture.tauri = true;
+      apiListenerCapture.sessionState = {
+        ...apiListenerCapture.sessionState,
+        sessionId: "s1",
+        state: "ready",
+      };
+      const candidate = {
+        version: 1,
+        id: "candidate",
+        status: "pending",
+        createdAt: "2026-01-01T00:00:00Z",
+        updatedAt: "2026-01-01T00:00:00Z",
+        contentHash: "hash",
+        source: { sessionId: "s1", sessionTitle: "Task", messageIds: ["u", "a"] },
+        owner: { kind: "host_generated", namespace: "sunsetz", mayOverwriteExternal: false },
+        draft: {
+          name: "migration-helper",
+          description: "Review migration workflow",
+          skillMd: "---\nname: migration-helper\ndescription: Review migration workflow\n---\n",
+          references: [],
+        },
+        approvedPath: null,
+      };
+      apiListenerCapture.candidateResponses = [[], [candidate]];
+      const { default: App } = await import("./App");
+      render(<App />);
+      expect(await screen.findByDisplayValue("migration-helper")).toBeTruthy();
     },
     20_000,
   );
