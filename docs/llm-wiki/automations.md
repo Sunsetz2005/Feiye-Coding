@@ -1,6 +1,6 @@
 # 自动化 / 已安排任务
 
-**状态**：P1 UI + 本地存储 + 对话静默创建 + 应用打开时壳层轮询触发。  
+**状态**：P1 UI + 本地存储 + 对话静默创建 + 应用进程存活时 Rust Host 调度。
 **原则**：能接 Build 就接 Build；壳层做清单、表单与编排。用户对话不暴露 JSON schema。
 
 ## 产品入口（Codex 对标）
@@ -33,17 +33,19 @@
 ## 数据
 
 - 文件：`paths::automations_file()`（macOS 常见：`~/Library/Application Support/dev.sunsetz.desktop/automations.json`）
+- 运行账本：`automation-runs.v1.json`（最多 512 条；10 分钟 claim lease）
 - 浏览器兜底：`localStorage["sunsetz.automations"]`
 - 字段：`title` `prompt` `enabled` `projectId` `modelId` `effort` `frequency` `time` `weekdays` `notify` `lastRunAt` `nextRunAt`
 
 ## 执行
 
-1. 壳层每 30s 检查 `enabled` 且 `nextRunAt` 到期的任务。
-2. 不打断 `streaming` / 连接中会话；**busy 时不标记 fired**，空闲后可补跑。
-3. 触发时：`session_create` → 写 session prefs（model/effort）→ `session_connect` → `session_send` prompt。
-4. **connect 失败**：删除空壳 session，避免侧栏出现幽灵会话；不 `mark_run`。
-5. **send 失败**：在会话内留下 user + error 气泡；不 `mark_run`。
-6. 成功：`lastRunAt` / `nextRunAt`；`once` 跑完后 `enabled=false`。
+1. Rust Host 每 30s 检查 `enabled` 且 `nextRunAt` 到期的任务，并在账本中原子认领；同一 occurrence 只能认领一次。
+2. Host 只保留一个 active claim；错过的周期最多补跑一次，不回放一串历史周期。
+3. WebView 空闲后执行：`session_create` → `automation_claim_bind_v1` → 写 session prefs → `session_connect` → `session_send`。
+4. 绑定后由 Host 依据真实 ACP turn 结果调用账本完成逻辑；“prompt 已发送”不等于成功。
+5. WebView 重载时，已绑定 claim 会重新广播但不会再次发送。lease 到期而未完成的记录为 `interrupted`。
+6. **connect 失败**：删除空壳 session并记 failed；**send/turn 失败**：保留会话错误记录并记 failed。
+7. 完成后原子推进 `lastRunAt` / `nextRunAt`；`once` 任务禁用。
 
 与 Build 的 `/loop`、`scheduler_*` 可并存：用户也可在会话里让 Agent 直接调度；壳层清单是独立 SoT。
 
@@ -60,6 +62,8 @@
 - `automation_set_enabled`
 - `automation_mark_run`
 - `automation_delete`
+- `automation_claim_bind_v1`
+- `automation_claim_complete_v1`（兼容 WebView 启动前失败；正常 turn 由 Host 完成）
 
 ## 验收
 
@@ -69,6 +73,7 @@
 - [x] AI 创建入口：自然语言 seed，不暴露 JSON schema
 - [x] 助手 fence 自动 `automation_create`，气泡不展示配置块
 - [x] 应用打开时到期可触发（不阻塞主对话架构）
+- [x] 原子认领、运行账本、单次补跑与 WebView 重载去重
 - [x] connect 失败不留空壳会话；已有空会话不伪装成新建页
 - [ ] 后台无窗口常驻触发（可选 P2：系统服务 / headless CLI）
 - [ ] 与 CLI scheduler 双向同步（可选 P2）

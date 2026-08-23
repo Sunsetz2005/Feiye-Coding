@@ -1,6 +1,14 @@
 # Changelog
 
-## [UNRELEASED] — 2026-07-27 11:55
+## [UNRELEASED] — 2026-08-24
+
+- 统一 permission、ask-user、plan 的版本化交互生命周期，支持前后台会话与 WebView 重载恢复，并新增有界去敏审计边车。
+- 权限改为 fail-closed：未知编辑路径、目录穿越和下载不再自动批准；会话授权按完整规范化命令或资源匹配。
+- 隔离静态 HTML 预览，启用主 WebView CSP，禁用全局 asset protocol，并引入受 provenance 校验的 `ResourceHandleV1`。
+- 远程 ACP 限制为 loopback；JSON/TOML 读改写迁移到覆盖完整事务的跨进程锁与原子替换。
+- 新增 RuntimeCapabilitiesV1、RuntimeEventEnvelopeV1、Linux bubblewrap sandbox profile 与 clean-room capability manifest。
+- 新增只读 Runtime 插件目录/搜索/hooks inventory、可重建 FTS5 会话检索、待审 Skill 候选和 Rust Host 自动化认领账本。
+- macOS/Windows 非 off Runtime 沙箱、应用关闭后的系统调度和 Windows 物理机发布验收仍未完成。
 
 ## [1.0.0] — 2026-07-27 11:55
 

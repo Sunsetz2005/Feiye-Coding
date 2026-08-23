@@ -33,6 +33,14 @@ Optional: `authenticate { methodId: "cached_token" }` uses `~/.grok/auth.json`.
 
 Client must handle server→client RPC: `session/request_permission` (allow/deny options).
 
+## Versioned Host interaction/runtime bridge (2026-08-24)
+
+- Permission、`_x.ai/ask_user_question` 与 `_x.ai/exit_plan_mode` 现在都投影为 `InteractionSnapshotV1`，通过 `session://interaction` 双发；原 wire method 与各自语义不变。
+- Host 在写回 Runtime 前 compare-and-claim `interactionId + processId + rpcId`，写失败恢复 pending；进程退出后状态为 interrupted。
+- 原始 ACP 事件同时进入 `session://runtime_event_v1`，带单会话 sequence 和有界去敏 payload。未知 request 仍回复 `-32601`。
+- TCP ACP 只连接 literal loopback 或 `localhost:port`，5 秒超时；跨机器使用本地 SSH forward。
+- 客户端 handshake version 使用当前 package version，协议版本由 `runtime_compat::ACP_PROTOCOL_VERSION` 单点声明。
+
 ### `_x.ai/ask_user_question` (Host UI)
 
 Agent reverse-request when the `ask_user_question` tool needs answers. Wire method is `_x.ai/ask_user_question` (leading `_` on the wire).

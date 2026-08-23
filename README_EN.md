@@ -16,9 +16,10 @@ Sunsetz is a local-first desktop agent workbench. It brings projects, sessions, 
 - Runtime-backed streaming sessions, ordered tool activity, stop, and send queues.
 - Ask, allow-once, allow-for-session, deny, and controlled unattended permission policies.
 - A three-layer composer with persistent attachments, exact context telemetry, and Runtime-provided models.
-- Recoverable Agent questions and a bottom-docked plan review flow.
+- One foreground/background interaction lifecycle for permissions, Agent questions, and plans, recoverable across WebView reloads while the Runtime remains alive.
 - Files, Changes, and Plan resources with code, Markdown, image, media, PDF, and Office previews.
-- Existing management surfaces for custom providers, MCP, skills, plugins, accounts, and scheduled tasks.
+- Custom providers, MCP, skills, a read-only Runtime plugin/hooks catalog, accounts, and Rust Host scheduled-task claims.
+- Rebuildable local session search and review-only Skill candidates.
 - English, Simplified Chinese, Traditional Chinese, light, dark, and high-contrast themes.
 - `HostCapabilities v2` gating: unknown, unsupported, or uninstalled features stay out of the DOM and keyboard path.
 
@@ -83,6 +84,7 @@ See [`coverage-policy.json`](coverage-policy.json) for coverage gates and [`docs
 
 - [Workbench and conversation behavior](docs/llm-wiki/workbench-conversation.md)
 - [Runtime compatibility boundary](docs/runtime-compatibility.md)
+- [Runtime capability migration and technical debt](docs/llm-wiki/runtime-migration-v1.md)
 - [Design tokens](docs/design-tokens.md)
 - [Long-running reconstruction status](docs/长期重构-执行状态.md)
 - [Contributing](CONTRIBUTING.md)

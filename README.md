@@ -16,9 +16,10 @@ Sunsetz 是一款本地优先的桌面 Agent 工作台。它把项目、会话�
 - Runtime 流式会话、工具活动时间线、停止与发送队列。
 - Ask、单次允许、会话允许、拒绝和受控无人值守权限策略。
 - 三层输入器、附件持久化、精确上下文用量和 Runtime 模型选择。
-- 可恢复的 Agent 提问与底部计划确认流程。
+- 前后台统一、可在 WebView 重载后恢复的权限/Agent 提问/计划交互；死亡 Runtime RPC 明确标记 interrupted。
 - Files、Changes 和 Plan 资源面板，支持代码、Markdown、图片、媒体、PDF 和 Office 预览。
-- 自定义 Provider、MCP、技能、插件、账号与计划任务的现有管理入口。
+- 自定义 Provider、MCP、技能、只读插件目录/搜索/hooks、账号与 Rust Host 计划任务调度。
+- 可重建的本地会话全文检索与只在用户审阅后保存的 Skill 候选。
 - 简体中文、繁体中文、英文，以及浅色、深色和高对比度主题。
 - `HostCapabilities v2` 能力门控：未知、不支持或未安装的入口不会进入界面和键盘路径。
 
@@ -83,6 +84,7 @@ cd src-tauri && cargo test
 
 - [工作台与会话行为](docs/llm-wiki/workbench-conversation.md)
 - [Runtime 兼容边界](docs/runtime-compatibility.md)
+- [成熟能力迁移与技术债](docs/llm-wiki/runtime-migration-v1.md)
 - [设计令牌](docs/design-tokens.md)
 - [长期重构执行状态](docs/长期重构-执行状态.md)
 - [贡献指南](CONTRIBUTING.md)

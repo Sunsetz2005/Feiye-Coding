@@ -6,6 +6,15 @@ Product-owned settings use `SUNSETZ_HOME` and `SUNSETZ_ACP`. The adapter accepts
 
 Raw upstream terms may appear in opt-in diagnostic bundles or externally controlled authentication pages. They must not be rewritten on the wire.
 
+## Versioned Runtime surface
+
+- `runtime_capabilities_v1` reports Runtime/client/protocol versions and the actual state of sandbox, memory, plugin catalog, hooks inventory, and MCP. It never reads or serializes API keys or authentication material.
+- Raw ACP events are dual-emitted as the bounded `session://runtime_event_v1` envelope for one compatibility cycle. Unknown notifications remain observable; unknown requests are rejected on the wire.
+- Sandbox profile is spawn-critical. `off` is the default; Linux uses bubblewrap when a non-off profile is requested. macOS and Windows currently fail closed for non-off profiles because no verified adapter exists.
+- TCP ACP accepts only loopback endpoints. Use a user-managed local SSH tunnel for a Runtime on another machine.
+
+The detailed migration and remaining platform gates are documented in [`llm-wiki/runtime-migration-v1.md`](llm-wiki/runtime-migration-v1.md).
+
 ## Legacy identifier allowlist
 
 The following identifiers remain only to preserve existing user data or import compatibility:

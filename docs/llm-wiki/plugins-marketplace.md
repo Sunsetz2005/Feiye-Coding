@@ -6,13 +6,14 @@ Community ask: install Grok Build plugins from the App without dropping to CLI.
 
 | Action | Where | Effect |
 |--------|--------|--------|
-| List installed | Settings → Extensions → Plugins | `grok plugin list --json` + inspect enrich |
+| Read-only catalog + search | Settings → Extensions → Plugins | `runtime_plugins_catalog_v1(query)`；Runtime CLI inventory + inspect enrich |
+| Hooks inventory | Same UI | `runtime_hooks_inventory_v1` |
 | Enable / disable | Same UI | CLI + `~/.grok/config.toml` `[plugins].disabled` |
 | Details | Modal | `grok plugin details` |
 | Uninstall | In-app confirm (GlassModal) | `grok plugin uninstall` |
 | **Install from marketplace** | **CLI only** | e.g. `grok plugin install …` |
 
-Skills / MCP enable toggles are App-side (`extensions.json` + ACP inject); plugins follow **CLI/config as source of truth**.
+Catalog 明确返回 `installActionAvailable=false`。Skills / MCP enable toggles are App-side (`extensions.json` + ACP inject); plugins follow **CLI/config as source of truth**.
 
 ## Why not ship install UI yet
 
@@ -45,6 +46,6 @@ Skills / MCP enable toggles are App-side (`extensions.json` + ACP inject); plugi
 
 ## Decision
 
-- **Short term:** keep install CLI-only; document in Extensions footnote (already).  
+- **Short term:** read-only catalog/search/hooks inventory 已接入；install 继续 CLI-only。
 - **Next:** open Issue when CLI has stable `plugin search` / `plugin install --json` for a clean Host wrapper.  
 - **Do not** invent a second plugin store under the Sunsetz application data directory.

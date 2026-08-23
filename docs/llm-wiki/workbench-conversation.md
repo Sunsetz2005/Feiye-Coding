@@ -119,14 +119,16 @@
 - 跳过只跳过当前题；全部跳过仍提交 accepted、空 `answers` 和空 `partial_answers`。
 - 关闭取消整组询问，与全部跳过不同。
 
-Host 按会话保存 pending ask_user：
+Host 按会话保存所有 pending interaction：
 
-- `session_pending_interactions` 返回前台和后台任务的待回答项。
+- `InteractionSnapshotV1` 以判别 payload 表示 permission、ask_user 和 plan；三者共享 pending/resolving/resolved/failed/interrupted 生命周期但不混淆业务语义。
+- `session_interactions_list` 返回前台和后台任务的 live interaction；旧 `session_pending_interactions` 继续作为 ask-user 兼容接口。
 - 切换任务或 WebView 重载时可在 Agent 进程仍存活的前提下恢复。
-- 解析前先保留答案；Runtime 写入失败时保留 `partialAnswers` 并允许重试。
-- `sessionId` 用于消除不同 Agent 进程间 `rpcId` 冲突。
+- 解析前先以 interactionId/processId/rpcId compare-and-claim 为 `resolving`；Runtime 写入失败时恢复 pending 并保留内存中的 `partialAnswers`。
+- `sessionId` 与 `processId` 用于消除不同 Agent 进程间 `rpcId` 冲突，重复或陈旧决策 fail-closed。
+- `interactions.v1.json` 只记录有界、去敏审计；权限 scope 只留 hash，ask-user 答案不落盘。
 
-pending interaction 当前是内存状态，不保证应用进程完全退出后的磁盘恢复。
+进程退出后的 pending RPC 会标记 `interrupted`。磁盘边车不能恢复已经死亡的 Runtime RPC，也不得把它显示为仍可回答。
 
 计划模式复用同一底部交互语言：
 
@@ -152,6 +154,8 @@ Record a skill 只处理当前会话的可见材料：
 
 Host 校验名称、frontmatter、相对路径、体积、路径穿越、符号链接、密钥特征和覆盖冲突，并通过暂存目录与 rename 完成原子保存。取消审阅或校验失败不会留下技能目录。
 
+工具型任务完成后，Host 可另外生成 `SkillCandidateV1` pending 草稿。候选包含来源消息、内容 hash 和 Host ownership；它不会自动保存，也不能自动覆盖用户、插件或外部 Skill。用户确认后才复用同一 `skill_draft_save` 原子写入路径。
+
 ## 9. 能力与命令边界
 
 `host_capabilities` 当前返回版本 2 的能力表。`available`、`unavailable`、`needs_permission`、`needs_install` 和 `unsupported_platform` 是入口门控的唯一状态；版本 2 中未声明的能力按未知处理，不得通过旧布尔值或调用方默认值放行，也不得进入 DOM、Tab 顺序或无障碍树。旧布尔字段只用于读取版本 1 或无版本响应时的兼容迁移。
@@ -162,10 +166,17 @@ Host 校验名称、frontmatter、相对路径、体积、路径穿越、符号�
 | Finder 所选项 | macOS 为 `available`；其他平台为 `unsupported_platform` | `host_capabilities`、`finder_selected_paths` |
 | 会话技能保存 | `available` | `host_capabilities`、`skill_draft_save` |
 | 全会话待回答查询 | Agent 进程存活期间可恢复 | `session_pending_interactions` |
+| 统一交互查询/决策 | live Runtime 期间 `available`；死亡 RPC 仅审计为 interrupted | `session_interactions_list`、`session_resolve_interaction_v1` |
+| Runtime 能力/事件 | `available` | `runtime_capabilities_v1`、`session://runtime_event_v1` |
+| 会话可见消息检索 | `available`，SQLite 可删可重建 | `session_search_v1` |
 | 模型/推理切换 | 按声明能力 | `models_list_available`、`session_set_model` |
 | 精确上下文 | 仅有可靠遥测时展示 | Runtime usage + 已知 capacity |
 | 原生语音 | `unavailable` | v2 能力表 + `speechRecognition: false`；无 speech 命令 |
-| 会话/项目预览、资源审阅、智能快照、电脑控制、后台调度 | `unavailable` | v2 能力表中明确声明原因；尚无对应适配器 |
+| 会话/项目预览、Git 摘要、资源审阅 | `available` | `HostCapabilities v2` 对应实现 |
+| 应用存活期间后台调度 | `available` | Rust claim ledger + 现有 ACP 会话路径 |
+| 智能快照、电脑控制、系统级常驻调度 | `unavailable` | v2 能力表或专项里程碑 |
+
+Runtime sandbox 默认 `off`。Linux 在 bubblewrap 可用时可验证应用 `workspace_write` / `read_only`；macOS、Windows 请求非 off 配置会拒绝启动，不会静默降级。完整边界见 [runtime-migration-v1.md](./runtime-migration-v1.md)。
 
 不得据此声称以下项目已经完成：
 
