@@ -29,10 +29,12 @@ import { Tip } from "@/components/ui/tooltip";
 import { Spinner } from "@/components/ui/spinner";
 import { UserMenu, remainingPercent } from "@/components/UserMenu";
 import { VirtualList } from "@/components/VirtualList";
-import type {
-  AccountStatus,
-  CustomProvider,
-  SessionPreviewV1,
+import {
+  projectGitSummaryV1,
+  type AccountStatus,
+  type CustomProvider,
+  type ProjectGitSummaryV1,
+  type SessionPreviewV1,
 } from "@/lib/api";
 import {
   accountDisplayName,
@@ -97,6 +99,12 @@ interface SidebarLabels {
     previewUpdated: string;
     previewPinned: string;
     previewNoSummary: string;
+    previewGitRef: string;
+    previewGitAhead: string;
+    previewGitBehind: string;
+    previewGitDirty: string;
+    previewGitConflicts: string;
+    previewGitCountsCapped: string;
     unarchive: string;
     archive: string;
   };
@@ -160,6 +168,10 @@ interface SidebarTreeModel {
   loadSessionPreview: (
     sessionId: string,
   ) => Promise<SessionPreviewV1 | null>;
+  loadProjectGitSummary?: (
+    projectId: string,
+    projectPath: string,
+  ) => Promise<ProjectGitSummaryV1 | null>;
 }
 
 interface SidebarAccountModel {
@@ -315,6 +327,8 @@ type PreviewState =
       project: SidebarProjectItem;
       activeCount: number;
       lastActivity: string | null;
+      gitSummary: ProjectGitSummaryV1 | null;
+      requestId: number;
     }
   | {
       kind: "session";
@@ -328,6 +342,8 @@ type PreviewState =
 
 const PREVIEW_DELAY_MS = 450;
 const PREVIEW_CACHE_MS = 30_000;
+const PROJECT_GIT_PREVIEW_CACHE_MS = 5_000;
+const PROJECT_GIT_PREVIEW_CACHE_LIMIT = 64;
 
 function anchorFromElement(element: HTMLElement): PreviewAnchor {
   const rect = element.getBoundingClientRect();
@@ -373,6 +389,7 @@ function SidebarPreviewCard({
     countLabel.replace("{count}", String(count));
   const updated = (value: string) =>
     labels.previewUpdated.replace("{time}", formatPreviewTime(value));
+  const gitSummary = state.kind === "project" ? state.gitSummary : null;
 
   return createPortal(
     <aside
@@ -402,6 +419,51 @@ function SidebarPreviewCard({
           <div className="sidebar-preview__path" title={state.project.path}>
             {state.project.path}
           </div>
+          {gitSummary?.available && gitSummary.isRepo ? (
+            <div className="sidebar-preview__git" aria-label="Git">
+              <span
+                className="sidebar-preview__git-ref"
+                title={gitSummary.head ?? undefined}
+              >
+                {labels.previewGitRef.replace(
+                  "{ref}",
+                  gitSummary.branch ?? gitSummary.head ?? "—",
+                )}
+              </span>
+              {gitSummary.ahead != null && gitSummary.ahead > 0 ? (
+                <span>
+                  {status(labels.previewGitAhead, gitSummary.ahead)}
+                </span>
+              ) : null}
+              {gitSummary.behind != null && gitSummary.behind > 0 ? (
+                <span>
+                  {status(labels.previewGitBehind, gitSummary.behind)}
+                </span>
+              ) : null}
+              {gitSummary.dirty > 0 ? (
+                <span>
+                  {status(labels.previewGitDirty, gitSummary.dirty)}
+                </span>
+              ) : null}
+              {gitSummary.conflicts > 0 ? (
+                <span className="sidebar-preview__git-conflicts">
+                  {status(
+                    labels.previewGitConflicts,
+                    gitSummary.conflicts,
+                  )}
+                </span>
+              ) : null}
+              {gitSummary.countsCapped ? (
+                <span
+                  className="sidebar-preview__git-capped"
+                  aria-label={labels.previewGitCountsCapped}
+                  title={labels.previewGitCountsCapped}
+                >
+                  +
+                </span>
+              ) : null}
+            </div>
+          ) : null}
           {!state.project.trusted ? (
             <div className="sidebar-preview__warning">
               {labels.untrusted}
@@ -472,6 +534,15 @@ export function SidebarNavigator({
   const previewInflightRef = useRef(
     new Map<string, Promise<SessionPreviewV1 | null>>(),
   );
+  const projectGitCacheRef = useRef(
+    new Map<
+      string,
+      { expiresAt: number; data: ProjectGitSummaryV1 | null }
+    >(),
+  );
+  const projectGitInflightRef = useRef(
+    new Map<string, Promise<ProjectGitSummaryV1 | null>>(),
+  );
   const closePreview = useCallback(() => {
     if (previewTimerRef.current != null) {
       window.clearTimeout(previewTimerRef.current);
@@ -481,8 +552,8 @@ export function SidebarNavigator({
     setPreview(null);
   }, []);
   useEffect(() => {
-    if (collapsed) closePreview();
-  }, [closePreview, collapsed]);
+    if (collapsed || !tree.projectsOpen || account.open) closePreview();
+  }, [account.open, closePreview, collapsed, tree.projectsOpen]);
   useEffect(
     () => () => {
       if (previewTimerRef.current != null) {
@@ -492,6 +563,117 @@ export function SidebarNavigator({
     },
     [],
   );
+  const previewProjectId =
+    preview?.kind === "project" ? preview.project.id : null;
+  const previewProjectPath =
+    preview?.kind === "project" ? preview.project.path : null;
+  const previewProjectRequestId =
+    preview?.kind === "project" ? preview.requestId : null;
+  const previewProjectExists =
+    previewProjectId == null ||
+    tree.projects.some(
+      (project) =>
+        project.id === previewProjectId &&
+        project.path === previewProjectPath,
+    );
+  useEffect(() => {
+    if (!previewProjectExists) closePreview();
+  }, [closePreview, previewProjectExists]);
+  useEffect(() => {
+    if (
+      previewProjectId == null ||
+      previewProjectPath == null ||
+      previewProjectRequestId == null ||
+      previewRequestRef.current !== previewProjectRequestId ||
+      collapsed ||
+      !tree.projectsOpen ||
+      !previewProjectExists ||
+      account.open
+    ) {
+      return;
+    }
+
+    const projectId = previewProjectId;
+    const projectPath = previewProjectPath;
+    const key = `${projectId}\0${projectPath}`;
+    const requestId = previewProjectRequestId;
+    const applySummary = (data: ProjectGitSummaryV1 | null) => {
+      if (previewRequestRef.current !== requestId) return;
+      setPreview((current) => {
+        if (
+          current?.kind !== "project" ||
+          current.project.id !== projectId ||
+          current.project.path !== projectPath ||
+          current.gitSummary === data
+        ) {
+          return current;
+        }
+        return { ...current, gitSummary: data };
+      });
+    };
+
+    const cached = projectGitCacheRef.current.get(key);
+    if (cached && cached.expiresAt > Date.now()) {
+      applySummary(cached.data);
+      return;
+    }
+    if (cached) projectGitCacheRef.current.delete(key);
+
+    let pending = projectGitInflightRef.current.get(key);
+    if (!pending) {
+      const load = tree.loadProjectGitSummary ?? projectGitSummaryV1;
+      pending = load(projectId, projectPath);
+      projectGitInflightRef.current.set(key, pending);
+      void pending.then(
+        () => {
+          if (projectGitInflightRef.current.get(key) === pending) {
+            projectGitInflightRef.current.delete(key);
+          }
+        },
+        () => {
+          if (projectGitInflightRef.current.get(key) === pending) {
+            projectGitInflightRef.current.delete(key);
+          }
+        },
+      );
+    }
+
+    void pending.then(
+      (data) => {
+        if (previewRequestRef.current !== requestId) return;
+        if (
+          data != null &&
+          (data.version !== 1 || data.projectId !== projectId)
+        ) {
+          return;
+        }
+        const now = Date.now();
+        const cache = projectGitCacheRef.current;
+        for (const [cachedKey, cached] of cache) {
+          if (cached.expiresAt <= now) cache.delete(cachedKey);
+        }
+        if (!cache.has(key) && cache.size >= PROJECT_GIT_PREVIEW_CACHE_LIMIT) {
+          const oldestKey = cache.keys().next().value;
+          if (oldestKey != null) cache.delete(oldestKey);
+        }
+        cache.set(key, {
+          expiresAt: now + PROJECT_GIT_PREVIEW_CACHE_MS,
+          data,
+        });
+        applySummary(data);
+      },
+      () => undefined,
+    );
+  }, [
+    account.open,
+    collapsed,
+    previewProjectExists,
+    previewProjectId,
+    previewProjectPath,
+    previewProjectRequestId,
+    tree.projectsOpen,
+    tree.loadProjectGitSummary,
+  ]);
   const scheduleProjectPreview = useCallback(
     (
       project: SidebarProjectItem,
@@ -516,6 +698,8 @@ export function SidebarNavigator({
           project,
           activeCount,
           lastActivity,
+          gitSummary: null,
+          requestId: previewRequestRef.current,
         });
       };
       if (immediate) show();
@@ -730,7 +914,10 @@ export function SidebarNavigator({
             className="tree-l1__head"
             aria-expanded={tree.projectsOpen}
             aria-controls={projectListId}
-            onClick={tree.onToggleProjects}
+            onClick={() => {
+              closePreview();
+              tree.onToggleProjects();
+            }}
           >
             {tree.projectsOpen ? (
               <IconChevronDown size={14} />
@@ -785,9 +972,10 @@ export function SidebarNavigator({
                     }
                     aria-expanded={sessionsOpen}
                     aria-controls={sessionListId}
-                    onClick={() =>
-                      tree.onToggleProject(project.id, !sessionsOpen)
-                    }
+                    onClick={() => {
+                      closePreview();
+                      tree.onToggleProject(project.id, !sessionsOpen);
+                    }}
                   >
                     {sessionsOpen ? (
                       <IconChevronDown size={13} />
@@ -930,7 +1118,10 @@ export function SidebarNavigator({
             className="tree-l1__head"
             aria-expanded={tree.historyOpen}
             aria-controls={historyListId}
-            onClick={tree.onToggleHistory}
+            onClick={() => {
+              closePreview();
+              tree.onToggleHistory();
+            }}
           >
             {tree.historyOpen ? (
               <IconChevronDown size={14} />

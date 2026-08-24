@@ -719,6 +719,49 @@ export async function projectsList() {
   >("projects_list");
 }
 
+export type ProjectGitSummarySourceV1 =
+  | "filesystem_marker"
+  | "git_status_porcelain_v2"
+  | "cache"
+  | "unavailable";
+
+export type ProjectGitSummaryUnavailableReasonV1 =
+  | "project_missing"
+  | "invalid_git_metadata"
+  | "git_unavailable"
+  | "timeout"
+  | "output_limit"
+  | "git_failed"
+  | "parse_failed";
+
+export interface ProjectGitSummaryV1 {
+  version: 1;
+  projectId: string;
+  available: boolean;
+  isRepo: boolean;
+  branch: string | null;
+  ahead: number | null;
+  behind: number | null;
+  dirty: number;
+  conflicts: number;
+  countsCapped: boolean;
+  head: string | null;
+  observedAt: string;
+  source: ProjectGitSummarySourceV1;
+  unavailableReason: ProjectGitSummaryUnavailableReasonV1 | null;
+}
+
+/** Lightweight, metadata-only Git summary for an indexed project. */
+export async function projectGitSummaryV1(
+  projectId: string,
+  projectPath: string,
+): Promise<ProjectGitSummaryV1 | null> {
+  if (!isTauri()) return null;
+  return invoke<ProjectGitSummaryV1>("project_git_summary_v1", {
+    request: { version: 1, projectId, projectPath },
+  });
+}
+
 export async function projectAdd(path: string, trust: boolean) {
   return invoke("project_add", { path, trust });
 }

@@ -22,6 +22,7 @@ import { SidebarNavigator } from "./SidebarNavigator";
 import type {
   AccountStatus,
   CustomProvider,
+  ProjectGitSummaryV1,
   SessionPreviewV1,
 } from "@/lib/api";
 
@@ -84,6 +85,12 @@ function createProps(
         previewUpdated: "Updated {time}",
         previewPinned: "Pinned",
         previewNoSummary: "No visible messages",
+        previewGitRef: "Git · {ref}",
+        previewGitAhead: "Ahead {count}",
+        previewGitBehind: "Behind {count}",
+        previewGitDirty: "{count} changed",
+        previewGitConflicts: "{count} conflicts",
+        previewGitCountsCapped: "Counts capped",
         unarchive: "Unarchive",
         archive: "Archive",
       },
@@ -153,6 +160,13 @@ function createProps(
       onOpenSession: vi.fn(),
       onArchiveSession: vi.fn(),
       onSessionMenu: vi.fn(),
+      loadProjectGitSummary: vi.fn(
+        async (
+          projectId: string,
+          _projectPath: string,
+        ): Promise<ProjectGitSummaryV1> =>
+          createProjectGitSummary({ projectId }),
+      ),
       loadSessionPreview: vi.fn(
         async (sessionId: string): Promise<SessionPreviewV1> => ({
           version: 1,
@@ -186,6 +200,52 @@ function createProps(
     },
     ...overrides,
   };
+}
+
+function createProjectGitSummary(
+  overrides: Partial<ProjectGitSummaryV1> = {},
+): ProjectGitSummaryV1 {
+  return {
+    version: 1,
+    projectId: "project-1",
+    available: true,
+    isRepo: true,
+    branch: "main",
+    ahead: 2,
+    behind: 1,
+    dirty: 4,
+    conflicts: 1,
+    countsCapped: false,
+    head: "0123456789ab",
+    observedAt: "2026-08-24T00:00:00Z",
+    source: "git_status_porcelain_v2",
+    unavailableReason: null,
+    ...overrides,
+  };
+}
+
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+} {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
+function projectPreview(): HTMLElement | null {
+  return document.querySelector<HTMLElement>(
+    ".sidebar-preview[data-kind='project']",
+  );
+}
+
+async function advanceTimers(ms: number): Promise<void> {
+  await act(async () => {
+    vi.advanceTimersByTime(ms);
+    await Promise.resolve();
+  });
 }
 
 function createAccountStatus(
@@ -713,15 +773,306 @@ describe("SidebarNavigator", () => {
     expect(props.tree.onSessionMenu).toHaveBeenCalledTimes(1);
   });
 
-  it("shows project facts on keyboard focus without a Host request", () => {
-    const props = createProps();
+  it("waits 450ms, renders project facts first, then loads Git summary", async () => {
+    vi.useFakeTimers();
+    const pending = deferred<ProjectGitSummaryV1 | null>();
+    const previewAtLoad: Array<string | null> = [];
+    const base = createProps();
+    const loadProjectGitSummary = vi.fn(
+      (_projectId: string, _projectPath: string) => {
+        previewAtLoad.push(projectPreview()?.textContent ?? null);
+        return pending.promise;
+      },
+    );
+    const props = createProps({
+      tree: { ...base.tree, loadProjectGitSummary },
+    });
     render(<SidebarNavigator {...props} />);
+    const project = screen.getByRole("button", { name: "Sunsetz" });
 
-    fireEvent.focus(screen.getByRole("button", { name: "Sunsetz" }));
-    const preview = screen.getByRole("tooltip");
-    expect(preview.textContent).toContain("1 tasks");
-    expect(preview.textContent).toContain("/tmp/sunsetz");
-    expect(props.tree.loadSessionPreview).not.toHaveBeenCalled();
+    fireEvent.mouseEnter(project);
+    await advanceTimers(449);
+    expect(projectPreview()).toBeNull();
+    expect(loadProjectGitSummary).not.toHaveBeenCalled();
+
+    fireEvent.mouseLeave(project);
+    await advanceTimers(1_000);
+    expect(projectPreview()).toBeNull();
+    expect(loadProjectGitSummary).not.toHaveBeenCalled();
+
+    fireEvent.mouseEnter(project);
+    await advanceTimers(450);
+    expect(projectPreview()?.textContent).toContain("1 tasks");
+    expect(projectPreview()?.textContent).toContain("/tmp/sunsetz");
+    expect(loadProjectGitSummary).toHaveBeenCalledTimes(1);
+    expect(loadProjectGitSummary).toHaveBeenCalledWith(
+      "project-1",
+      "/tmp/sunsetz",
+    );
+    expect(previewAtLoad[0]).toContain("/tmp/sunsetz");
+    expect(projectPreview()?.querySelector(".sidebar-preview__git")).toBeNull();
+
+    await act(async () => {
+      pending.resolve(createProjectGitSummary({ countsCapped: true }));
+      await pending.promise;
+    });
+    const git = projectPreview()?.querySelector(".sidebar-preview__git");
+    expect(git?.textContent).toContain("Git · main");
+    expect(git?.textContent).toContain("Ahead 2");
+    expect(git?.textContent).toContain("Behind 1");
+    expect(git?.textContent).toContain("4 changed");
+    expect(git?.textContent).toContain("1 conflicts");
+    expect(
+      projectPreview()?.querySelector("[aria-label='Counts capped']")
+        ?.textContent,
+    ).toBe("+");
+  });
+
+  it(
+    "coalesces project requests and caches their result for five seconds",
+    async () => {
+      vi.useFakeTimers();
+      const pending = deferred<ProjectGitSummaryV1 | null>();
+      const base = createProps();
+      const loadProjectGitSummary = vi.fn(() => pending.promise);
+      const props = createProps({
+        tree: { ...base.tree, loadProjectGitSummary },
+      });
+      render(<SidebarNavigator {...props} />);
+      const project = screen.getByRole("button", { name: "Sunsetz" });
+
+      fireEvent.mouseEnter(project);
+      await advanceTimers(450);
+      fireEvent.mouseLeave(project);
+      fireEvent.mouseEnter(project);
+      await advanceTimers(450);
+      expect(loadProjectGitSummary).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        pending.resolve(createProjectGitSummary());
+        await pending.promise;
+      });
+      expect(projectPreview()?.textContent).toContain("Git · main");
+
+      fireEvent.mouseLeave(project);
+      fireEvent.mouseEnter(project);
+      await advanceTimers(450);
+      expect(loadProjectGitSummary).toHaveBeenCalledTimes(1);
+      expect(projectPreview()?.textContent).toContain("Git · main");
+
+      fireEvent.mouseLeave(project);
+      await advanceTimers(5_001);
+      fireEvent.mouseEnter(project);
+      await advanceTimers(450);
+      expect(loadProjectGitSummary).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it.each([
+    [
+      "an unavailable summary",
+      createProjectGitSummary({
+        available: false,
+        source: "unavailable",
+        unavailableReason: "git_failed",
+      }),
+    ],
+    [
+      "a non-repository summary",
+      createProjectGitSummary({
+        isRepo: false,
+        branch: null,
+        ahead: null,
+        behind: null,
+        dirty: 0,
+        conflicts: 0,
+        head: null,
+        source: "filesystem_marker",
+      }),
+    ],
+  ])("keeps %s silent and cached", async (_label, summary) => {
+    const base = createProps();
+    const loadProjectGitSummary = vi.fn(async () => summary);
+    const props = createProps({
+      tree: { ...base.tree, loadProjectGitSummary },
+    });
+    render(<SidebarNavigator {...props} />);
+    const project = screen.getByRole("button", { name: "Sunsetz" });
+
+    await act(async () => {
+      fireEvent.focus(project);
+      await Promise.resolve();
+    });
+    expect(projectPreview()?.textContent).toContain("/tmp/sunsetz");
+    expect(projectPreview()?.querySelector(".sidebar-preview__git")).toBeNull();
+    expect(projectPreview()?.textContent).not.toContain("git_failed");
+
+    await act(async () => {
+      fireEvent.blur(project);
+      fireEvent.focus(project);
+      await Promise.resolve();
+    });
+    expect(loadProjectGitSummary).toHaveBeenCalledTimes(1);
+    expect(projectPreview()?.querySelector(".sidebar-preview__git")).toBeNull();
+  });
+
+  it("does not cache a rejected project summary request", async () => {
+    const base = createProps();
+    const loadProjectGitSummary = vi
+      .fn<() => Promise<ProjectGitSummaryV1 | null>>()
+      .mockRejectedValueOnce(new Error("Host unavailable"))
+      .mockResolvedValueOnce(createProjectGitSummary());
+    const props = createProps({
+      tree: { ...base.tree, loadProjectGitSummary },
+    });
+    render(<SidebarNavigator {...props} />);
+    const project = screen.getByRole("button", { name: "Sunsetz" });
+
+    await act(async () => {
+      fireEvent.focus(project);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(loadProjectGitSummary).toHaveBeenCalledTimes(1);
+    expect(projectPreview()?.textContent).toContain("/tmp/sunsetz");
+    expect(projectPreview()?.querySelector(".sidebar-preview__git")).toBeNull();
+
+    await act(async () => {
+      fireEvent.blur(project);
+      fireEvent.focus(project);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(loadProjectGitSummary).toHaveBeenCalledTimes(2);
+    expect(projectPreview()?.textContent).toContain("Git · main");
+  });
+
+  it.each([
+    "mouse leave",
+    "scroll",
+    "sidebar collapse",
+    "project collapse",
+    "project menu",
+  ])("discards a late project response after %s", async (cancellation) => {
+    const pending = deferred<ProjectGitSummaryV1 | null>();
+    const base = createProps();
+    const loadProjectGitSummary = vi.fn(() => pending.promise);
+    const props = createProps({
+      tree: { ...base.tree, loadProjectGitSummary },
+    });
+    const view = render(<SidebarNavigator {...props} />);
+    const project = screen.getByRole("button", { name: "Sunsetz" });
+
+    await act(async () => {
+      fireEvent.focus(project);
+      await Promise.resolve();
+    });
+    expect(loadProjectGitSummary).toHaveBeenCalledTimes(1);
+    expect(projectPreview()).not.toBeNull();
+
+    if (cancellation === "mouse leave") {
+      fireEvent.mouseLeave(project);
+    } else if (cancellation === "scroll") {
+      fireEvent.scroll(
+        view.container.querySelector(".overlay-scroll__viewport")!,
+      );
+    } else if (cancellation === "sidebar collapse") {
+      view.rerender(<SidebarNavigator {...props} collapsed />);
+    } else if (cancellation === "project collapse") {
+      fireEvent.click(
+        screen.getByRole("button", { name: "Collapse project" }),
+      );
+    } else {
+      fireEvent.click(
+        within(project.closest<HTMLElement>(".tree-l2")!).getByRole("button", {
+          name: "More",
+        }),
+      );
+    }
+    expect(projectPreview()).toBeNull();
+
+    await act(async () => {
+      pending.resolve(createProjectGitSummary());
+      await pending.promise;
+    });
+    expect(projectPreview()).toBeNull();
+  });
+
+  it("does not revive a project preview after unmount", async () => {
+    const pending = deferred<ProjectGitSummaryV1 | null>();
+    const base = createProps();
+    const loadProjectGitSummary = vi.fn(() => pending.promise);
+    const props = createProps({
+      tree: { ...base.tree, loadProjectGitSummary },
+    });
+    const view = render(<SidebarNavigator {...props} />);
+
+    await act(async () => {
+      fireEvent.focus(screen.getByRole("button", { name: "Sunsetz" }));
+      await Promise.resolve();
+    });
+    expect(loadProjectGitSummary).toHaveBeenCalledTimes(1);
+    view.unmount();
+
+    await act(async () => {
+      pending.resolve(createProjectGitSummary());
+      await pending.promise;
+    });
+    expect(projectPreview()).toBeNull();
+  });
+
+  it("keeps a newer project preview when an older response arrives late", async () => {
+    const first = deferred<ProjectGitSummaryV1 | null>();
+    const second = deferred<ProjectGitSummaryV1 | null>();
+    const base = createProps();
+    const projects = [
+      base.tree.projects[0]!,
+      {
+        ...base.tree.projects[0]!,
+        id: "project-2",
+        name: "Second",
+        path: "/tmp/second",
+        sessions: [],
+      },
+    ];
+    const loadProjectGitSummary = vi.fn((projectId: string) =>
+      projectId === "project-1" ? first.promise : second.promise,
+    );
+    const props = createProps({
+      tree: { ...base.tree, projects, loadProjectGitSummary },
+    });
+    render(<SidebarNavigator {...props} />);
+    const firstProject = screen.getByRole("button", { name: "Sunsetz" });
+    const secondProject = screen.getByRole("button", { name: "Second" });
+
+    await act(async () => {
+      fireEvent.focus(firstProject);
+      await Promise.resolve();
+      fireEvent.blur(firstProject);
+      fireEvent.focus(secondProject);
+      await Promise.resolve();
+    });
+    expect(loadProjectGitSummary).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      second.resolve(
+        createProjectGitSummary({
+          projectId: "project-2",
+          branch: "feature/current",
+        }),
+      );
+      await second.promise;
+    });
+    expect(projectPreview()?.textContent).toContain("Second");
+    expect(projectPreview()?.textContent).toContain("Git · feature/current");
+
+    await act(async () => {
+      first.resolve(createProjectGitSummary({ branch: "stale/main" }));
+      await first.promise;
+    });
+    expect(projectPreview()?.textContent).toContain("Second");
+    expect(projectPreview()?.textContent).toContain("Git · feature/current");
+    expect(projectPreview()?.textContent).not.toContain("stale/main");
   });
 
   it("does not leave a loading card when the Host has no preview", async () => {

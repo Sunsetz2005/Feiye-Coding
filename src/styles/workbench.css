@@ -236,6 +236,35 @@
   white-space: nowrap;
 }
 
+.sidebar-preview__git {
+  margin-top: 7px;
+  display: flex;
+  align-items: center;
+  gap: 5px 8px;
+  flex-wrap: wrap;
+  color: var(--text-tertiary);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.sidebar-preview__git-ref {
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar-preview__git-conflicts {
+  color: var(--danger);
+}
+
+.sidebar-preview__git-capped {
+  color: var(--text-tertiary);
+  font-weight: 650;
+}
+
 .sidebar-preview__warning {
   margin-top: 7px;
   color: var(--danger);
