@@ -9,6 +9,7 @@ import {
   buildSkillRangeOptions,
   defaultSkillMessageRange,
   parseSkillDraft,
+  skillDraftContentHash,
   validateSkillDraft,
 } from "./skillDraft";
 
@@ -31,6 +32,31 @@ const validSkillMd = [
 ].join("\n");
 
 describe("skill draft material", () => {
+  it("hashes the normalized final draft with the Rust field order", async () => {
+    await expect(
+      skillDraftContentHash({
+        name: " release-notes ",
+        description: " Create concise release notes. ",
+        skillMd: [
+          "---",
+          "name: release-notes",
+          "description: Create concise release notes.",
+          "---",
+          "",
+          "# Release notes",
+        ].join("\n"),
+        references: [
+          {
+            path: " references//checklist.md ",
+            content: "Use the checklist.",
+          },
+        ],
+      }),
+    ).resolves.toBe(
+      "8e7499be713ae7f182014a5b897b727b11f6730a8ca569110b2da49679123ed5",
+    );
+  });
+
   it("defaults to the full visible range and exposes selectable endpoints", () => {
     const messages: ChatMessage[] = [
       message({ id: "empty", role: "assistant" }),

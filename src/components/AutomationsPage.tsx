@@ -57,6 +57,7 @@ type FormState = {
   frequency: string;
   time: string;
   notify: string;
+  missedRunPolicy: "skip" | "run_once";
   enabled: boolean;
 };
 
@@ -69,6 +70,7 @@ const emptyForm = (modelId: string, effort: string): FormState => ({
   frequency: "daily",
   time: "09:00",
   notify: "all",
+  missedRunPolicy: "run_once",
   enabled: true,
 });
 
@@ -199,6 +201,8 @@ export function AutomationsPage({
       frequency: auto.frequency || "daily",
       time: auto.time || "09:00",
       notify: auto.notify || "all",
+      missedRunPolicy:
+        auto.missedRunPolicy === "skip" ? "skip" : "run_once",
       enabled: auto.enabled,
     });
     setPanelOpen(true);
@@ -237,6 +241,7 @@ export function AutomationsPage({
       time: form.time,
       weekdays: [],
       notify: form.notify,
+      missedRunPolicy: form.missedRunPolicy,
       nextRunAt,
     };
     try {
@@ -270,6 +275,8 @@ export function AutomationsPage({
             time: next.time,
             weekdays: next.weekdays,
             notify: next.notify,
+            missedRunPolicy:
+              next.missedRunPolicy === "skip" ? "skip" : "run_once",
             nextRunAt: nr,
           });
         }
@@ -366,6 +373,11 @@ export function AutomationsPage({
     { value: "all", label: t("automations.notify.all") },
     { value: "failures", label: t("automations.notify.failures") },
     { value: "none", label: t("automations.notify.none") },
+  ];
+
+  const missedRunOptions = [
+    { value: "run_once", label: t("automations.missedRun.runOnce") },
+    { value: "skip", label: t("automations.missedRun.skip") },
   ];
 
   return (
@@ -779,6 +791,20 @@ export function AutomationsPage({
                   options={notifyOptions}
                   onChange={(v) => setForm((f) => ({ ...f, notify: v }))}
                   aria-label={t("automations.field.notify")}
+                />
+              </div>
+              <div className="auto-field auto-field--row">
+                <span>{t("automations.field.missedRun")}</span>
+                <Select
+                  value={form.missedRunPolicy}
+                  options={missedRunOptions}
+                  onChange={(v) =>
+                    setForm((f) => ({
+                      ...f,
+                      missedRunPolicy: v === "skip" ? "skip" : "run_once",
+                    }))
+                  }
+                  aria-label={t("automations.field.missedRun")}
                 />
               </div>
             </div>

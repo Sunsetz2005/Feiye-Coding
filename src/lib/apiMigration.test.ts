@@ -118,6 +118,25 @@ describe("migration API contracts", () => {
       overwrite: false,
     });
     await api.skillCandidateRejectV1("c1");
+    const skillDecision = { id: "c1", expectedContentHash: "b".repeat(64) };
+    await api.skillCandidateApproveV2({
+      ...skillDecision,
+      scope: "user",
+      overwrite: false,
+    });
+    await api.skillCandidateRejectV2(skillDecision);
+    await api.skillCandidateCancelV2(skillDecision);
+    const memoryMutation = { id: "m1", expectedContentHash: "a".repeat(64) };
+    await api.memoryCandidatesListV1();
+    await api.memoryCandidateCreateV1({
+      type: "user_preference",
+      content: "Prefer concise answers.",
+      source: { sessionId: "s1", messageId: "msg1" },
+    });
+    await api.memoryCandidateApproveV1(memoryMutation);
+    await api.memoryCandidateRejectV1(memoryMutation);
+    await api.memoryCandidateSupersedeV1(memoryMutation);
+    await api.memoryCandidateDeleteV1(memoryMutation);
     await api.resourceOpenV1("/project/a.png");
     await api.resourceReadV1("handle");
     await api.sessionSearchV1("migration");
@@ -130,9 +149,16 @@ describe("migration API contracts", () => {
     await api.automationClaimBindV1("claim", "session");
     await api.automationClaimCompleteV1("claim", false);
     await api.automationClaimCompleteV1("claim", true, "ignored");
+    await api.settingsPatchV1({ theme: "light", manualCliPath: null });
     expect(invokeMock).toHaveBeenCalledWith("session_search_v1", {
       query: "migration",
       limit: 40,
+    });
+    expect(invokeMock).toHaveBeenCalledWith("memory_candidate_approve_v1", {
+      request: memoryMutation,
+    });
+    expect(invokeMock).toHaveBeenCalledWith("skill_candidate_cancel_v2", {
+      request: skillDecision,
     });
     expect(invokeMock).toHaveBeenCalledWith("runtime_plugins_catalog_v1", {
       query: "hooks",
@@ -144,6 +170,9 @@ describe("migration API contracts", () => {
       claimId: "claim",
       success: false,
       error: null,
+    });
+    expect(invokeMock).toHaveBeenCalledWith("settings_patch_v1", {
+      patch: { theme: "light", manualCliPath: null },
     });
   });
 });

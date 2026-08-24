@@ -44,6 +44,7 @@ import * as api from "@/lib/api";
 import { AccountPanel } from "@/components/AccountPanel";
 import { ProvidersPanel } from "@/components/ProvidersPanel";
 import { ExtensionsPanel } from "@/components/ExtensionsPanel";
+import { MemoryCandidatesPanel } from "@/components/MemoryCandidatesPanel";
 import {
   createT,
   resolveLocale,
@@ -161,6 +162,8 @@ export interface SettingsPageProps {
   projectPath?: string | null;
   /** After skill enable toggle — refresh slash palette in App. */
   onSkillsPrefsChanged?: () => void;
+  /** Provenance for a user-authored, review-only memory candidate. */
+  memorySource?: { sessionId: string; messageId: string } | null;
 }
 
 function NavIcon({
@@ -421,6 +424,7 @@ export function SettingsPage({
   onDeleteArchivedSessions,
   projectPath = null,
   onSkillsPrefsChanged,
+  memorySource = null,
 }: SettingsPageProps) {
   const [query, setQuery] = useState("");
   const [accountTab, setAccountTab] = useState<"official" | "providers">(
@@ -937,6 +941,12 @@ export function SettingsPage({
                 </div>
               )}
             </div>
+            {api.isTauri() ? (
+              <MemoryCandidatesPanel
+                locale={resolveLocale(locale)}
+                source={memorySource}
+              />
+            ) : null}
           </>
         )}
 

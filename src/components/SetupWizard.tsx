@@ -183,9 +183,7 @@ export function SetupWizard({
     try {
       const path = await api.pickCliBinary();
       if (!path) return;
-      await api.settingsGet().then((s) =>
-        api.settingsSet({ ...s, manualCliPath: path }),
-      );
+      await api.settingsPatchV1({ manualCliPath: path });
       const next = await recheck(path);
       if (next?.found) {
         setStep("account");
@@ -217,9 +215,7 @@ export function SetupWizard({
   const finishWizard = useCallback(
     async (opts: { authDeferred: boolean; authOk: boolean }) => {
       try {
-        const s = await api.settingsGet();
-        await api.settingsSet({
-          ...s,
+        await api.settingsPatchV1({
           setupWizardCompleted: true,
           authSetupDeferred: opts.authDeferred && !opts.authOk,
           onboardingDone: true,

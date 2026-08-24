@@ -103,6 +103,7 @@ import { TaskProgressRail } from "@/components/lobe-chat/TaskProgressRail";
 import { SkillRecorderSheet } from "@/components/SkillRecorderSheet";
 import {
   parseSkillDraft,
+  skillDraftContentHash,
   type SkillDraft,
   type SkillGenerationRequest,
 } from "@/lib/skillDraft";
@@ -1047,8 +1048,7 @@ export default function App() {
       if (cli.found && !wizardCompleted && legacyDone) {
         // Migrate older installs that already finished the account modal.
         try {
-          await api.settingsSet({
-            ...settings,
+          await api.settingsPatchV1({
             setupWizardCompleted: true,
             authSetupDeferred: !!settings.setupSkipped && !authOk,
           });
@@ -6401,6 +6401,121 @@ export default function App() {
     }
   }, [appView, settingsSection, refreshAccount, refreshSavedAccounts]);
 
+  const [memoryCandidateSource, setMemoryCandidateSource] = useState<{
+    sessionId: string;
+    messageId: string;
+  } | null>(null);
+  useEffect(() => {
+    const sessionId = session.sessionId;
+    if (appView !== "settings" || !sessionId) {
+      setMemoryCandidateSource(null);
+      return;
+    }
+    let cancelled = false;
+    void api
+      .sessionMessages(sessionId)
+      .then((stored) => {
+        if (cancelled) return;
+        const message = [...stored]
+          .reverse()
+          .find((item) => item.role === "user" && item.id);
+        setMemoryCandidateSource(
+          message ? { sessionId, messageId: message.id } : null,
+        );
+      })
+      .catch(() => {
+        if (!cancelled) setMemoryCandidateSource(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [appView, session.sessionId]);
+
+  const settingsPatchSequenceRef = useRef(0);
+  const settingsPatchOwnersRef = useRef(new Map<keyof api.AppSettings, number>());
+  const applyAuthoritativeSettingFields = useCallback(
+    (stored: api.AppSettings, keys: ReadonlySet<keyof api.AppSettings>) => {
+      if (keys.has("locale")) setLocale(resolveLocale(stored.locale));
+      if (keys.has("sessionDataMode")) {
+        setSessionDataMode(stored.sessionDataMode || "independent");
+      }
+      if (keys.has("composerPrefsScope")) {
+        const storedScope = stored.composerPrefsScope;
+        setPrefsScope(
+          storedScope && isValidPrefsScope(storedScope) ? storedScope : "global",
+        );
+      }
+      if (keys.has("manualCliPath")) {
+        setManualCliPath(stored.manualCliPath || "");
+      }
+      if (keys.has("acpServerAddr")) {
+        setAcpServerAddr(stored.acpServerAddr || "");
+      }
+      if (keys.has("maxConcurrentAgents")) {
+        setMaxConcurrentAgents(
+          typeof stored.maxConcurrentAgents === "number"
+            ? Math.max(1, Math.min(8, Math.round(stored.maxConcurrentAgents)))
+            : 3,
+        );
+      }
+      if (keys.has("agentIdleMinutes")) {
+        setAgentIdleMinutes(
+          typeof stored.agentIdleMinutes === "number"
+            ? Math.max(1, Math.min(1440, Math.round(stored.agentIdleMinutes)))
+            : 30,
+        );
+      }
+      if (keys.has("streamStallSeconds")) {
+        setStreamStallSeconds(
+          typeof stored.streamStallSeconds === "number"
+            ? Math.max(15, Math.min(900, Math.round(stored.streamStallSeconds)))
+            : 120,
+        );
+      }
+      if (keys.has("storeApiKeysInKeychain")) {
+        setStoreApiKeysInKeychain(!!stored.storeApiKeysInKeychain);
+      }
+      if (keys.has("defaultOpenTarget")) {
+        setDefaultOpenTarget(stored.defaultOpenTarget || "finder");
+      }
+      if (keys.has("sandboxProfile")) {
+        setSandboxProfile(normalizeSandboxProfile(stored.sandboxProfile));
+      }
+    },
+    [],
+  );
+  const patchSettingsSafely = useCallback(
+    async (patch: Partial<api.AppSettings>) => {
+      const sequence = ++settingsPatchSequenceRef.current;
+      const keys = Object.keys(patch) as Array<keyof api.AppSettings>;
+      for (const key of keys) settingsPatchOwnersRef.current.set(key, sequence);
+      const currentKeys = () =>
+        new Set(
+          keys.filter(
+            (key) => settingsPatchOwnersRef.current.get(key) === sequence,
+          ),
+        );
+      try {
+        const stored = await api.settingsPatchV1(patch);
+        applyAuthoritativeSettingFields(stored, currentKeys());
+        return stored;
+      } catch (error) {
+        const owned = currentKeys();
+        if (owned.size > 0) {
+          try {
+            const stored = await api.settingsGet();
+            applyAuthoritativeSettingFields(stored, owned);
+          } catch {
+            // Keep the explicit error visible even if authoritative reload fails.
+          }
+          showToast(String(error), 4500);
+        }
+        return null;
+      }
+    },
+    [applyAuthoritativeSettingFields, showToast],
+  );
+
   const settingsLabels = useMemo(() => {
     const keys = [
       "settings.backToApp",
@@ -6583,6 +6698,12 @@ export default function App() {
         }}
       />
 
+      {toast && (
+        <div className="app-toast" role="status">
+          {toast}
+        </div>
+      )}
+
       {appGate === "loading" && (
         <div className="setup-gate" data-testid="setup-booting">
           <div className="setup-gate__drag" data-tauri-drag-region />
@@ -6647,11 +6768,7 @@ export default function App() {
           onLocale={(v) => {
             const next = resolveLocale(v);
             setLocale(next);
-            void api.settingsGet().then(async (s) => {
-              await api.settingsSet({ ...s, locale: next });
-              // settings_set also refreshes tray; call again so UI stays in sync if invoke fails mid-way.
-              void api.trayRefresh();
-            });
+            void patchSettingsSafely({ locale: next });
           }}
           theme={theme}
           onTheme={applyThemeChoice}
@@ -6662,9 +6779,7 @@ export default function App() {
           onSessionDataMode={(v) => {
             const commit = () => {
               setSessionDataMode(v);
-              void api.settingsGet().then((s) =>
-                api.settingsSet({ ...s, sessionDataMode: v }),
-              );
+              void patchSettingsSafely({ sessionDataMode: v });
             };
             // Tauri WebView: window.confirm is unreliable (often always false).
             if (v === "shared") {
@@ -6688,9 +6803,7 @@ export default function App() {
           onPrefsScope={(v) => {
             if (!isValidPrefsScope(v)) return;
             setPrefsScope(v);
-            void api.settingsGet().then((s) =>
-              api.settingsSet({ ...s, composerPrefsScope: v }),
-            );
+            void patchSettingsSafely({ composerPrefsScope: v });
             void api
               .composerPrefsResolve({
                 projectId: activeProject?.id ?? null,
@@ -6703,9 +6816,7 @@ export default function App() {
           manualCliPath={manualCliPath}
           onManualCliPath={setManualCliPath}
           onCliBlur={(v) => {
-            void api.settingsGet().then((s) =>
-              api.settingsSet({ ...s, manualCliPath: v || null }),
-            );
+            void patchSettingsSafely({ manualCliPath: v || null });
             void api.probeCli(v || undefined).then((cli) => {
               setCliInfo({
                 found: cli.found,
@@ -6724,44 +6835,27 @@ export default function App() {
           acpServerAddr={acpServerAddr}
           onAcpServerAddr={(v) => {
             setAcpServerAddr(v);
-            void api.settingsGet().then((s) =>
-              api.settingsSet({ ...s, acpServerAddr: v.trim() || null }),
-            );
+            void patchSettingsSafely({ acpServerAddr: v.trim() || null });
           }}
           maxConcurrentAgents={maxConcurrentAgents}
           onMaxConcurrentAgents={(v) => {
             setMaxConcurrentAgents(v);
-            void api.settingsGet().then((s) =>
-              api.settingsSet({ ...s, maxConcurrentAgents: v }),
-            );
+            void patchSettingsSafely({ maxConcurrentAgents: v });
           }}
           agentIdleMinutes={agentIdleMinutes}
           onAgentIdleMinutes={(v) => {
             setAgentIdleMinutes(v);
-            void api.settingsGet().then((s) =>
-              api.settingsSet({ ...s, agentIdleMinutes: v }),
-            );
+            void patchSettingsSafely({ agentIdleMinutes: v });
           }}
           streamStallSeconds={streamStallSeconds}
           onStreamStallSeconds={(v) => {
             setStreamStallSeconds(v);
-            void api.settingsGet().then((s) =>
-              api.settingsSet({ ...s, streamStallSeconds: v }),
-            );
+            void patchSettingsSafely({ streamStallSeconds: v });
           }}
           storeApiKeysInKeychain={storeApiKeysInKeychain}
           onStoreApiKeysInKeychain={(v) => {
-            const prev = storeApiKeysInKeychain;
             setStoreApiKeysInKeychain(v);
-            void api
-              .settingsGet()
-              .then((s) =>
-                api.settingsSet({ ...s, storeApiKeysInKeychain: v }),
-              )
-              .catch((e) => {
-                setStoreApiKeysInKeychain(prev);
-                showToast(String(e), 4500);
-              });
+            void patchSettingsSafely({ storeApiKeysInKeychain: v });
           }}
           cliInfo={cliInfo}
           onDoctor={() => void openDoctor()}
@@ -6787,9 +6881,7 @@ export default function App() {
           defaultOpenTarget={defaultOpenTarget}
           onDefaultOpenTarget={(v) => {
             setDefaultOpenTarget(v);
-            void api.settingsGet().then((s) =>
-              api.settingsSet({ ...s, defaultOpenTarget: v }),
-            );
+            void patchSettingsSafely({ defaultOpenTarget: v });
           }}
           archivedGroups={archivedGroups}
           onRestoreArchivedSessions={(ids) => {
@@ -6808,12 +6900,11 @@ export default function App() {
           onSkillsPrefsChanged={() =>
             setSkillsReloadToken((n) => n + 1)
           }
+          memorySource={memoryCandidateSource}
           sandboxProfile={sandboxProfile}
           onSandboxProfile={(v) => {
             setSandboxProfile(v);
-            void api.settingsGet().then((s) =>
-              api.settingsSet({ ...s, sandboxProfile: v }),
-            );
+            void patchSettingsSafely({ sandboxProfile: v });
           }}
           onProviderActivated={() => {
             // Hot-reload Sunsetz Runtime: drop live ACP so next send re-spawns with new GROK_HOME config.
@@ -7006,11 +7097,6 @@ export default function App() {
                 <strong>{tr("composer.dropAttachTitle")}</strong>
                 <span>{tr("composer.dropAttachHint")}</span>
               </div>
-            </div>
-          )}
-          {toast && (
-            <div className="app-toast" role="status">
-              {toast}
             </div>
           )}
           {(() => {
@@ -8334,14 +8420,24 @@ export default function App() {
             const projectPath =
               scope === "project" ? activeProject?.path ?? null : null;
             if (skillCandidate) {
-              await api.skillCandidateApproveV1({
+              const request = {
                 id: skillCandidate.id,
                 scope,
                 projectPath,
                 draft,
                 overwrite,
                 userConfirmedOverwrite: overwrite,
-              });
+              };
+              if (skillCandidate.reviewContentHash) {
+                const finalContentHash = await skillDraftContentHash(draft);
+                await api.skillCandidateApproveV2({
+                  ...request,
+                  expectedContentHash: skillCandidate.reviewContentHash,
+                  finalContentHash,
+                });
+              } else {
+                await api.skillCandidateApproveV1(request);
+              }
             } else {
               await api.skillDraftSave({
                 ...draft,

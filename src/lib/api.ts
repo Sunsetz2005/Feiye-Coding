@@ -291,17 +291,18 @@ export interface SkillDraftSaveResult {
 export interface SkillCandidateV1 {
   version: 1;
   id: string;
-  status: "pending" | "approved" | "rejected";
+  status: "pending" | "approved" | "rejected" | "cancelled";
   createdAt: string;
   updatedAt: string;
   contentHash: string;
+  reviewContentHash?: string | null;
   source: {
     sessionId: string;
     sessionTitle: string;
     messageIds: string[];
   };
   owner: {
-    kind: "host_generated" | string;
+    kind: "host_candidate" | "host_generated" | string;
     namespace: string;
     mayOverwriteExternal: false;
   };
@@ -312,6 +313,14 @@ export interface SkillCandidateV1 {
     references: Array<{ path: string; content: string }>;
   };
   approvedPath?: string | null;
+  approvedContentHash?: string | null;
+  auditEvents?: Array<{
+    version: 2;
+    candidateId: string;
+    status: SkillCandidateV1["status"];
+    contentHash: string;
+    occurredAt: string;
+  }>;
 }
 
 /** Persist a reviewed skill through the Host's validated atomic writer. */
@@ -336,8 +345,98 @@ export async function skillCandidateApproveV1(request: {
   return invoke<SkillDraftSaveResult>("skill_candidate_approve_v1", { request });
 }
 
+export async function skillCandidateApproveV2(request: {
+  id: string;
+  expectedContentHash: string;
+  finalContentHash?: string | null;
+  scope: "project" | "user";
+  projectPath?: string | null;
+  draft?: SkillCandidateV1["draft"] | null;
+  overwrite?: boolean;
+  userConfirmedOverwrite?: boolean;
+}) {
+  return invoke<SkillDraftSaveResult>("skill_candidate_approve_v2", { request });
+}
+
 export async function skillCandidateRejectV1(id: string) {
   return invoke<SkillCandidateV1>("skill_candidate_reject_v1", { id });
+}
+
+export async function skillCandidateRejectV2(request: {
+  id: string;
+  expectedContentHash: string;
+}) {
+  return invoke<SkillCandidateV1>("skill_candidate_reject_v2", { request });
+}
+
+export async function skillCandidateCancelV2(request: {
+  id: string;
+  expectedContentHash: string;
+}) {
+  return invoke<SkillCandidateV1>("skill_candidate_cancel_v2", { request });
+}
+
+export type MemoryCandidateStatusV1 =
+  | "pending"
+  | "approved"
+  | "rejected"
+  | "superseded";
+export type MemoryCandidateTypeV1 =
+  | "user_preference"
+  | "project_fact"
+  | "workflow_hint";
+
+export interface MemoryCandidateV1 {
+  id: string;
+  status: MemoryCandidateStatusV1;
+  type: MemoryCandidateTypeV1;
+  content: string;
+  contentHash: string;
+  source: { sessionId: string; messageId: string };
+  ownership: "host_candidate";
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface MemoryCandidateMutationRequestV1 {
+  id: string;
+  expectedContentHash: string;
+}
+
+export async function memoryCandidatesListV1() {
+  return invoke<MemoryCandidateV1[]>("memory_candidates_list_v1");
+}
+
+export async function memoryCandidateCreateV1(request: {
+  type: MemoryCandidateTypeV1;
+  content: string;
+  source: { sessionId: string; messageId: string };
+}) {
+  return invoke<MemoryCandidateV1>("memory_candidate_create_v1", { request });
+}
+
+export async function memoryCandidateApproveV1(
+  request: MemoryCandidateMutationRequestV1,
+) {
+  return invoke<MemoryCandidateV1>("memory_candidate_approve_v1", { request });
+}
+
+export async function memoryCandidateRejectV1(
+  request: MemoryCandidateMutationRequestV1,
+) {
+  return invoke<MemoryCandidateV1>("memory_candidate_reject_v1", { request });
+}
+
+export async function memoryCandidateSupersedeV1(
+  request: MemoryCandidateMutationRequestV1,
+) {
+  return invoke<MemoryCandidateV1>("memory_candidate_supersede_v1", { request });
+}
+
+export async function memoryCandidateDeleteV1(
+  request: MemoryCandidateMutationRequestV1,
+) {
+  return invoke<MemoryCandidateV1>("memory_candidate_delete_v1", { request });
 }
 
 export async function sessionGetState(): Promise<SessionSnapshot> {
@@ -1208,6 +1307,11 @@ export async function settingsSet(settings: Record<string, unknown>) {
   return invoke("settings_set", { settings });
 }
 
+/** Atomically update explicit settings fields without replacing concurrent edits. */
+export async function settingsPatchV1(patch: Partial<AppSettings>) {
+  return invoke<AppSettings>("settings_patch_v1", { patch });
+}
+
 /** Update live Host permission policy + persist at configured prefs scope. */
 export async function sessionSetPolicy(
   policy: string,
@@ -1920,6 +2024,7 @@ export interface AutomationDto {
   time: string;
   weekdays: number[];
   notify: string;
+  missedRunPolicy: "skip" | "run_once" | string;
   createdAt: string;
   updatedAt: string;
   lastRunAt?: string | null;
@@ -1946,6 +2051,7 @@ export interface AutomationInputDto {
   time?: string;
   weekdays?: number[];
   notify?: string;
+  missedRunPolicy?: "skip" | "run_once";
   nextRunAt?: string | null;
 }
 
@@ -1976,6 +2082,7 @@ export async function automationCreate(
       time: input.time ?? "09:00",
       weekdays: input.weekdays ?? [],
       notify: input.notify ?? "all",
+      missedRunPolicy: input.missedRunPolicy ?? "run_once",
       createdAt: now,
       updatedAt: now,
       lastRunAt: null as string | null,
@@ -2021,6 +2128,7 @@ export async function automationUpdate(
       time: input.time ?? prev.time,
       weekdays: input.weekdays ?? prev.weekdays,
       notify: input.notify ?? prev.notify,
+      missedRunPolicy: input.missedRunPolicy ?? prev.missedRunPolicy ?? "run_once",
       updatedAt: new Date().toISOString(),
       nextRunAt:
         input.nextRunAt !== undefined

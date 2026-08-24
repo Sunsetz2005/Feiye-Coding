@@ -29,6 +29,37 @@ export interface SkillDraft {
   references: SkillDraftReference[];
 }
 
+/**
+ * Hash the exact normalized draft object serialized by Rust's
+ * `SkillCandidateDraftV1`. This binds approval to the edited content while the
+ * candidate's review hash remains the stale-window CAS token.
+ */
+export async function skillDraftContentHash(draft: SkillDraft): Promise<string> {
+  const validation = validateSkillDraft(draft);
+  if (!validation.valid) {
+    throw new Error(validation.errors.join("\n"));
+  }
+  const normalized = validation.draft;
+  const canonical = JSON.stringify({
+    name: normalized.name,
+    description: normalized.description,
+    skillMd: normalized.skillMd,
+    references: normalized.references.map((reference) => ({
+      path: reference.path,
+      content: reference.content,
+    })),
+  });
+  const subtle = globalThis.crypto?.subtle;
+  if (!subtle) throw new Error("SHA-256 is unavailable in this WebView");
+  const digest = await subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(canonical),
+  );
+  return Array.from(new Uint8Array(digest), (byte) =>
+    byte.toString(16).padStart(2, "0"),
+  ).join("");
+}
+
 export interface SkillMessageRange {
   /** Inclusive index into the original session message array. */
   start: number;

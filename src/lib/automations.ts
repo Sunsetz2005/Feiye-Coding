@@ -5,6 +5,7 @@
 
 export type AutomationFrequency = "daily" | "weekly" | "weekdays" | "once";
 export type AutomationNotify = "all" | "failures" | "none";
+export type AutomationMissedRunPolicy = "skip" | "run_once";
 
 export interface Automation {
   id: string;
@@ -20,6 +21,7 @@ export interface Automation {
   /** For weekly: 0=Sun … 6=Sat */
   weekdays: number[];
   notify: AutomationNotify | string;
+  missedRunPolicy: AutomationMissedRunPolicy | string;
   createdAt: string;
   updatedAt: string;
   lastRunAt?: string | null;
@@ -37,6 +39,7 @@ export interface AutomationInput {
   time?: string;
   weekdays?: number[];
   notify?: string;
+  missedRunPolicy?: AutomationMissedRunPolicy;
   nextRunAt?: string | null;
 }
 
@@ -48,7 +51,13 @@ export function loadAutomationsLocal(): Automation[] {
     const raw = localStorage.getItem(LS_KEY);
     if (!raw) return [];
     const list = JSON.parse(raw) as Automation[];
-    return Array.isArray(list) ? list : [];
+    return Array.isArray(list)
+      ? list.map((automation) => ({
+          ...automation,
+          missedRunPolicy:
+            automation.missedRunPolicy === "skip" ? "skip" : "run_once",
+        }))
+      : [];
   } catch {
     return [];
   }

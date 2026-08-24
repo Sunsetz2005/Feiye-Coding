@@ -21,6 +21,7 @@ import {
   vi,
 } from "vitest";
 import type { SidebarNavigatorProps } from "@/components/SidebarNavigator";
+import type { SettingsPageProps } from "@/components/SettingsPage";
 
 type EventHandler = (payload: unknown) => void;
 
@@ -30,7 +31,7 @@ const apiListenerCapture = vi.hoisted(() => ({
   resolvePlan: vi.fn(async () => undefined),
   sessionState: {
     sessionId: null as string | null,
-    agentSessionId: null,
+    agentSessionId: null as string | null,
     state: "idle",
     lastError: null,
     streamingMessageId: null,
@@ -56,7 +57,59 @@ const apiListenerCapture = vi.hoisted(() => ({
   automationBind: vi.fn(async () => undefined),
   automationComplete: vi.fn(async () => undefined),
   sessionSearch: vi.fn(async () => [] as Array<Record<string, unknown>>),
+  sessionMessages: vi.fn(async () => [] as Array<Record<string, unknown>>),
+  skillApprove: vi.fn(async () => ({
+    path: "/tmp/migration-helper",
+    slug: "migration-helper",
+    scope: "user",
+    overwritten: false,
+  })),
+  settingsGet: vi.fn(async () => ({
+    theme: "dark",
+    locale: "zh",
+    sessionDataMode: "independent",
+    manualCliPath: null,
+    permissionPolicy: "ask",
+    modelId: null,
+    effort: "medium",
+    mode: "agent",
+    onboardingDone: true,
+    setupSkipped: false,
+    setupWizardCompleted: true,
+    authSetupDeferred: false,
+    defaultOpenTarget: "finder",
+    composerPrefsScope: "global",
+    acpServerAddr: null,
+    maxConcurrentAgents: 3,
+    agentIdleMinutes: 30,
+    streamStallSeconds: 120,
+    sandboxProfile: "off",
+    storeApiKeysInKeychain: false,
+  })),
   settingsSet: vi.fn(async () => undefined),
+  settingsPatch: vi.fn(async (patch: Record<string, unknown>) => ({
+    theme: "dark",
+    locale: "zh",
+    sessionDataMode: "independent",
+    manualCliPath: null,
+    permissionPolicy: "ask",
+    modelId: null,
+    effort: "medium",
+    mode: "agent",
+    onboardingDone: true,
+    setupSkipped: false,
+    setupWizardCompleted: true,
+    authSetupDeferred: false,
+    defaultOpenTarget: "finder",
+    composerPrefsScope: "global",
+    acpServerAddr: null,
+    maxConcurrentAgents: 3,
+    agentIdleMinutes: 30,
+    streamStallSeconds: 120,
+    sandboxProfile: "off",
+    storeApiKeysInKeychain: false,
+    ...patch,
+  })),
 }));
 
 vi.mock("@/lib/api", async (importOriginal) => {
@@ -75,10 +128,7 @@ vi.mock("@/lib/api", async (importOriginal) => {
     sessionResolvePlan: apiListenerCapture.resolvePlan,
     projectsList: vi.fn(async () => []),
     sessionsList: vi.fn(async () => apiListenerCapture.sessions),
-    settingsGet: vi.fn(async () => ({
-      locale: "zh",
-      setupWizardCompleted: true,
-    })),
+    settingsGet: apiListenerCapture.settingsGet,
     probeCli: vi.fn(async () => ({
       found: true,
       path: "/test/sunsetz",
@@ -101,7 +151,9 @@ vi.mock("@/lib/api", async (importOriginal) => {
     skillCandidatesListV1: vi.fn(async () =>
       apiListenerCapture.candidateResponses.shift() ?? [],
     ),
+    skillCandidateApproveV2: apiListenerCapture.skillApprove,
     sessionSearchV1: apiListenerCapture.sessionSearch,
+    sessionMessages: apiListenerCapture.sessionMessages,
     sessionCreate: apiListenerCapture.sessionCreate,
     sessionDisconnect: apiListenerCapture.sessionDisconnect,
     sessionConnect: apiListenerCapture.sessionConnect,
@@ -109,6 +161,7 @@ vi.mock("@/lib/api", async (importOriginal) => {
     automationClaimBindV1: apiListenerCapture.automationBind,
     automationClaimCompleteV1: apiListenerCapture.automationComplete,
     settingsSet: apiListenerCapture.settingsSet,
+    settingsPatchV1: apiListenerCapture.settingsPatch,
     trayRefresh: vi.fn(async () => undefined),
   };
 });
@@ -116,6 +169,22 @@ vi.mock("@/lib/api", async (importOriginal) => {
 vi.mock("@/components/ResourceViewer", () => ({
   ResourceViewer: () => <aside data-testid="resource-viewer-mock" />,
 }));
+
+const settingsCapture = vi.hoisted(() => ({
+  current: null as SettingsPageProps | null,
+}));
+
+vi.mock("@/components/SettingsPage", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("@/components/SettingsPage")>();
+  return {
+    ...actual,
+    SettingsPage: (props: SettingsPageProps) => {
+      settingsCapture.current = props;
+      return <actual.SettingsPage {...props} />;
+    },
+  };
+});
 
 vi.mock("@tauri-apps/api/event", () => ({
   listen: vi.fn(async () => () => undefined),
@@ -203,6 +272,7 @@ afterEach(() => {
   cleanup();
   localStorage.clear();
   sidebarCapture.current = null;
+  settingsCapture.current = null;
   apiListenerCapture.handlers.clear();
   apiListenerCapture.tauri = false;
   apiListenerCapture.resolvePlan.mockClear();
@@ -213,7 +283,11 @@ afterEach(() => {
   apiListenerCapture.automationBind.mockClear();
   apiListenerCapture.automationComplete.mockClear();
   apiListenerCapture.sessionSearch.mockClear();
+  apiListenerCapture.sessionMessages.mockClear();
+  apiListenerCapture.skillApprove.mockClear();
   apiListenerCapture.settingsSet.mockClear();
+  apiListenerCapture.settingsGet.mockClear();
+  apiListenerCapture.settingsPatch.mockClear();
   delete (window as Window & { __TAURI_INTERNALS__?: unknown })
     .__TAURI_INTERNALS__;
 });
@@ -281,9 +355,9 @@ describe("App workbench integration", () => {
       fireEvent.change(settingsSearch, {
         target: { value: "setting-that-does-not-exist" },
       });
-      expect(screen.getByRole("status").textContent).toMatch(
-        /No matching settings|没有匹配的设置/,
-      );
+      expect(
+        screen.getByText(/No matching settings|没有匹配的设置/),
+      ).toBeTruthy();
     },
     20_000,
   );
@@ -336,6 +410,125 @@ describe("App workbench integration", () => {
         ).toBeNull();
       });
       expect(invoke).toHaveBeenCalledTimes(2);
+    },
+    20_000,
+  );
+
+  it(
+    "patches only the settings field changed by each settings control",
+    async () => {
+      const { default: App } = await import("./App");
+      render(<App />);
+      await screen.findByTestId("workbench-shell");
+      const sidebar = sidebarCapture.current;
+      expect(sidebar).not.toBeNull();
+      if (!sidebar) return;
+
+      act(() => sidebar.account.onSettings());
+      await waitFor(() => expect(settingsCapture.current).not.toBeNull());
+      const settings = settingsCapture.current;
+      if (!settings) return;
+
+      act(() => {
+        settings.onLocale("en");
+        settings.onSessionDataMode("independent");
+        settings.onPrefsScope?.("project");
+        settings.onCliBlur("/opt/sunsetz/runtime");
+        settings.onAcpServerAddr("localhost:9339");
+        settings.onMaxConcurrentAgents?.(4);
+        settings.onAgentIdleMinutes?.(15);
+        settings.onStreamStallSeconds?.(90);
+        settings.onStoreApiKeysInKeychain?.(true);
+        settings.onDefaultOpenTarget?.("finder");
+        settings.onSandboxProfile?.("read_only");
+      });
+
+      await waitFor(() => {
+        expect(apiListenerCapture.settingsPatch.mock.calls).toEqual(
+          expect.arrayContaining([
+            [{ locale: "en" }],
+            [{ sessionDataMode: "independent" }],
+            [{ composerPrefsScope: "project" }],
+            [{ manualCliPath: "/opt/sunsetz/runtime" }],
+            [{ acpServerAddr: "localhost:9339" }],
+            [{ maxConcurrentAgents: 4 }],
+            [{ agentIdleMinutes: 15 }],
+            [{ streamStallSeconds: 90 }],
+            [{ storeApiKeysInKeychain: true }],
+            [{ defaultOpenTarget: "finder" }],
+            [{ sandboxProfile: "read_only" }],
+          ]),
+        );
+      });
+    },
+    20_000,
+  );
+
+  it(
+    "rolls sandbox UI back to authoritative Host settings when patching fails",
+    async () => {
+      const { default: App } = await import("./App");
+      render(<App />);
+      await screen.findByTestId("workbench-shell");
+      const sidebar = sidebarCapture.current;
+      if (!sidebar) throw new Error("sidebar missing");
+      act(() => sidebar.account.onSettings());
+      await waitFor(() => expect(settingsCapture.current).not.toBeNull());
+
+      apiListenerCapture.settingsPatch.mockRejectedValueOnce(
+        new Error("LOCK_BUSY: settings"),
+      );
+      act(() => settingsCapture.current?.onSandboxProfile?.("read_only"));
+
+      await waitFor(() => {
+        expect(settingsCapture.current?.sandboxProfile).toBe("off");
+        expect(screen.getByText(/LOCK_BUSY: settings/)).toBeTruthy();
+      });
+    },
+    20_000,
+  );
+
+  it(
+    "uses the persisted Host user message id as memory provenance",
+    async () => {
+      apiListenerCapture.tauri = true;
+      apiListenerCapture.sessionState = {
+        ...apiListenerCapture.sessionState,
+        sessionId: "session-memory",
+        agentSessionId: "agent-memory",
+        state: "ready",
+      };
+      apiListenerCapture.sessionMessages.mockResolvedValueOnce([
+        {
+          id: "host-user-uuid",
+          role: "user",
+          content: "remember this",
+          createdAt: "2026-08-24T00:00:00Z",
+        },
+        {
+          id: "host-assistant-uuid",
+          role: "assistant",
+          content: "done",
+          createdAt: "2026-08-24T00:00:01Z",
+        },
+      ]);
+
+      const { default: App } = await import("./App");
+      render(<App />);
+      await screen.findByTestId("workbench-shell");
+      const sidebar = sidebarCapture.current;
+      if (!sidebar) throw new Error("sidebar missing");
+      act(() => sidebar.account.onSettings());
+
+      await waitFor(() => {
+        expect(apiListenerCapture.sessionMessages).toHaveBeenCalledWith(
+          "session-memory",
+        );
+        expect(settingsCapture.current?.memorySource).toEqual({
+          sessionId: "session-memory",
+          messageId: "host-user-uuid",
+        });
+      });
     },
     20_000,
   );
@@ -648,7 +841,7 @@ describe("App workbench integration", () => {
   );
 
   it(
-    "opens a newly generated pending Skill candidate for review",
+    "reviews an edited Skill candidate with separate stale and final hashes",
     async () => {
       apiListenerCapture.tauri = true;
       apiListenerCapture.sessionState = {
@@ -663,6 +856,7 @@ describe("App workbench integration", () => {
         createdAt: "2026-01-01T00:00:00Z",
         updatedAt: "2026-01-01T00:00:00Z",
         contentHash: "hash",
+        reviewContentHash: "a".repeat(64),
         source: { sessionId: "s1", sessionTitle: "Task", messageIds: ["u", "a"] },
         owner: { kind: "host_generated", namespace: "sunsetz", mayOverwriteExternal: false },
         draft: {
@@ -677,6 +871,22 @@ describe("App workbench integration", () => {
       const { default: App } = await import("./App");
       render(<App />);
       expect(await screen.findByDisplayValue("migration-helper")).toBeTruthy();
+      fireEvent.change(screen.getByDisplayValue("Review migration workflow"), {
+        target: { value: "Review edited migration workflow" },
+      });
+      fireEvent.click(
+        screen.getByRole("button", { name: /Save skill|保存技能/ }),
+      );
+      await waitFor(() => {
+        expect(apiListenerCapture.skillApprove).toHaveBeenCalledWith(
+          expect.objectContaining({
+            id: "candidate",
+            expectedContentHash: "a".repeat(64),
+            finalContentHash:
+              "63e654cb61e4cb6c5131d91af44cac1b5d77281b789428f090b21c73aa0d26e5",
+          }),
+        );
+      });
     },
     20_000,
   );
