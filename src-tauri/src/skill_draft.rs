@@ -2,6 +2,7 @@
 
 use directories::BaseDirs;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 #[cfg(unix)]
 use std::fs::File;
@@ -59,9 +60,7 @@ fn slugify(name: &str) -> Result<String, String> {
         return Err("Skill name is required".to_string());
     }
     if trimmed.len() > MAX_NAME_BYTES {
-        return Err(format!(
-            "Skill name exceeds {MAX_NAME_BYTES} bytes"
-        ));
+        return Err(format!("Skill name exceeds {MAX_NAME_BYTES} bytes"));
     }
     let mut slug = String::with_capacity(trimmed.len());
     let mut pending_dash = false;
@@ -133,8 +132,7 @@ fn validate_frontmatter(
     }
     if description != expected_description.trim() {
         return Err(
-            "SKILL.md frontmatter description does not match the draft description"
-                .to_string(),
+            "SKILL.md frontmatter description does not match the draft description".to_string(),
         );
     }
     Ok(())
@@ -210,12 +208,23 @@ fn validate_reference_path(raw: &str) -> Result<PathBuf, String> {
     Ok(normalized)
 }
 
+pub(crate) fn normalized_reference_path(raw: &str) -> Result<String, String> {
+    let path = validate_reference_path(raw)?;
+    Ok(path
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(value) => value.to_str(),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("/"))
+}
+
 fn reject_symlink(path: &Path) -> Result<(), String> {
     if !path.exists() {
         return Ok(());
     }
-    let metadata =
-        fs::symlink_metadata(path).map_err(|error| format!("Inspect path: {error}"))?;
+    let metadata = fs::symlink_metadata(path).map_err(|error| format!("Inspect path: {error}"))?;
     if metadata.file_type().is_symlink() {
         return Err(format!(
             "Refusing to write through symbolic link: {}",
@@ -233,8 +242,8 @@ fn reject_tree_symlinks(root: &Path) -> Result<(), String> {
     for entry in fs::read_dir(root).map_err(|error| format!("Inspect skill: {error}"))? {
         let entry = entry.map_err(|error| format!("Inspect skill: {error}"))?;
         let path = entry.path();
-        let metadata = fs::symlink_metadata(&path)
-            .map_err(|error| format!("Inspect skill path: {error}"))?;
+        let metadata =
+            fs::symlink_metadata(&path).map_err(|error| format!("Inspect skill path: {error}"))?;
         if metadata.file_type().is_symlink() {
             return Err(format!(
                 "Existing skill contains a symbolic link: {}",
@@ -271,7 +280,9 @@ fn validate_request(
         return Err(format!("SKILL.md appears to contain a {kind}"));
     }
     if request.references.len() > MAX_REFERENCES {
-        return Err(format!("A skill may contain at most {MAX_REFERENCES} references"));
+        return Err(format!(
+            "A skill may contain at most {MAX_REFERENCES} references"
+        ));
     }
 
     let slug = slugify(name)?;
@@ -307,8 +318,7 @@ fn validate_request(
 
 fn write_new_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("Create skill directory: {error}"))?;
+        fs::create_dir_all(parent).map_err(|error| format!("Create skill directory: {error}"))?;
     }
     let mut file = OpenOptions::new()
         .create_new(true)
@@ -343,80 +353,325 @@ fn sync_directory(_path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn save_to_base(
+fn inspect_target(target: &Path, overwrite: bool) -> Result<bool, String> {
+    if !target.exists() {
+        return Ok(false);
+    }
+    reject_tree_symlinks(target)?;
+    if !target.is_dir() {
+        return Err(format!(
+            "Skill target is not a directory: {}",
+            target.display()
+        ));
+    }
+    if !overwrite {
+        return Err(format!("SKILL_EXISTS:{}", target.display()));
+    }
+    Ok(true)
+}
+
+fn tree_fingerprint(root: &Path) -> Result<String, String> {
+    fn collect(
+        root: &Path,
+        current: &Path,
+        files: &mut Vec<(String, Vec<u8>)>,
+        total_bytes: &mut usize,
+    ) -> Result<(), String> {
+        let metadata = fs::symlink_metadata(current)
+            .map_err(|error| format!("inspect Skill transaction tree: {error}"))?;
+        if metadata.file_type().is_symlink() {
+            return Err("Skill transaction tree contains a symbolic link".into());
+        }
+        if metadata.is_file() {
+            if files.len() >= MAX_REFERENCES + 1 {
+                return Err("Skill transaction tree contains too many files".into());
+            }
+            let bytes = fs::read(current)
+                .map_err(|error| format!("read Skill transaction tree: {error}"))?;
+            *total_bytes = total_bytes
+                .checked_add(bytes.len())
+                .ok_or_else(|| "Skill transaction tree is too large".to_string())?;
+            if *total_bytes > MAX_TOTAL_BYTES {
+                return Err("Skill transaction tree is too large".into());
+            }
+            let relative = current
+                .strip_prefix(root)
+                .map_err(|_| "invalid Skill transaction path".to_string())?
+                .components()
+                .filter_map(|component| match component {
+                    Component::Normal(value) => value.to_str(),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("/");
+            files.push((relative, bytes));
+            return Ok(());
+        }
+        if !metadata.is_dir() {
+            return Err("Skill transaction tree contains an unsupported entry".into());
+        }
+        for entry in fs::read_dir(current)
+            .map_err(|error| format!("list Skill transaction tree: {error}"))?
+        {
+            let entry = entry.map_err(|error| format!("list Skill transaction tree: {error}"))?;
+            collect(root, &entry.path(), files, total_bytes)?;
+        }
+        Ok(())
+    }
+
+    let mut files = Vec::new();
+    let mut total_bytes = 0;
+    collect(root, root, &mut files, &mut total_bytes)?;
+    files.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut hasher = Sha256::new();
+    for (path, bytes) in files {
+        hasher.update((path.len() as u64).to_le_bytes());
+        hasher.update(path.as_bytes());
+        hasher.update((bytes.len() as u64).to_le_bytes());
+        hasher.update(bytes);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+enum RollbackOutcome {
+    Clean,
+    ExternalChange(Option<PathBuf>),
+}
+
+fn rollback_target_swap(
+    base: &Path,
+    target: &Path,
+    staging: &Path,
+    backup: &Path,
+    had_existing: bool,
+    expected_target_hash: &str,
+) -> Result<RollbackOutcome, String> {
+    let target_present = fs::symlink_metadata(target).is_ok();
+    let mut externally_changed =
+        !target_present || tree_fingerprint(target).as_deref() != Ok(expected_target_hash);
+    let quarantine = externally_changed.then(|| {
+        base.join(format!(
+            ".{}.conflict-{}",
+            target
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("skill"),
+            uuid::Uuid::new_v4()
+        ))
+    });
+    let mut displaced = quarantine.clone().unwrap_or_else(|| staging.to_path_buf());
+    if target_present {
+        fs::rename(target, &displaced)
+            .map_err(|error| format!("move uncommitted Skill aside: {error}"))?;
+        if !externally_changed
+            && tree_fingerprint(&displaced).as_deref() != Ok(expected_target_hash)
+        {
+            let late_quarantine = base.join(format!(
+                ".{}.conflict-{}",
+                target
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or("skill"),
+                uuid::Uuid::new_v4()
+            ));
+            fs::rename(&displaced, &late_quarantine)
+                .map_err(|error| format!("quarantine changed Skill: {error}"))?;
+            displaced = late_quarantine;
+            externally_changed = true;
+        }
+    }
+    if had_existing {
+        if let Err(error) = fs::rename(backup, target) {
+            let restore_replacement = if target_present {
+                fs::rename(&displaced, target)
+            } else {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "replacement was removed outside Sunsetz",
+                ))
+            };
+            return Err(match restore_replacement {
+                Ok(()) => format!("restore prior Skill: {error}"),
+                Err(replacement_error) => format!(
+                    "restore prior Skill: {error}; restore replacement after rollback failure: {replacement_error}"
+                ),
+            });
+        }
+    }
+    if target_present && !externally_changed {
+        fs::remove_dir_all(&displaced)
+            .map_err(|error| format!("remove rolled-back Skill staging area: {error}"))?;
+    }
+    sync_directory(base).map_err(|error| format!("sync Skill rollback: {error}"))?;
+    if externally_changed {
+        Ok(RollbackOutcome::ExternalChange(
+            target_present.then_some(displaced),
+        ))
+    } else {
+        Ok(RollbackOutcome::Clean)
+    }
+}
+
+fn transaction_failure(error: String, rollback: Result<RollbackOutcome, String>) -> String {
+    match rollback {
+        Ok(RollbackOutcome::Clean) => error,
+        Ok(RollbackOutcome::ExternalChange(Some(path))) => format!(
+            "{error}; SKILL_ROLLBACK_CONFLICT: target changed outside Sunsetz and was preserved at {}",
+            path.display()
+        ),
+        Ok(RollbackOutcome::ExternalChange(None)) => format!(
+            "{error}; SKILL_ROLLBACK_CONFLICT: target was removed outside Sunsetz before rollback"
+        ),
+        Err(rollback_error) => {
+            format!("{error}; SKILL_ROLLBACK_FAILED:{rollback_error}")
+        }
+    }
+}
+
+fn save_to_base_transaction<T>(
     request: &SkillDraftSaveRequest,
     base: &Path,
-) -> Result<SkillDraftSaveResult, String> {
+    verify_target: impl FnOnce(&Path, bool) -> Result<(), String>,
+    commit: impl FnOnce(&SkillDraftSaveResult) -> Result<T, String>,
+) -> Result<(SkillDraftSaveResult, T), String> {
     let (slug, files) = validate_request(request)?;
     reject_symlink(base)?;
     fs::create_dir_all(base).map_err(|error| format!("Create skills directory: {error}"))?;
     reject_symlink(base)?;
 
     let target = base.join(&slug);
-    if target.exists() {
-        reject_tree_symlinks(&target)?;
-        if !target.is_dir() {
-            return Err(format!("Skill target is not a directory: {}", target.display()));
-        }
-        if !request.overwrite {
-            return Err(format!("SKILL_EXISTS:{}", target.display()));
-        }
-    }
+    crate::store_lock::with_exclusive_lock(&target, || {
+        inspect_target(&target, request.overwrite)?;
 
-    let nonce = uuid::Uuid::new_v4();
-    let staging = base.join(format!(".{slug}.tmp-{nonce}"));
-    let backup = base.join(format!(".{slug}.backup-{nonce}"));
-    fs::create_dir(&staging).map_err(|error| format!("Create skill staging area: {error}"))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&staging, fs::Permissions::from_mode(0o700))
-            .map_err(|error| format!("Set staging permissions: {error}"))?;
-    }
-
-    let write_result = (|| -> Result<(), String> {
-        for (relative, bytes) in files {
-            write_new_file(&staging.join(relative), bytes)?;
+        let nonce = uuid::Uuid::new_v4();
+        let staging = base.join(format!(".{slug}.tmp-{nonce}"));
+        let backup = base.join(format!(".{slug}.backup-{nonce}"));
+        fs::create_dir(&staging).map_err(|error| format!("Create skill staging area: {error}"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&staging, fs::Permissions::from_mode(0o700))
+                .map_err(|error| format!("Set staging permissions: {error}"))?;
         }
-        sync_directory(&staging)?;
-        Ok(())
-    })();
-    if let Err(error) = write_result {
-        let _ = fs::remove_dir_all(&staging);
-        return Err(error);
-    }
 
-    let had_existing = target.exists();
-    if had_existing {
-        fs::rename(&target, &backup)
-            .map_err(|error| format!("Prepare skill overwrite: {error}"))?;
-    }
-    if let Err(error) = fs::rename(&staging, &target) {
+        let write_result = (|| -> Result<(), String> {
+            for (relative, bytes) in files {
+                write_new_file(&staging.join(relative), bytes)?;
+            }
+            sync_directory(&staging)?;
+            Ok(())
+        })();
+        if let Err(error) = write_result {
+            let _ = fs::remove_dir_all(&staging);
+            return Err(error);
+        }
+        let expected_target_hash = match tree_fingerprint(&staging) {
+            Ok(hash) => hash,
+            Err(error) => {
+                let _ = fs::remove_dir_all(&staging);
+                return Err(error);
+            }
+        };
+
+        // Re-inspect after staging and while holding the target-scoped lock.
+        // Candidate ownership checks run here, immediately before the swap.
+        let had_existing = match inspect_target(&target, request.overwrite) {
+            Ok(value) => value,
+            Err(error) => {
+                let _ = fs::remove_dir_all(&staging);
+                return Err(error);
+            }
+        };
+        if let Err(error) = verify_target(&target, had_existing) {
+            let _ = fs::remove_dir_all(&staging);
+            return Err(error);
+        }
+
         if had_existing {
-            let _ = fs::rename(&backup, &target);
+            if let Err(error) = fs::rename(&target, &backup) {
+                let _ = fs::remove_dir_all(&staging);
+                return Err(format!("Prepare skill overwrite: {error}"));
+            }
         }
-        let _ = fs::remove_dir_all(&staging);
-        return Err(format!("Commit skill atomically: {error}"));
-    }
-    if had_existing {
-        // Backup is app-created and was verified symlink-free before the swap.
-        let _ = fs::remove_dir_all(&backup);
-    }
+        if let Err(error) = fs::rename(&staging, &target) {
+            let restore_error = if had_existing {
+                fs::rename(&backup, &target).err()
+            } else {
+                None
+            };
+            let _ = fs::remove_dir_all(&staging);
+            return Err(match restore_error {
+                Some(restore_error) => format!(
+                    "Commit skill atomically: {error}; restore prior Skill: {restore_error}"
+                ),
+                None => format!("Commit skill atomically: {error}"),
+            });
+        }
+        if let Err(error) = sync_directory(base) {
+            return Err(transaction_failure(
+                error,
+                rollback_target_swap(
+                    base,
+                    &target,
+                    &staging,
+                    &backup,
+                    had_existing,
+                    &expected_target_hash,
+                ),
+            ));
+        }
 
-    Ok(SkillDraftSaveResult {
-        path: target.to_string_lossy().into_owned(),
-        slug,
-        scope: match request.scope {
-            SkillDraftScope::Project => "project",
-            SkillDraftScope::User => "user",
+        let result = SkillDraftSaveResult {
+            path: target.to_string_lossy().into_owned(),
+            slug,
+            scope: match request.scope {
+                SkillDraftScope::Project => "project",
+                SkillDraftScope::User => "user",
+            }
+            .to_string(),
+            overwritten: had_existing,
+        };
+        let committed = match commit(&result) {
+            Ok(value) => value,
+            Err(error) => {
+                return Err(transaction_failure(
+                    error,
+                    rollback_target_swap(
+                        base,
+                        &target,
+                        &staging,
+                        &backup,
+                        had_existing,
+                        &expected_target_hash,
+                    ),
+                ));
+            }
+        };
+        if had_existing {
+            // A failed cleanup only leaves a hidden app-created backup. The
+            // committed target and candidate record remain coherent.
+            let _ = fs::remove_dir_all(&backup);
+            let _ = sync_directory(base);
         }
-        .to_string(),
-        overwritten: had_existing,
+        Ok((result, committed))
     })
 }
 
-pub fn save(request: SkillDraftSaveRequest) -> Result<SkillDraftSaveResult, String> {
-    let base = match request.scope {
+fn save_to_base(
+    request: &SkillDraftSaveRequest,
+    base: &Path,
+) -> Result<SkillDraftSaveResult, String> {
+    save_to_base_transaction(
+        request,
+        base,
+        |_target, _had_existing| Ok(()),
+        |_result| Ok(()),
+    )
+    .map(|(result, ())| result)
+}
+
+fn resolve_base(request: &SkillDraftSaveRequest) -> Result<PathBuf, String> {
+    match request.scope {
         SkillDraftScope::Project => {
             let raw = request
                 .project_path
@@ -433,7 +688,7 @@ pub fn save(request: SkillDraftSaveRequest) -> Result<SkillDraftSaveResult, Stri
             // A project-controlled `.grok` symlink could otherwise redirect
             // an apparently project-scoped save outside the selected project.
             reject_symlink(&project.join(".grok"))?;
-            project.join(".grok").join("skills")
+            Ok(project.join(".grok").join("skills"))
         }
         SkillDraftScope::User => {
             let home = BaseDirs::new()
@@ -441,10 +696,23 @@ pub fn save(request: SkillDraftSaveRequest) -> Result<SkillDraftSaveResult, Stri
                 .home_dir()
                 .to_path_buf();
             reject_symlink(&home.join(".grok"))?;
-            home.join(".grok").join("skills")
+            Ok(home.join(".grok").join("skills"))
         }
-    };
-    save_to_base(&request, &base)
+    }
+}
+
+pub(crate) fn save_with_target_transaction<T>(
+    request: SkillDraftSaveRequest,
+    verify_target: impl FnOnce(&Path, bool) -> Result<(), String>,
+    commit: impl FnOnce(&SkillDraftSaveResult) -> Result<T, String>,
+) -> Result<(SkillDraftSaveResult, T), String> {
+    let base = resolve_base(&request)?;
+    save_to_base_transaction(&request, &base, verify_target, commit)
+}
+
+pub fn save(request: SkillDraftSaveRequest) -> Result<SkillDraftSaveResult, String> {
+    save_with_target_transaction(request, |_target, _had_existing| Ok(()), |_result| Ok(()))
+        .map(|(result, ())| result)
 }
 
 #[cfg(test)]
@@ -510,6 +778,73 @@ mod tests {
     }
 
     #[test]
+    fn target_lock_serializes_competing_skill_transactions() {
+        use std::sync::mpsc;
+        use std::thread;
+        use std::time::Duration;
+
+        let base = temp_dir("target-lock");
+        let first_base = base.clone();
+        let first_request = request();
+        let (first_commit_tx, first_commit_rx) = mpsc::channel();
+        let (release_first_tx, release_first_rx) = mpsc::channel();
+        let first = thread::spawn(move || {
+            save_to_base_transaction(
+                &first_request,
+                &first_base,
+                |_target, _had_existing| Ok(()),
+                |_result| {
+                    first_commit_tx.send(()).unwrap();
+                    release_first_rx
+                        .recv_timeout(Duration::from_secs(2))
+                        .unwrap();
+                    Ok(())
+                },
+            )
+        });
+        first_commit_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+
+        let second_base = base.clone();
+        let mut second_request = request();
+        second_request.overwrite = true;
+        second_request.skill_md.push_str("\nSecond transaction.\n");
+        let (second_started_tx, second_started_rx) = mpsc::channel();
+        let (second_verify_tx, second_verify_rx) = mpsc::channel();
+        let second = thread::spawn(move || {
+            second_started_tx.send(()).unwrap();
+            save_to_base_transaction(
+                &second_request,
+                &second_base,
+                move |_target, had_existing| {
+                    assert!(had_existing);
+                    second_verify_tx.send(()).unwrap();
+                    Ok(())
+                },
+                |_result| Ok(()),
+            )
+        });
+        second_started_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+        assert!(second_verify_rx
+            .recv_timeout(Duration::from_millis(160))
+            .is_err());
+
+        release_first_tx.send(()).unwrap();
+        first.join().unwrap().unwrap();
+        second_verify_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+        second.join().unwrap().unwrap();
+        let text = fs::read_to_string(base.join("review-helper-skill/SKILL.md")).unwrap();
+        assert!(text.contains("Second transaction."));
+
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
     fn rejects_reference_path_traversal() {
         let mut value = request();
         value.references[0].path = "references/../../outside.md".to_string();
@@ -519,17 +854,19 @@ mod tests {
     #[test]
     fn rejects_secret_patterns() {
         let mut value = request();
-        value.skill_md.push_str("\napi_key = \"actual-secret-value\"\n");
+        value
+            .skill_md
+            .push_str("\napi_key = \"actual-secret-value\"\n");
         assert!(validate_request(&value).unwrap_err().contains("credential"));
     }
 
     #[test]
     fn rejects_frontmatter_mismatch() {
         let mut value = request();
-        value.skill_md = value
-            .skill_md
-            .replace("name: Review Helper", "name: Other");
-        assert!(validate_request(&value).unwrap_err().contains("does not match"));
+        value.skill_md = value.skill_md.replace("name: Review Helper", "name: Other");
+        assert!(validate_request(&value)
+            .unwrap_err()
+            .contains("does not match"));
     }
 
     #[cfg(unix)]

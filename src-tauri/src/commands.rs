@@ -259,12 +259,92 @@ pub async fn skill_candidate_approve_v1(
 }
 
 #[tauri::command]
+pub async fn skill_candidate_approve_v2(
+    request: crate::skill_candidates::SkillCandidateApproveRequestV2,
+) -> Result<SkillDraftSaveResult, String> {
+    tauri::async_runtime::spawn_blocking(move || crate::skill_candidates::approve_v2(request))
+        .await
+        .map_err(|error| format!("Skill candidate v2 approval task failed: {error}"))?
+}
+
+#[tauri::command]
 pub async fn skill_candidate_reject_v1(
     id: String,
 ) -> Result<crate::skill_candidates::SkillCandidateV1, String> {
     tauri::async_runtime::spawn_blocking(move || crate::skill_candidates::reject(&id))
         .await
         .map_err(|error| format!("Skill candidate reject task failed: {error}"))?
+}
+
+#[tauri::command]
+pub async fn skill_candidate_reject_v2(
+    request: crate::skill_candidates::SkillCandidateDecisionRequestV2,
+) -> Result<crate::skill_candidates::SkillCandidateV1, String> {
+    tauri::async_runtime::spawn_blocking(move || crate::skill_candidates::reject_v2(request))
+        .await
+        .map_err(|error| format!("Skill candidate v2 reject task failed: {error}"))?
+}
+
+#[tauri::command]
+pub async fn skill_candidate_cancel_v2(
+    request: crate::skill_candidates::SkillCandidateDecisionRequestV2,
+) -> Result<crate::skill_candidates::SkillCandidateV1, String> {
+    tauri::async_runtime::spawn_blocking(move || crate::skill_candidates::cancel_v2(request))
+        .await
+        .map_err(|error| format!("Skill candidate cancel task failed: {error}"))?
+}
+
+#[tauri::command]
+pub async fn memory_candidates_list_v1(
+) -> Result<Vec<crate::memory_candidates::MemoryCandidateV1>, String> {
+    tauri::async_runtime::spawn_blocking(crate::memory_candidates::list)
+        .await
+        .map_err(|error| format!("Memory candidate list task failed: {error}"))?
+}
+
+#[tauri::command]
+pub async fn memory_candidate_create_v1(
+    request: crate::memory_candidates::MemoryCandidateCreateRequestV1,
+) -> Result<crate::memory_candidates::MemoryCandidateV1, String> {
+    tauri::async_runtime::spawn_blocking(move || crate::memory_candidates::create_pending(request))
+        .await
+        .map_err(|error| format!("Memory candidate create task failed: {error}"))?
+}
+
+#[tauri::command]
+pub async fn memory_candidate_approve_v1(
+    request: crate::memory_candidates::MemoryCandidateMutationRequestV1,
+) -> Result<crate::memory_candidates::MemoryCandidateV1, String> {
+    tauri::async_runtime::spawn_blocking(move || crate::memory_candidates::approve(request))
+        .await
+        .map_err(|error| format!("Memory candidate approval task failed: {error}"))?
+}
+
+#[tauri::command]
+pub async fn memory_candidate_reject_v1(
+    request: crate::memory_candidates::MemoryCandidateMutationRequestV1,
+) -> Result<crate::memory_candidates::MemoryCandidateV1, String> {
+    tauri::async_runtime::spawn_blocking(move || crate::memory_candidates::reject(request))
+        .await
+        .map_err(|error| format!("Memory candidate reject task failed: {error}"))?
+}
+
+#[tauri::command]
+pub async fn memory_candidate_supersede_v1(
+    request: crate::memory_candidates::MemoryCandidateMutationRequestV1,
+) -> Result<crate::memory_candidates::MemoryCandidateV1, String> {
+    tauri::async_runtime::spawn_blocking(move || crate::memory_candidates::supersede(request))
+        .await
+        .map_err(|error| format!("Memory candidate supersede task failed: {error}"))?
+}
+
+#[tauri::command]
+pub async fn memory_candidate_delete_v1(
+    request: crate::memory_candidates::MemoryCandidateMutationRequestV1,
+) -> Result<crate::memory_candidates::MemoryCandidateV1, String> {
+    tauri::async_runtime::spawn_blocking(move || crate::memory_candidates::delete(request))
+        .await
+        .map_err(|error| format!("Memory candidate delete task failed: {error}"))?
 }
 
 #[tauri::command]
@@ -779,49 +859,83 @@ pub async fn settings_get() -> Result<AppSettings, String> {
     Ok(store::load_settings())
 }
 
+async fn apply_settings_runtime_side_effects(
+    app: &tauri::AppHandle,
+    mgr: &Arc<SessionManager>,
+    previous: &AppSettings,
+    settings: &AppSettings,
+) {
+    if previous.sandbox_profile != settings.sandbox_profile {
+        mgr.apply_sandbox_profile(app, &settings.sandbox_profile)
+            .await;
+    }
+    if previous.permission_policy != settings.permission_policy {
+        if let Err(error) = mgr
+            .apply_permission_policy(app, &settings.permission_policy)
+            .await
+        {
+            tracing::warn!("settings patch apply_permission: {error}");
+        }
+    }
+    if previous.locale != settings.locale {
+        if let Err(error) = crate::tray::refresh_menu(app) {
+            tracing::warn!("settings patch tray refresh: {error}");
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn settings_set(
     app: tauri::AppHandle,
     mgr: State<'_, Arc<SessionManager>>,
     mut settings: AppSettings,
 ) -> Result<AppSettings, String> {
-    let prev = store::load_settings();
     settings.sandbox_profile =
         crate::runtime_compat::SandboxProfileV1::parse(&settings.sandbox_profile)
             .as_str()
             .into();
-    let keychain_flip = prev.store_api_keys_in_keychain != settings.store_api_keys_in_keychain;
-    let sandbox_flip = prev.sandbox_profile != settings.sandbox_profile;
+    let (previous, current) =
+        store::patch_legacy_settings_with_keychain_transaction_v1(&settings, |enabled| {
+            crate::secrets::apply_keychain_preference(enabled)
+        })?;
+    apply_settings_runtime_side_effects(&app, mgr.inner(), &previous, &current).await;
+    Ok(current)
+}
 
-    store::save_settings(&settings)?;
-
-    if keychain_flip {
-        if let Err(e) =
-            crate::secrets::apply_keychain_preference(settings.store_api_keys_in_keychain)
-        {
-            // Revert flag so UI and storage stay consistent.
-            let mut rolled = settings.clone();
-            rolled.store_api_keys_in_keychain = prev.store_api_keys_in_keychain;
-            let _ = store::save_settings(&rolled);
-            return Err(e);
-        }
-    }
-    if sandbox_flip {
-        mgr.apply_sandbox_profile(&app, &settings.sandbox_profile)
-            .await;
-    }
-
-    // Full permission apply: Host + agent-home + soft-respawn if needed
-    if let Err(e) = mgr
-        .apply_permission_policy(&app, &settings.permission_policy)
-        .await
+/// Atomically update only the provided settings fields. Unknown fields are
+/// rejected by the store so stale UI versions cannot silently persist data the
+/// Host does not understand.
+#[tauri::command]
+pub async fn settings_patch_v1(
+    app: tauri::AppHandle,
+    mgr: State<'_, Arc<SessionManager>>,
+    mut patch: serde_json::Value,
+) -> Result<AppSettings, String> {
+    if let Some(profile) = patch
+        .as_object_mut()
+        .and_then(|object| object.get_mut("sandboxProfile"))
     {
-        tracing::warn!("settings_set apply_permission: {e}");
+        let requested = profile
+            .as_str()
+            .ok_or_else(|| "SETTINGS_PATCH_INVALID:sandboxProfile must be a string".to_string())?;
+        *profile = serde_json::Value::String(
+            crate::runtime_compat::SandboxProfileV1::parse(requested)
+                .as_str()
+                .into(),
+        );
     }
-    // Rebuild tray so locale / recent list match settings immediately.
-    if let Err(e) = crate::tray::refresh_menu(&app) {
-        tracing::warn!("settings_set tray refresh: {e}");
-    }
+
+    let keychain_requested = patch
+        .as_object()
+        .is_some_and(|object| object.contains_key("storeApiKeysInKeychain"));
+    let (previous, settings) = if keychain_requested {
+        store::patch_settings_with_keychain_transaction_v1(patch, |enabled| {
+            crate::secrets::apply_keychain_preference(enabled)
+        })?
+    } else {
+        store::patch_settings_v1(patch)?
+    };
+    apply_settings_runtime_side_effects(&app, mgr.inner(), &previous, &settings).await;
     Ok(settings)
 }
 
@@ -1212,9 +1326,7 @@ pub async fn import_grok_cli_config() -> Result<serde_json::Value, String> {
     if config.is_file() {
         msg.push("Found ~/.grok/config.toml".to_string());
     }
-    let mut settings = store::load_settings();
-    settings.onboarding_done = true;
-    store::save_settings(&settings)?;
+    store::patch_settings_v1(serde_json::json!({"onboardingDone": true}))?;
     Ok(serde_json::json!({
         "ok": auth.is_file(),
         "messages": msg,
@@ -1260,9 +1372,7 @@ pub async fn import_grok_go_config() -> Result<serde_json::Value, String> {
                 secrets.relay_base_url = Some(base.to_string());
             }
             store::save_secrets(&secrets)?;
-            let mut settings = store::load_settings();
-            settings.onboarding_done = true;
-            store::save_settings(&settings)?;
+            store::patch_settings_v1(serde_json::json!({"onboardingDone": true}))?;
             return Ok(serde_json::json!({
                 "ok": true,
                 "path": c,
@@ -4244,16 +4354,15 @@ pub async fn providers_activate(
         crate::providers::activate_provider(&source, provider_id.as_deref())?;
     // Composer model stays a catalog id (UI). Channel is `[models].default`.
     // When leaving a custom route, drop stale provider ids from settings.
-    let mut settings = store::load_settings();
-    let cur = settings.model_id.clone().unwrap_or_default();
-    if result.active_source == "official" {
+    let cur = store::load_settings().model_id.unwrap_or_default();
+    let next_model = if result.active_source == "official" {
         if cur.is_empty()
             || crate::providers::is_custom_provider_id(&cur)
             || cur == crate::providers::OFFICIAL_DEFAULT_MODEL
         {
-            settings.model_id =
-                Some(crate::providers::OFFICIAL_CATALOG_MODEL.into());
-            let _ = store::save_settings(&settings);
+            Some(crate::providers::OFFICIAL_CATALOG_MODEL.to_string())
+        } else {
+            None
         }
     } else if result.active_source == "custom" {
         // Keep catalog model in settings for the model picker; spawn resolves route id.
@@ -4264,17 +4373,22 @@ pub async fn providers_activate(
                 .and_then(|id| result.providers.iter().find(|x| x.id == *id))
             {
                 let upstream = p.model.trim();
-                settings.model_id = Some(if upstream.is_empty() {
+                Some(if upstream.is_empty() {
                     crate::providers::OFFICIAL_CATALOG_MODEL.into()
                 } else {
                     upstream.to_string()
-                });
+                })
             } else {
-                settings.model_id =
-                    Some(crate::providers::OFFICIAL_CATALOG_MODEL.into());
+                Some(crate::providers::OFFICIAL_CATALOG_MODEL.to_string())
             }
-            let _ = store::save_settings(&settings);
+        } else {
+            None
         }
+    } else {
+        None
+    };
+    if let Some(model_id) = next_model {
+        let _ = store::patch_settings_v1(serde_json::json!({"modelId": model_id}));
     }
     Ok(result)
 }
@@ -4309,15 +4423,14 @@ pub async fn providers_upsert(
         // Do not copy api_key into secrets (stays only in config.toml).
         let _ = store::save_secrets(&secrets);
         if set_as_default.unwrap_or(false) {
-            let mut settings = store::load_settings();
             // Composer shows upstream request model, not the route slug.
             let upstream = p.model.trim();
-            settings.model_id = Some(if upstream.is_empty() {
+            let model_id = if upstream.is_empty() {
                 crate::providers::OFFICIAL_CATALOG_MODEL.into()
             } else {
                 upstream.to_string()
-            });
-            let _ = store::save_settings(&settings);
+            };
+            let _ = store::patch_settings_v1(serde_json::json!({"modelId": model_id}));
         }
     }
     Ok(result)
@@ -4340,24 +4453,25 @@ pub async fn providers_set_default(
     } else {
         crate::providers::activate_provider("official", None)?
     };
-    let mut settings = store::load_settings();
-    if result.active_source == "custom" {
+    let model_id = if result.active_source == "custom" {
         if let Some(p) = result
             .active_provider_id
             .as_ref()
             .and_then(|pid| result.providers.iter().find(|x| x.id == *pid))
         {
             let upstream = p.model.trim();
-            settings.model_id = Some(if upstream.is_empty() {
+            if upstream.is_empty() {
                 crate::providers::OFFICIAL_CATALOG_MODEL.into()
             } else {
                 upstream.to_string()
-            });
+            }
+        } else {
+            crate::providers::OFFICIAL_CATALOG_MODEL.into()
         }
     } else {
-        settings.model_id = Some(crate::providers::OFFICIAL_CATALOG_MODEL.into());
-    }
-    let _ = store::save_settings(&settings);
+        crate::providers::OFFICIAL_CATALOG_MODEL.into()
+    };
+    let _ = store::patch_settings_v1(serde_json::json!({"modelId": model_id}));
     Ok(result)
 }
 

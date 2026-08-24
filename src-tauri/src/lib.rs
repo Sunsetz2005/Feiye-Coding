@@ -50,6 +50,7 @@ mod tray_i18n;
 mod automation_scheduler;
 mod capability_exchange;
 mod interactions;
+mod memory_candidates;
 mod resource_handles;
 mod runtime_events;
 mod session_search;
@@ -216,7 +217,16 @@ pub fn run() {
             commands::skill_draft_save,
             commands::skill_candidates_list_v1,
             commands::skill_candidate_approve_v1,
+            commands::skill_candidate_approve_v2,
             commands::skill_candidate_reject_v1,
+            commands::skill_candidate_reject_v2,
+            commands::skill_candidate_cancel_v2,
+            commands::memory_candidates_list_v1,
+            commands::memory_candidate_create_v1,
+            commands::memory_candidate_approve_v1,
+            commands::memory_candidate_reject_v1,
+            commands::memory_candidate_supersede_v1,
+            commands::memory_candidate_delete_v1,
             commands::probe_cli,
             commands::acp_test_connection,
             commands::cli_install_latest,
@@ -252,6 +262,7 @@ pub fn run() {
             commands::session_resolve_relative_media,
             commands::settings_get,
             commands::settings_set,
+            commands::settings_patch_v1,
             commands::models_list_available,
             commands::composer_prefs_resolve,
             commands::composer_prefs_set,

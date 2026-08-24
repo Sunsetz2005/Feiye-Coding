@@ -215,13 +215,66 @@ fn write_disk_secrets(path: &PathBuf, value: &SecretsFile) -> Result<(), String>
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     let s = serde_json::to_string_pretty(value).map_err(|e| e.to_string())?;
-    fs::write(path, s).map_err(|e| e.to_string())?;
+    crate::store_lock::write_bytes_atomic(path, s.as_bytes())?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
     }
     Ok(())
+}
+
+fn move_keychain_secrets_to_disk(
+    mut disk: SecretsFile,
+    keychain_available: bool,
+    prefer_keychain_values: bool,
+    mut get: impl FnMut(&str) -> Option<String>,
+    write: impl FnOnce(&SecretsFile) -> Result<(), String>,
+    mut delete: impl FnMut(&str) -> Result<(), String>,
+) -> Result<SecretsFile, String> {
+    if keychain_available {
+        let get_official = if prefer_keychain_values {
+            disk.keychain_has_official || non_empty(&disk.official_api_key)
+        } else {
+            disk.keychain_has_official && !non_empty(&disk.official_api_key)
+        };
+        if get_official {
+            if let Some(value) = get(KEY_OFFICIAL) {
+                disk.official_api_key = Some(value);
+            }
+        }
+        let get_relay = if prefer_keychain_values {
+            disk.keychain_has_relay || non_empty(&disk.relay_api_key)
+        } else {
+            disk.keychain_has_relay && !non_empty(&disk.relay_api_key)
+        };
+        if get_relay {
+            if let Some(value) = get(KEY_RELAY) {
+                disk.relay_api_key = Some(value);
+            }
+        }
+    }
+
+    if disk.keychain_has_official && !non_empty(&disk.official_api_key) {
+        return Err(
+            "official API key could not be read from OS keychain; disk copy unchanged".into(),
+        );
+    }
+    if disk.keychain_has_relay && !non_empty(&disk.relay_api_key) {
+        return Err("relay API key could not be read from OS keychain; disk copy unchanged".into());
+    }
+
+    disk.keychain_has_official = false;
+    disk.keychain_has_relay = false;
+    // The durable plaintext copy must exist before deleting the only keychain
+    // copy. A failed atomic write therefore leaves keychain credentials intact.
+    write(&disk)?;
+
+    if keychain_available {
+        let _ = delete(KEY_OFFICIAL);
+        let _ = delete(KEY_RELAY);
+    }
+    Ok(disk)
 }
 
 fn invalidate_session_cache() {
@@ -362,11 +415,17 @@ pub fn load_secrets() -> SecretsFile {
 
 /// Save secrets. Keychain only when the user setting is on and the platform works.
 pub fn save_secrets(s: &SecretsFile) -> Result<(), String> {
+    crate::store::with_keychain_preference_transaction_v1(|| save_secrets_in_transaction(s))
+}
+
+fn save_secrets_in_transaction(s: &SecretsFile) -> Result<(), String> {
     let _ = ensure_app_dirs();
     let path = secrets_file();
     invalidate_session_cache();
+    let keychain_enabled =
+        crate::store::load_settings_for_keychain_transaction().store_api_keys_in_keychain;
 
-    if use_keychain_backend() {
+    if keychain_enabled && keychain_platform_ok() {
         let mut disk = strip_keys_for_disk(s);
 
         match &s.official_api_key {
@@ -406,24 +465,17 @@ pub fn save_secrets(s: &SecretsFile) -> Result<(), String> {
         *SESSION_CACHE.lock() = Some(cached);
         Ok(())
     } else {
-        // File mode: write full payload; drop any leftover keychain entries best-effort.
-        let mut file = s.clone();
-        if file.keychain_has_official || file.keychain_has_relay {
-            // Pull values if caller only had flags (shouldn't happen after load).
-            if !non_empty(&file.official_api_key) && file.keychain_has_official {
-                file.official_api_key = keychain_get(KEY_OFFICIAL);
-            }
-            if !non_empty(&file.relay_api_key) && file.keychain_has_relay {
-                file.relay_api_key = keychain_get(KEY_RELAY);
-            }
-            if keychain_platform_ok() {
-                let _ = keychain_delete(KEY_OFFICIAL);
-                let _ = keychain_delete(KEY_RELAY);
-            }
-        }
-        file.keychain_has_official = false;
-        file.keychain_has_relay = false;
-        write_disk_secrets(&path, &file)?;
+        // Preserve explicit new values from the caller. Pull from keychain only
+        // when the payload contains a presence flag without its corresponding
+        // value, then persist before deleting any keychain copy.
+        let file = move_keychain_secrets_to_disk(
+            s.clone(),
+            keychain_platform_ok(),
+            false,
+            keychain_get,
+            |value| write_disk_secrets(&path, value),
+            keychain_delete,
+        )?;
         *SESSION_CACHE.lock() = Some(file);
         Ok(())
     }
@@ -458,9 +510,7 @@ pub fn apply_keychain_preference(enabled: bool) -> Result<(), String> {
 
     if enabled {
         if !keychain_platform_ok() {
-            return Err(
-                "OS keychain is not available; keys stay in secrets.json".into(),
-            );
+            return Err("OS keychain is not available; keys stay in secrets.json".into());
         }
         // Re-read any values already in keychain so we don't drop them.
         if disk.keychain_has_official && !non_empty(&disk.official_api_key) {
@@ -495,23 +545,15 @@ pub fn apply_keychain_preference(enabled: bool) -> Result<(), String> {
         tracing::info!(target: "sunsetz::secrets", "API keys storage: OS keychain");
         Ok(())
     } else {
-        if keychain_platform_ok() {
-            if disk.keychain_has_official || non_empty(&disk.official_api_key) {
-                if let Some(k) = keychain_get(KEY_OFFICIAL) {
-                    disk.official_api_key = Some(k);
-                }
-            }
-            if disk.keychain_has_relay || non_empty(&disk.relay_api_key) {
-                if let Some(k) = keychain_get(KEY_RELAY) {
-                    disk.relay_api_key = Some(k);
-                }
-            }
-            let _ = keychain_delete(KEY_OFFICIAL);
-            let _ = keychain_delete(KEY_RELAY);
-        }
-        disk.keychain_has_official = false;
-        disk.keychain_has_relay = false;
-        write_disk_secrets(&path, &disk)?;
+        let available = keychain_platform_ok();
+        disk = move_keychain_secrets_to_disk(
+            disk,
+            available,
+            true,
+            keychain_get,
+            |value| write_disk_secrets(&path, value),
+            keychain_delete,
+        )?;
         *SESSION_CACHE.lock() = Some(disk);
         tracing::info!(target: "sunsetz::secrets", "API keys storage: secrets.json");
         Ok(())
@@ -562,6 +604,8 @@ pub fn wipe_all_secrets() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     #[test]
     fn disk_has_plaintext_keys_detects_present() {
@@ -753,5 +797,86 @@ mod tests {
         assert_eq!(back.official_api_key.as_deref(), Some("sk-file-only"));
         assert_eq!(back.relay_api_key.as_deref(), Some("rk-file"));
         let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn disabling_keychain_never_deletes_before_durable_disk_write() {
+        let disk = SecretsFile {
+            keychain_has_official: true,
+            ..Default::default()
+        };
+        let delete_calls = Arc::new(AtomicUsize::new(0));
+        let delete_calls_for_closure = Arc::clone(&delete_calls);
+
+        let error = move_keychain_secrets_to_disk(
+            disk,
+            true,
+            true,
+            |account| (account == KEY_OFFICIAL).then(|| "official-secret".to_string()),
+            |value| {
+                assert_eq!(value.official_api_key.as_deref(), Some("official-secret"));
+                assert!(!value.keychain_has_official);
+                Err("injected atomic disk write failure".into())
+            },
+            move |_| {
+                delete_calls_for_closure.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.contains("injected atomic disk write failure"));
+        assert_eq!(delete_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn disabling_keychain_writes_complete_disk_copy_before_best_effort_delete() {
+        let disk = SecretsFile {
+            keychain_has_official: true,
+            keychain_has_relay: true,
+            relay_base_url: Some("https://relay.example".into()),
+            ..Default::default()
+        };
+        let order = Arc::new(Mutex::new(Vec::<String>::new()));
+        let get_order = Arc::clone(&order);
+        let write_order = Arc::clone(&order);
+        let delete_order = Arc::clone(&order);
+
+        let moved = move_keychain_secrets_to_disk(
+            disk,
+            true,
+            true,
+            move |account| {
+                get_order.lock().push(format!("get:{account}"));
+                match account {
+                    KEY_OFFICIAL => Some("official-secret".into()),
+                    KEY_RELAY => Some("relay-secret".into()),
+                    _ => None,
+                }
+            },
+            move |value| {
+                assert_eq!(value.official_api_key.as_deref(), Some("official-secret"));
+                assert_eq!(value.relay_api_key.as_deref(), Some("relay-secret"));
+                assert!(!value.keychain_has_official);
+                assert!(!value.keychain_has_relay);
+                write_order.lock().push("write".into());
+                Ok(())
+            },
+            move |account| {
+                delete_order.lock().push(format!("delete:{account}"));
+                Err("injected delete failure after safe disk write".into())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(moved.official_api_key.as_deref(), Some("official-secret"));
+        assert_eq!(moved.relay_api_key.as_deref(), Some("relay-secret"));
+        let order = order.lock();
+        let write_index = order.iter().position(|step| step == "write").unwrap();
+        let first_delete = order
+            .iter()
+            .position(|step| step.starts_with("delete:"))
+            .unwrap();
+        assert!(write_index < first_delete);
     }
 }

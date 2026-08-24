@@ -618,7 +618,14 @@ pub fn reset_app_data(keep_secrets: bool) -> Result<serde_json::Value, String> {
     let mut errors: Vec<String> = Vec::new();
 
     // Directories that always go
-    for name in ["sessions", "projects", "attachments", "logs", "agent-home"] {
+    for name in [
+        "sessions",
+        "projects",
+        "attachments",
+        "logs",
+        "agent-home",
+        "skill-candidates",
+    ] {
         let p = root.join(name);
         if p.exists() {
             match fs::remove_dir_all(&p) {
@@ -639,12 +646,17 @@ pub fn reset_app_data(keep_secrets: bool) -> Result<serde_json::Value, String> {
     }
 
     // Index / config files
-    let mut files = vec![
+    let files = [
         "projects.json",
         "sessions_index.json",
         "automations.json",
+        "automation-runs.v1.json",
         "settings.json",
         "extensions.json",
+        "memory-candidates.v1.json",
+        "session-search.v1.sqlite3",
+        "session-search.v1.sqlite3-shm",
+        "session-search.v1.sqlite3-wal",
     ];
     if !keep_secrets {
         // Wipe OS keychain entries + secrets.json (no-op parts when missing).
@@ -703,12 +715,21 @@ mod tests {
         fs::write(tmp.join("sessions_index.json"), "[]").unwrap();
         fs::write(tmp.join("secrets.json"), r#"{"officialApiKey":"sk-test"}"#).unwrap();
         fs::write(tmp.join("settings.json"), "{}").unwrap();
+        fs::write(tmp.join("memory-candidates.v1.json"), "{}").unwrap();
+        fs::write(tmp.join("automation-runs.v1.json"), "[]").unwrap();
+        fs::write(tmp.join("session-search.v1.sqlite3"), "index").unwrap();
+        fs::create_dir_all(tmp.join("skill-candidates")).unwrap();
+        fs::write(tmp.join("skill-candidates").join("candidate.json"), "{}").unwrap();
 
         std::env::set_var("GROK_APP_HOME", &tmp);
         let result = reset_app_data(true).expect("reset");
         assert!(result["ok"].as_bool().unwrap());
         assert!(tmp.join("secrets.json").is_file());
         assert!(!tmp.join("sessions_index.json").is_file());
+        assert!(!tmp.join("memory-candidates.v1.json").exists());
+        assert!(!tmp.join("automation-runs.v1.json").exists());
+        assert!(!tmp.join("session-search.v1.sqlite3").exists());
+        assert!(!tmp.join("skill-candidates").exists());
         assert!(tmp.join("sessions").is_dir()); // recreated empty
         std::env::remove_var("GROK_APP_HOME");
         let _ = fs::remove_dir_all(&tmp);

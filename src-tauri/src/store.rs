@@ -1,7 +1,7 @@
 //! Versioned independent store for projects, sessions, settings, and secrets.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -397,22 +397,319 @@ fn write_json<T: Serialize>(path: &PathBuf, value: &T) -> Result<(), String> {
 
 pub fn load_settings() -> AppSettings {
     let _ = ensure_app_dirs();
-    let mut s: AppSettings = read_json(&settings_file());
+    let path = settings_file();
+    let s: AppSettings = read_json(&path);
     // One-time: installs that already stored keys in keychain before the opt-in
     // keep keychain mode so keys remain reachable without a silent loss.
     if !s.store_api_keys_in_keychain {
         let disk = crate::secrets::load_secrets_disk_only();
         if disk.keychain_has_official || disk.keychain_has_relay {
-            s.store_api_keys_in_keychain = true;
-            let _ = write_json(&settings_file(), &s);
+            // Re-check both files while holding the same transaction lock used by
+            // explicit keychain toggles. A concurrent disable may have cleared the
+            // presence flags while this caller was waiting for the lock.
+            if let Ok(recovered) = recover_keychain_preference_at(
+                &path,
+                &keychain_preference_transaction_target(),
+                || {
+                    let disk = crate::secrets::load_secrets_disk_only();
+                    disk.keychain_has_official || disk.keychain_has_relay
+                },
+            ) {
+                return recovered;
+            }
         }
     }
     s
 }
 
+/// Read settings without running keychain-compatibility recovery.
+/// Call only while the keychain preference transaction lock is already held.
+pub(crate) fn load_settings_for_keychain_transaction() -> AppSettings {
+    let _ = ensure_app_dirs();
+    read_json(&settings_file())
+}
+
 pub fn save_settings(s: &AppSettings) -> Result<(), String> {
     let _ = ensure_app_dirs();
     write_json(&settings_file(), s)
+}
+
+fn patch_global_composer_prefs(
+    model_id: Option<String>,
+    effort: Option<String>,
+    mode: Option<String>,
+    permission_policy: Option<String>,
+) -> Result<(), String> {
+    let mut patch = serde_json::Map::new();
+    if let Some(value) = model_id {
+        patch.insert("modelId".into(), serde_json::Value::String(value));
+    }
+    if let Some(value) = effort {
+        patch.insert("effort".into(), serde_json::Value::String(value));
+    }
+    if let Some(value) = mode {
+        patch.insert("mode".into(), serde_json::Value::String(value));
+    }
+    if let Some(value) = permission_policy {
+        patch.insert("permissionPolicy".into(), serde_json::Value::String(value));
+    }
+    if !patch.is_empty() {
+        patch_settings_v1(serde_json::Value::Object(patch))?;
+    }
+    Ok(())
+}
+
+const SETTINGS_PATCH_KEYS_V1: &[&str] = &[
+    "theme",
+    "locale",
+    "sessionDataMode",
+    "manualCliPath",
+    "permissionPolicy",
+    "modelId",
+    "effort",
+    "mode",
+    "onboardingDone",
+    "setupSkipped",
+    "setupWizardCompleted",
+    "authSetupDeferred",
+    "defaultOpenTarget",
+    "composerPrefsScope",
+    "acpServerAddr",
+    "maxConcurrentAgents",
+    "agentIdleMinutes",
+    "streamStallSeconds",
+    "sandboxProfile",
+    "storeApiKeysInKeychain",
+];
+
+fn keychain_preference_transaction_target() -> PathBuf {
+    settings_file().with_extension("keychain-preference-transaction.v1")
+}
+
+fn with_keychain_preference_transaction_at<R>(
+    transaction_target: &Path,
+    body: impl FnOnce() -> Result<R, String>,
+) -> Result<R, String> {
+    crate::store_lock::with_exclusive_lock(transaction_target, body)
+}
+
+pub(crate) fn with_keychain_preference_transaction_v1<R>(
+    body: impl FnOnce() -> Result<R, String>,
+) -> Result<R, String> {
+    let _ = ensure_app_dirs();
+    with_keychain_preference_transaction_at(&keychain_preference_transaction_target(), body)
+}
+
+fn recover_keychain_preference_at(
+    settings_path: &Path,
+    transaction_target: &Path,
+    keychain_still_has_values: impl FnOnce() -> bool,
+) -> Result<AppSettings, String> {
+    with_keychain_preference_transaction_at(transaction_target, || {
+        let current: AppSettings = read_json(&settings_path.to_path_buf());
+        if current.store_api_keys_in_keychain || !keychain_still_has_values() {
+            return Ok(current);
+        }
+        patch_settings_at(
+            settings_path,
+            serde_json::json!({"storeApiKeysInKeychain": true}),
+        )
+        .map(|(_, next)| next)
+    })
+}
+
+/// Convert a legacy full-object write into at most one field-level patch.
+///
+/// A multi-field difference is indistinguishable from a stale snapshot trying
+/// to restore fields that another writer already changed, so it is rejected.
+pub fn legacy_settings_patch_v1(
+    current: &AppSettings,
+    requested: &AppSettings,
+) -> Result<Option<serde_json::Value>, String> {
+    let current = serde_json::to_value(current).map_err(|error| error.to_string())?;
+    let requested = serde_json::to_value(requested).map_err(|error| error.to_string())?;
+    let current = current
+        .as_object()
+        .ok_or_else(|| "serialize current settings object".to_string())?;
+    let requested = requested
+        .as_object()
+        .ok_or_else(|| "serialize requested settings object".to_string())?;
+
+    let keys = current
+        .keys()
+        .chain(requested.keys())
+        .map(String::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut changed = serde_json::Map::new();
+    for key in keys.iter().copied() {
+        let before = current.get(key).unwrap_or(&serde_json::Value::Null);
+        let after = requested.get(key).unwrap_or(&serde_json::Value::Null);
+        if before != after {
+            changed.insert(key.to_string(), after.clone());
+        }
+    }
+    match changed.len() {
+        0 => Ok(None),
+        1 => Ok(Some(serde_json::Value::Object(changed))),
+        _ => {
+            let fields = changed.keys().cloned().collect::<Vec<_>>().join(",");
+            Err(format!(
+                "SETTINGS_SET_REJECTED_USE_SETTINGS_PATCH_V1: full-object request changes multiple fields ({fields})"
+            ))
+        }
+    }
+}
+
+fn patch_settings_at(
+    path: &Path,
+    patch: serde_json::Value,
+) -> Result<(AppSettings, AppSettings), String> {
+    let encoded = serde_json::to_vec(&patch).map_err(|error| error.to_string())?;
+    if encoded.len() > 32 * 1024 {
+        return Err("SETTINGS_PATCH_TOO_LARGE".into());
+    }
+    let updates = patch
+        .as_object()
+        .ok_or_else(|| "SETTINGS_PATCH_OBJECT_REQUIRED".to_string())?;
+    for key in updates.keys() {
+        if !SETTINGS_PATCH_KEYS_V1.contains(&key.as_str()) {
+            return Err(format!("SETTINGS_PATCH_UNKNOWN_FIELD:{key}"));
+        }
+    }
+    let updates = updates.clone();
+    crate::store_lock::update_json_locked(path, AppSettings::default, move |current| {
+        let previous = current.clone();
+        let mut merged = serde_json::to_value(&*current).map_err(|error| error.to_string())?;
+        let object = merged
+            .as_object_mut()
+            .ok_or_else(|| "serialize settings object".to_string())?;
+        for (key, value) in updates {
+            object.insert(key, value);
+        }
+        let next: AppSettings = serde_json::from_value(merged)
+            .map_err(|error| format!("SETTINGS_PATCH_INVALID:{error}"))?;
+        *current = next.clone();
+        Ok((previous, next))
+    })
+}
+
+fn patch_settings_with_keychain_transaction_at(
+    settings_path: &Path,
+    transaction_target: &Path,
+    patch: serde_json::Value,
+    migrate: impl FnOnce(bool) -> Result<(), String>,
+) -> Result<(AppSettings, AppSettings), String> {
+    with_keychain_preference_transaction_at(transaction_target, || {
+        let updated = patch_settings_at(settings_path, patch)?;
+        finish_keychain_preference_patch_at(settings_path, updated, migrate)
+    })
+}
+
+fn finish_keychain_preference_patch_at(
+    settings_path: &Path,
+    (previous, current): (AppSettings, AppSettings),
+    migrate: impl FnOnce(bool) -> Result<(), String>,
+) -> Result<(AppSettings, AppSettings), String> {
+    if previous.store_api_keys_in_keychain == current.store_api_keys_in_keychain {
+        return Ok((previous, current));
+    }
+
+    if let Err(error) = migrate(current.store_api_keys_in_keychain) {
+        return match compare_restore_keychain_preference_at(
+            settings_path,
+            current.store_api_keys_in_keychain,
+            previous.store_api_keys_in_keychain,
+        ) {
+            Ok(true) => Err(error),
+            Ok(false) => Err(format!(
+                "{error}; SETTINGS_PATCH_ROLLBACK_SKIPPED_NON_TRANSACTIONAL_WRITE"
+            )),
+            Err(rollback) => Err(format!(
+                "{error}; SETTINGS_PATCH_ROLLBACK_FAILED:{rollback}"
+            )),
+        };
+    }
+
+    Ok((previous, current))
+}
+
+fn patch_legacy_settings_with_keychain_transaction_at(
+    settings_path: &Path,
+    transaction_target: &Path,
+    requested: &AppSettings,
+    migrate: impl FnOnce(bool) -> Result<(), String>,
+) -> Result<(AppSettings, AppSettings), String> {
+    with_keychain_preference_transaction_at(transaction_target, || {
+        let observed: AppSettings = read_json(&settings_path.to_path_buf());
+        let Some(patch) = legacy_settings_patch_v1(&observed, requested)? else {
+            return Ok((observed.clone(), observed));
+        };
+        let updated = patch_settings_at(settings_path, patch)?;
+        finish_keychain_preference_patch_at(settings_path, updated, migrate)
+    })
+}
+
+/// Atomically patch explicit settings fields without replacing concurrent
+/// updates to unrelated fields. The returned pair is `(previous, current)` so
+/// callers can apply process-level side effects and perform a guarded rollback.
+pub fn patch_settings_v1(patch: serde_json::Value) -> Result<(AppSettings, AppSettings), String> {
+    let _ = ensure_app_dirs();
+    if patch
+        .as_object()
+        .is_some_and(|object| object.contains_key("storeApiKeysInKeychain"))
+    {
+        return Err("SETTINGS_PATCH_KEYCHAIN_TRANSACTION_REQUIRED".into());
+    }
+    patch_settings_at(&settings_file(), patch)
+}
+
+/// Patch settings and migrate key material as one serialized transaction.
+///
+/// The settings file lock is held only for each short JSON update. A distinct
+/// process-wide sidecar lock spans the keychain migration and guarded rollback,
+/// so unrelated settings patches remain independent.
+pub fn patch_settings_with_keychain_transaction_v1(
+    patch: serde_json::Value,
+    migrate: impl FnOnce(bool) -> Result<(), String>,
+) -> Result<(AppSettings, AppSettings), String> {
+    let _ = ensure_app_dirs();
+    patch_settings_with_keychain_transaction_at(
+        &settings_file(),
+        &keychain_preference_transaction_target(),
+        patch,
+        migrate,
+    )
+}
+
+/// Fail-safe adapter for the legacy full-object command. Comparison, optional
+/// one-field patch, keychain migration, and rollback share one transaction.
+pub fn patch_legacy_settings_with_keychain_transaction_v1(
+    requested: &AppSettings,
+    migrate: impl FnOnce(bool) -> Result<(), String>,
+) -> Result<(AppSettings, AppSettings), String> {
+    let _ = ensure_app_dirs();
+    patch_legacy_settings_with_keychain_transaction_at(
+        &settings_file(),
+        &keychain_preference_transaction_target(),
+        requested,
+        migrate,
+    )
+}
+
+/// Roll back the keychain preference only if no newer writer changed that same
+/// field. Concurrent updates to unrelated settings remain intact.
+fn compare_restore_keychain_preference_at(
+    path: &Path,
+    expected: bool,
+    replacement: bool,
+) -> Result<bool, String> {
+    crate::store_lock::update_json_locked(path, AppSettings::default, |current| {
+        if current.store_api_keys_in_keychain != expected {
+            return Ok(false);
+        }
+        current.store_api_keys_in_keychain = replacement;
+        Ok(true)
+    })
 }
 
 pub fn load_projects() -> Vec<Project> {
@@ -873,6 +1170,9 @@ pub struct Automation {
     /// `all` | `failures` | `none`
     #[serde(default = "default_notify")]
     pub notify: String,
+    /// `skip` | `run_once` for occurrences missed while the Host was offline.
+    #[serde(default = "default_missed_run_policy")]
+    pub missed_run_policy: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub last_run_at: Option<DateTime<Utc>>,
@@ -891,6 +1191,22 @@ fn default_time() -> String {
 fn default_notify() -> String {
     "all".into()
 }
+fn default_missed_run_policy() -> String {
+    "run_once".into()
+}
+
+fn normalize_missed_run_policy(value: Option<&str>) -> Result<String, String> {
+    match value
+        .unwrap_or("run_once")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "skip" => Ok("skip".into()),
+        "run_once" => Ok("run_once".into()),
+        _ => Err("missedRunPolicy must be skip or run_once".into()),
+    }
+}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -905,6 +1221,7 @@ pub struct AutomationInput {
     pub time: Option<String>,
     pub weekdays: Option<Vec<u8>>,
     pub notify: Option<String>,
+    pub missed_run_policy: Option<String>,
     pub next_run_at: Option<DateTime<Utc>>,
 }
 
@@ -978,6 +1295,7 @@ pub fn create_automation(input: AutomationInput) -> Result<Automation, String> {
             .unwrap_or_else(default_notify)
             .trim()
             .to_string(),
+        missed_run_policy: normalize_missed_run_policy(input.missed_run_policy.as_deref())?,
         created_at: now,
         updated_at: now,
         last_run_at: None,
@@ -1024,6 +1342,9 @@ pub fn update_automation(id: &str, input: AutomationInput) -> Result<Automation,
         }
         if let Some(n) = input.notify {
             auto.notify = n.trim().to_string();
+        }
+        if let Some(policy) = input.missed_run_policy {
+            auto.missed_run_policy = normalize_missed_run_policy(Some(&policy))?;
         }
         if input.next_run_at.is_some() {
             auto.next_run_at = input.next_run_at;
@@ -1263,20 +1584,7 @@ pub fn save_composer_prefs(
 
     match scope {
         ComposerPrefsScope::Global => {
-            let mut s = settings;
-            if let Some(v) = model_id {
-                s.model_id = Some(v);
-            }
-            if let Some(v) = effort {
-                s.effort = Some(v);
-            }
-            if let Some(v) = mode {
-                s.mode = v;
-            }
-            if let Some(v) = permission_policy {
-                s.permission_policy = v;
-            }
-            save_settings(&s)?;
+            patch_global_composer_prefs(model_id, effort, mode, permission_policy)?;
         }
         ComposerPrefsScope::Project => {
             let pid = project_id.filter(|s| !s.is_empty());
@@ -1299,20 +1607,7 @@ pub fn save_composer_prefs(
                 }
             }
             // Always mirror to global so orphan UIs / new projects still have a default.
-            let mut s = load_settings();
-            if let Some(v) = model_id {
-                s.model_id = Some(v);
-            }
-            if let Some(v) = effort {
-                s.effort = Some(v);
-            }
-            if let Some(v) = mode {
-                s.mode = v;
-            }
-            if let Some(v) = permission_policy {
-                s.permission_policy = v;
-            }
-            save_settings(&s)?;
+            patch_global_composer_prefs(model_id, effort, mode, permission_policy)?;
         }
         ComposerPrefsScope::Session => {
             let sid = session_id.filter(|s| !s.is_empty());
@@ -1338,36 +1633,10 @@ pub fn save_composer_prefs(
                 })?;
                 if !updated {
                     // No session row yet — fall back to global so the chip still sticks.
-                    let mut s = load_settings();
-                    if let Some(v) = model_id {
-                        s.model_id = Some(v);
-                    }
-                    if let Some(v) = effort {
-                        s.effort = Some(v);
-                    }
-                    if let Some(v) = mode {
-                        s.mode = v;
-                    }
-                    if let Some(v) = permission_policy {
-                        s.permission_policy = v;
-                    }
-                    save_settings(&s)?;
+                    patch_global_composer_prefs(model_id, effort, mode, permission_policy)?;
                 }
             } else {
-                let mut s = load_settings();
-                if let Some(v) = model_id {
-                    s.model_id = Some(v);
-                }
-                if let Some(v) = effort {
-                    s.effort = Some(v);
-                }
-                if let Some(v) = mode {
-                    s.mode = v;
-                }
-                if let Some(v) = permission_policy {
-                    s.permission_policy = v;
-                }
-                save_settings(&s)?;
+                patch_global_composer_prefs(model_id, effort, mode, permission_policy)?;
             }
         }
     }
@@ -1378,6 +1647,26 @@ pub fn save_composer_prefs(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    fn settings_test_path(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "sunsetz-settings-{label}-{}-{}.json",
+            std::process::id(),
+            Uuid::new_v4()
+        ))
+    }
+
+    fn remove_settings_test_path(path: &Path) {
+        let _ = fs::remove_file(path);
+        let _ = fs::remove_file(crate::store_lock::lock_path_for(path));
+    }
+
+    fn remove_transaction_test_path(path: &Path) {
+        let _ = fs::remove_file(path);
+        let _ = fs::remove_file(crate::store_lock::lock_path_for(path));
+    }
 
     #[test]
     fn redact_scrubs_long_tokenish() {
@@ -1411,6 +1700,240 @@ mod tests {
         assert_eq!(s.max_concurrent_agents, 3);
         assert_eq!(s.agent_idle_minutes, 30);
         assert_eq!(s.stream_stall_seconds, 120);
+    }
+
+    #[test]
+    fn settings_patch_supports_explicit_null_and_rejects_unknown_fields() {
+        let path = settings_test_path("patch-validation");
+        let mut initial = AppSettings::default();
+        initial.manual_cli_path = Some("/tmp/runtime".into());
+        write_json(&path, &initial).unwrap();
+
+        let (_, patched) = patch_settings_at(
+            &path,
+            serde_json::json!({"manualCliPath": null, "theme": "light"}),
+        )
+        .unwrap();
+        assert_eq!(patched.manual_cli_path, None);
+        assert_eq!(patched.theme, "light");
+
+        let before = fs::read_to_string(&path).unwrap();
+        let error = patch_settings_at(&path, serde_json::json!({"apiKey": "secret"})).unwrap_err();
+        assert_eq!(error, "SETTINGS_PATCH_UNKNOWN_FIELD:apiKey");
+        assert_eq!(fs::read_to_string(&path).unwrap(), before);
+        remove_settings_test_path(&path);
+    }
+
+    #[test]
+    fn concurrent_settings_patches_keep_disjoint_fields() {
+        let path = settings_test_path("patch-concurrent");
+        write_json(&path, &AppSettings::default()).unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let mut threads = Vec::new();
+        for patch in [
+            serde_json::json!({"theme": "light"}),
+            serde_json::json!({"locale": "en"}),
+        ] {
+            let path = path.clone();
+            let barrier = std::sync::Arc::clone(&barrier);
+            threads.push(std::thread::spawn(move || {
+                barrier.wait();
+                patch_settings_at(&path, patch).unwrap();
+            }));
+        }
+        barrier.wait();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        let final_settings: AppSettings = read_json(&path);
+        assert_eq!(final_settings.theme, "light");
+        assert_eq!(final_settings.locale, "en");
+        remove_settings_test_path(&path);
+    }
+
+    #[test]
+    fn legacy_full_object_rejects_stale_multi_field_snapshot() {
+        let path = settings_test_path("legacy-stale");
+        let initial = AppSettings::default();
+        write_json(&path, &initial).unwrap();
+
+        let mut stale_request = initial.clone();
+        stale_request.theme = "light".into();
+        patch_settings_at(&path, serde_json::json!({"locale": "en"})).unwrap();
+
+        let current: AppSettings = read_json(&path);
+        let error = legacy_settings_patch_v1(&current, &stale_request).unwrap_err();
+        assert!(error.starts_with("SETTINGS_SET_REJECTED_USE_SETTINGS_PATCH_V1"));
+        let unchanged: AppSettings = read_json(&path);
+        assert_eq!(unchanged.locale, "en");
+        assert_eq!(unchanged.theme, "dark");
+
+        let mut single_field_request = current;
+        single_field_request.theme = "light".into();
+        assert_eq!(
+            legacy_settings_patch_v1(&unchanged, &single_field_request).unwrap(),
+            Some(serde_json::json!({"theme": "light"}))
+        );
+        remove_settings_test_path(&path);
+    }
+
+    #[test]
+    fn legacy_zero_diff_is_a_true_no_op_inside_keychain_transaction() {
+        let path = settings_test_path("legacy-no-op");
+        let transaction = path.with_extension("keychain-transaction");
+        let requested = AppSettings::default();
+        write_json(&path, &requested).unwrap();
+        let before = fs::read_to_string(&path).unwrap();
+
+        let (previous, current) = patch_legacy_settings_with_keychain_transaction_at(
+            &path,
+            &transaction,
+            &requested,
+            |_| panic!("no-diff legacy request must not migrate keychain state"),
+        )
+        .unwrap();
+
+        assert_eq!(previous.theme, current.theme);
+        assert_eq!(fs::read_to_string(&path).unwrap(), before);
+        remove_settings_test_path(&path);
+        remove_transaction_test_path(&transaction);
+    }
+
+    #[test]
+    fn keychain_true_false_migrations_are_serialized() {
+        let path = settings_test_path("keychain-serialized");
+        let transaction = path.with_extension("keychain-transaction");
+        write_json(&path, &AppSettings::default()).unwrap();
+
+        let (first_entered_tx, first_entered_rx) = mpsc::channel();
+        let (release_first_tx, release_first_rx) = mpsc::channel();
+        let first_path = path.clone();
+        let first_transaction = transaction.clone();
+        let first = std::thread::spawn(move || {
+            patch_settings_with_keychain_transaction_at(
+                &first_path,
+                &first_transaction,
+                serde_json::json!({"storeApiKeysInKeychain": true}),
+                |enabled| {
+                    assert!(enabled);
+                    first_entered_tx.send(()).unwrap();
+                    release_first_rx.recv().unwrap();
+                    Ok(())
+                },
+            )
+        });
+        first_entered_rx.recv().unwrap();
+
+        let (second_started_tx, second_started_rx) = mpsc::channel();
+        let (second_finished_tx, second_finished_rx) = mpsc::channel();
+        let second_path = path.clone();
+        let second_transaction = transaction.clone();
+        let second = std::thread::spawn(move || {
+            second_started_tx.send(()).unwrap();
+            let result = patch_settings_with_keychain_transaction_at(
+                &second_path,
+                &second_transaction,
+                serde_json::json!({"storeApiKeysInKeychain": false}),
+                |enabled| {
+                    assert!(!enabled);
+                    Ok(())
+                },
+            );
+            second_finished_tx.send(()).unwrap();
+            result
+        });
+        second_started_rx.recv().unwrap();
+        assert!(second_finished_rx
+            .recv_timeout(Duration::from_millis(100))
+            .is_err());
+
+        release_first_tx.send(()).unwrap();
+        first.join().unwrap().unwrap();
+        second.join().unwrap().unwrap();
+        let final_settings: AppSettings = read_json(&path);
+        assert!(!final_settings.store_api_keys_in_keychain);
+
+        remove_settings_test_path(&path);
+        remove_transaction_test_path(&transaction);
+    }
+
+    #[test]
+    fn failed_keychain_migration_cannot_aba_rollback_same_value_writer() {
+        let path = settings_test_path("keychain-rollback-aba");
+        let transaction = path.with_extension("keychain-transaction");
+        write_json(&path, &AppSettings::default()).unwrap();
+
+        let (first_entered_tx, first_entered_rx) = mpsc::channel();
+        let (release_first_tx, release_first_rx) = mpsc::channel();
+        let first_path = path.clone();
+        let first_transaction = transaction.clone();
+        let first = std::thread::spawn(move || {
+            patch_settings_with_keychain_transaction_at(
+                &first_path,
+                &first_transaction,
+                serde_json::json!({"storeApiKeysInKeychain": true}),
+                |_| {
+                    first_entered_tx.send(()).unwrap();
+                    release_first_rx.recv().unwrap();
+                    Err("injected migration failure".into())
+                },
+            )
+        });
+        first_entered_rx.recv().unwrap();
+
+        let (second_started_tx, second_started_rx) = mpsc::channel();
+        let (second_finished_tx, second_finished_rx) = mpsc::channel();
+        let second_path = path.clone();
+        let second_transaction = transaction.clone();
+        let second = std::thread::spawn(move || {
+            second_started_tx.send(()).unwrap();
+            let mut requested = AppSettings::default();
+            requested.store_api_keys_in_keychain = true;
+            let result = patch_legacy_settings_with_keychain_transaction_at(
+                &second_path,
+                &second_transaction,
+                &requested,
+                |enabled| {
+                    assert!(enabled);
+                    Ok(())
+                },
+            );
+            second_finished_tx.send(()).unwrap();
+            result
+        });
+        second_started_rx.recv().unwrap();
+        assert!(second_finished_rx
+            .recv_timeout(Duration::from_millis(100))
+            .is_err());
+
+        release_first_tx.send(()).unwrap();
+        assert!(first
+            .join()
+            .unwrap()
+            .unwrap_err()
+            .contains("injected migration failure"));
+        second.join().unwrap().unwrap();
+        let final_settings: AppSettings = read_json(&path);
+        assert!(final_settings.store_api_keys_in_keychain);
+
+        remove_settings_test_path(&path);
+        remove_transaction_test_path(&transaction);
+    }
+
+    #[test]
+    fn keychain_rollback_compares_only_its_field() {
+        let path = settings_test_path("keychain-cas");
+        let mut initial = AppSettings::default();
+        initial.theme = "light".into();
+        initial.store_api_keys_in_keychain = true;
+        write_json(&path, &initial).unwrap();
+
+        assert!(compare_restore_keychain_preference_at(&path, true, false).unwrap());
+        assert!(!compare_restore_keychain_preference_at(&path, true, false).unwrap());
+        let current: AppSettings = read_json(&path);
+        assert_eq!(current.theme, "light");
+        assert!(!current.store_api_keys_in_keychain);
+        remove_settings_test_path(&path);
     }
 
     #[test]
