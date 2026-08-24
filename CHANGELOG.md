@@ -7,10 +7,10 @@
 - 隔离静态 HTML 预览，启用主 WebView CSP，禁用全局 asset protocol，并引入受 provenance 校验的 `ResourceHandleV1`。
 - 远程 ACP 限制为 loopback；JSON/TOML 读改写迁移到覆盖完整事务的跨进程锁与原子替换。
 - 新增 RuntimeCapabilitiesV1、RuntimeEventEnvelopeV1、Linux bubblewrap sandbox profile 与 clean-room capability manifest。
-- 新增只读 Runtime 插件目录/搜索/hooks inventory、可重建 FTS5 会话检索、待审 Skill 候选和 Rust Host 自动化认领账本。
-- 新增引用真实 user 消息、拒绝敏感材料且可删除的有限 Memory 候选事实源；批准候选不会暗中注入 Runtime。
+- 新增只读 Runtime 插件目录/搜索/hooks inventory、可重建 FTS5 会话检索、待审 Skill 候选和 Rust Host 自动化认领账本；无法机器校验目标的插件安装/卸载继续由 CLI 执行。
+- 新增引用真实 user 消息、拒绝敏感材料且可删除的有限 Memory 候选事实源，以及只读、有界、显式选择的上下文包；两者都不会暗中注入 Runtime。
 - Skill 候选治理升级为双哈希审阅、目标级所有权/CAS 与失败恢复；用户、插件和外部 Skill 继续禁止自动覆盖。
-- 自动化新增 `run_once | skip` missed-run policy；过期 claim 不再自动生成 replacement，避免长任务并发重复副作用。
+- 自动化新增 `run_once | skip` missed-run policy 和 Runtime 进度 heartbeat；过期 claim 仍不自动生成 replacement，避免长任务并发重复副作用。
 - Settings 改为白名单字段级原子 patch、前端权威回滚和 Keychain 事务串行化；旧全量 setter 只保留 fail-safe 兼容语义。
 - macOS/Windows 非 off Runtime 沙箱、应用关闭后的系统调度和 Windows 物理机发布验收仍未完成。
 

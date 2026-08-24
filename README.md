@@ -18,8 +18,8 @@ Sunsetz 是一款本地优先的桌面 Agent 工作台。它把项目、会话�
 - 三层输入器、附件持久化、精确上下文用量和 Runtime 模型选择。
 - 前后台统一、可在 WebView 重载后恢复的权限/Agent 提问/计划交互；死亡 Runtime RPC 明确标记 interrupted。
 - Files、Changes 和 Plan 资源面板，支持代码、Markdown、图片、媒体、PDF 和 Office 预览。
-- 自定义 Provider、MCP、技能、只读插件目录/搜索/hooks、账号与 Rust Host 计划任务调度。
-- 可重建的本地会话全文检索、引用真实消息且不自动注入 Runtime 的有限 Memory 候选，以及只在用户审阅后保存的 Skill 候选。
+- 自定义 Provider、MCP、技能、只读插件目录/搜索/hooks、账号，以及带 Runtime 进度心跳的 Rust Host 计划任务调度。
+- 可重建的本地会话全文检索、引用真实消息的有限 Memory 候选及显式有界上下文包，以及只在用户审阅后保存的 Skill 候选；两类候选都不会自动写入 Runtime。
 - 简体中文、繁体中文、英文，以及浅色、深色和高对比度主题。
 - `HostCapabilities v2` 能力门控：未知、不支持或未安装的入口不会进入界面和键盘路径。
 

@@ -33,7 +33,7 @@
 ## 数据
 
 - 文件：`paths::automations_file()`（macOS 常见：`~/Library/Application Support/dev.sunsetz.desktop/automations.json`）
-- 运行账本：`automation-runs.v1.json`（最多 512 条；10 分钟 claim lease）
+- 运行账本：`automation-runs.v1.json`（最多 512 条；10 分钟 claim lease；旧行缺少 heartbeat 字段时兼容读取）
 - 浏览器兜底：`localStorage["sunsetz.automations"]`
 - 字段：`title` `prompt` `enabled` `projectId` `modelId` `effort` `frequency` `time` `weekdays` `missedRunPolicy` `notify` `lastRunAt` `nextRunAt`
 - `missedRunPolicy`：`run_once`（默认，只对尚未认领的错过 occurrence 补跑一次）或 `skip`（记录 skipped 并推进计划）。旧数据缺字段时按 `run_once` 读取。
@@ -44,9 +44,10 @@
 2. Host 只保留一个 active claim；尚未认领的错过周期按任务的 `run_once | skip` 策略处理，不回放一串历史周期。
 3. WebView 空闲后执行：`session_create` → `automation_claim_bind_v1` → 写 session prefs → `session_connect` → `session_send`。
 4. 绑定后由 Host 依据真实 ACP turn 结果调用账本完成逻辑；“prompt 已发送”不等于成功。
-5. WebView 重载时，已绑定 claim 会重新广播但不会再次发送。lease 到期而未完成的记录为 `interrupted`；固定墙钟不能证明 Runtime 已停止，因此不会自动生成 replacement claim。晚到 completion 只能结算原 claim，且重复完成 fail-closed。
-6. **connect 失败**：删除空壳 session并记 failed；**send/turn 失败**：保留会话错误记录并记 failed。
-7. 完成后原子推进 `lastRunAt` / `nextRunAt`；`once` 任务禁用。
+5. Host 从版本化 Runtime event envelope 的 `stream`、`tool_call`、`plan`、`ask_user`、`permission`、`retry_state`、`context_compact` 或 `usage` 识别进度；同一 session 最多每 30 秒将严格递增的 Runtime sequence 写入 `lastRuntimeSessionSequence` / `lastHeartbeatAt`，并把 lease 设为 Host 当前时间后 10 分钟。错误、stderr、进程退出和 unknown event 不续租。
+6. WebView 重载时，已绑定 claim 会重新广播但不会再次发送。无进度且 lease 到期的记录为 `interrupted`；heartbeat 只证明近期 Runtime 进度，仍不会自动生成 replacement claim。晚到 completion 只能结算原 claim，且重复完成 fail-closed。
+7. **connect 失败**：删除空壳 session并记 failed；**send/turn 失败**：保留会话错误记录并记 failed。
+8. 完成后原子推进 `lastRunAt` / `nextRunAt`；`once` 任务禁用。
 
 与 Build 的 `/loop`、`scheduler_*` 可并存：用户也可在会话里让 Agent 直接调度；壳层清单是独立 SoT。
 
@@ -76,7 +77,8 @@
 - [x] 应用打开时到期可触发（不阻塞主对话架构）
 - [x] 原子认领、运行账本、单次补跑与 WebView 重载去重
 - [x] 每任务 `run_once | skip` missed-run policy；过期 claim 不自动重试
+- [x] Runtime 进度 heartbeat 严格按 session/sequence 续租，普通会话与错误事件不写 heartbeat
 - [x] connect 失败不留空壳会话；已有空会话不伪装成新建页
 - [ ] 后台无窗口常驻触发（可选 P2：系统服务 / headless CLI）
-- [ ] 基于 Host 活性证明或 heartbeat 的可靠重试；在此之前保持过期不重试
+- [ ] 基于 heartbeat 的安全 replacement/retry；当前只续租，仍保持过期不重试
 - [ ] 与 CLI scheduler 双向同步（可选 P2）

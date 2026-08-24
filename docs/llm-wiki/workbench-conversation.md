@@ -156,7 +156,7 @@ Host 校验名称、frontmatter、相对路径、体积、路径穿越、符号�
 
 工具型任务完成后，Host 可另外生成 `SkillCandidateV1` pending 草稿。候选包含来源消息、来源 hash、审阅 hash、Host ownership 和有界审计；它不会自动保存，也不能自动覆盖用户、插件或外部 Skill。V2 用 expected hash 防陈旧窗口，编辑后的最终草稿另以 final hash 绑定。用户确认后才复用同一原子写入路径。
 
-有限 Memory 候选是另一套独立事实源：只接受引用真实持久化 user 消息的偏好、项目事实或工作流提示，内容/总量有界并拒绝 Secret。批准只表示用户审阅通过，当前不会自动注入 Runtime、FTS 或工具上下文。
+有限 Memory 候选是另一套独立事实源：只接受引用真实持久化 user 消息的偏好、项目事实或工作流提示，内容/总量有界并拒绝 Secret。批准只表示用户审阅通过。用户可显式选择已批准候选，构建最多 8 条、单条 1,000 字、总计 4,000 字的只读 JSON 上下文包并复制；该结果没有 `session_send`、ACP 或 Runtime 自动注入路径。
 
 ## 9. 能力与命令边界
 
@@ -171,7 +171,7 @@ Host 校验名称、frontmatter、相对路径、体积、路径穿越、符号�
 | 统一交互查询/决策 | live Runtime 期间 `available`；死亡 RPC 仅审计为 interrupted | `session_interactions_list`、`session_resolve_interaction_v1` |
 | Runtime 能力/事件 | `available` | `runtime_capabilities_v1`、`session://runtime_event_v1` |
 | 会话可见消息检索 | `available`，SQLite 可删可重建 | `session_search_v1` |
-| 有限 Memory 候选 | 可审阅但不注入 Runtime | `memory_candidates_list_v1`、`memory_candidate_*_v1` |
+| 有限 Memory 候选 | 可审阅并显式导出有界上下文包，但不自动注入 Runtime | `memory_candidates_list_v1`、`memory_candidate_*_v1`、`memory_context_pack_build_v1` |
 | 模型/推理切换 | 按声明能力 | `models_list_available`、`session_set_model` |
 | 精确上下文 | 仅有可靠遥测时展示 | Runtime usage + 已知 capacity |
 | 原生语音 | `unavailable` | v2 能力表 + `speechRecognition: false`；无 speech 命令 |

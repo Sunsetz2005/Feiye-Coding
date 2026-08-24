@@ -18,8 +18,8 @@ Sunsetz is a local-first desktop agent workbench. It brings projects, sessions, 
 - A three-layer composer with persistent attachments, exact context telemetry, and Runtime-provided models.
 - One foreground/background interaction lifecycle for permissions, Agent questions, and plans, recoverable across WebView reloads while the Runtime remains alive.
 - Files, Changes, and Plan resources with code, Markdown, image, media, PDF, and Office previews.
-- Custom providers, MCP, skills, a read-only Runtime plugin/hooks catalog, accounts, and Rust Host scheduled-task claims.
-- Rebuildable local session search, bounded Memory candidates sourced from real messages and never injected into the Runtime automatically, and review-only Skill candidates.
+- Custom providers, MCP, skills, a read-only Runtime plugin/hooks catalog, accounts, and Rust Host scheduled-task claims backed by Runtime progress heartbeats.
+- Rebuildable local session search, bounded Memory candidates sourced from real messages, explicit bounded context-pack export, and review-only Skill candidates; neither candidate system writes to the Runtime automatically.
 - English, Simplified Chinese, Traditional Chinese, light, dark, and high-contrast themes.
 - `HostCapabilities v2` gating: unknown, unsupported, or uninstalled features stay out of the DOM and keyboard path.
 

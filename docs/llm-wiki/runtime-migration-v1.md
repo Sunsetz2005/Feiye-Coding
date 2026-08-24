@@ -45,7 +45,7 @@
 
 ### 插件
 
-`runtime_plugins_catalog_v1(query)` 提供 Runtime CLI 事实源的只读目录与搜索，`runtime_hooks_inventory_v1` 提供 hooks inventory。安装仍由 Runtime CLI 完成，`installActionAvailable=false`；在 CLI 提供稳定机器可读安装结果前，不增加一键安装。
+`runtime_plugins_catalog_v1(query)` 提供 Runtime CLI 事实源的只读目录与搜索，`runtime_hooks_inventory_v1` 提供 hooks inventory。本机 Runtime `0.2.111` 只有 list/marketplace list 的稳定 JSON，安装和卸载仍由 Runtime CLI 完成；目录显式返回 `installActionAvailable=false`、`uninstallActionAvailable=false`，旧 Host 缺字段也 fail-closed。legacy `plugin_uninstall` 保留命令兼容但只返回不可用错误，不启动 CLI 或改状态。Runtime 提供唯一目标选择与机器可读 post-state 前，不开放应用内 mutation。
 
 ### 会话检索
 
@@ -59,13 +59,15 @@ JSON journal 仍是事实源。`session-search.v1.sqlite3` 是可删除、可重
 
 `memory-candidates.v1.json` 是独立的待审事实源，只接受 `user_preference | project_fact | workflow_hint`，状态为 `pending | approved | rejected | superseded`。创建必须引用 Host 已持久化的真实 user 消息；内容限制为 2,000 字符、总量限制为 256 条，并在写入前拒绝 API key、token、私钥、带密码数据库 URL 和 JWT 等敏感材料。批准、拒绝、替代和删除都使用内容 hash CAS。
 
-批准只表示用户确认了候选；当前不会自动注入 Runtime prompt、工具上下文或 FTS，会话检索也不会被称作长期记忆。后续若接 Runtime memory，必须另建能力契约、可见注入点和删除/导出路径。
+批准只表示用户确认了候选；当前不会自动注入 Runtime prompt、工具上下文或 FTS，会话检索也不会被称作长期记忆。用户可显式选择已批准且 hash 未变化的候选，通过 `memory_context_pack_build_v1` 构建确定性只读 JSON：最多 8 条、单条 1,000 字、总计 4,000 字。Host 在锁定快照内重新校验 approved、CAS、来源、所有权和敏感材料；UI 只预览/复制，没有 `session_send`、ACP 或 Runtime 注入调用。后续若接 Runtime memory，必须另建能力契约、可见注入点和删除/导出路径。
 
 ### 自动化
 
 Rust Host 每 30 秒通过可独立调用的 `tick_once` 检查到期任务，并在 `automation-runs.v1.json` 中原子认领、设置 10 分钟 lease、记录 claimed/succeeded/failed/interrupted/skipped。每个任务显式保存 `run_once | skip` missed-run policy。WebView 只负责为认领项创建会话并绑定 `claimId → sessionId`；真实 ACP turn 完成后由 Host 结账。重载后的已绑定 claim 不会重复发送。
 
-固定 lease 到期不能证明原 Runtime 已停止，因此过期 claim 只标记为 interrupted，不自动创建 replacement；晚到 completion 仍只能结算原 claim，且重复完成 fail-closed。这优先保证不会并发重复执行外部副作用。若未来需要可靠重试，必须先增加 Host 活性证明或 heartbeat，而不是仅凭墙钟超时。
+绑定会话产生真实 Runtime 进度事件时，Host 使用单会话严格递增 sequence 作为 heartbeat 证据，同一 session 最多每 30 秒原子记录一次，并把 lease 重设为 Host 当前时间后 10 分钟。只有 stream、tool call、plan、ask-user、permission、retry、compact 和 usage 算进度；错误、stderr、process exit 与 unknown event 不续租。普通会话没有绑定 claim 时不写账本，新字段均可选，旧 JSON 无需迁移。
+
+Heartbeat 只能证明近期有 Runtime 进度，不能证明过期 Runtime 已终止。因此无进度到期的 claim 只标记为 interrupted，不自动创建 replacement；晚到 completion 仍只能结算原 claim，且重复完成 fail-closed。这优先保证不会并发重复执行外部副作用。可靠 retry 仍需进程终止证明与 replacement CAS，不能仅凭墙钟或缺失 heartbeat 启用。
 
 该调度器只在应用进程存活时运行。应用关闭后的系统服务、launchd、Task Scheduler 或 headless 常驻仍是独立里程碑。
 
@@ -77,12 +79,12 @@ Rust Host 每 30 秒通过可独立调用的 `tick_once` 检查到期任务，�
 
 1. Windows 物理机仍需验证文件 replace、WebView CSP/resource protocol、loopback ACP、沙箱 fail-closed、200% 缩放与完整键盘路径；没有实机证据不得宣称本阶段发布完成。
 2. macOS/Windows Runtime 子进程沙箱适配器尚未实现；默认 `off` 不等于已隔离。
-3. 交互式 HTML 容器、应用退出后的系统级自动化、稳定机器可读插件安装仍未实现。
+3. 交互式 HTML 容器、应用退出后的系统级自动化、稳定机器可读插件安装/卸载仍未实现。
 4. `media://` 是受 provenance 校验的兼容通道；全部调用方迁移到 ResourceHandle 后再删除。
 5. 旧 `session://*` 事件至少保留一个完整版本周期；移除必须单独立项并更新契约 golden。
 6. SQLite 索引可在崩溃后短暂落后，下一次搜索会按 journal 指纹重建并清理已删除会话；不得把索引当事实源或备份。
-7. Memory 候选目前是可审阅事实源，不是 Runtime 长时记忆；未实现可见注入前不得宣传为自动记忆。
-8. Automation 的 lease 过期采取不重试策略以避免重复副作用；可靠重试与系统级常驻调度仍需单独里程碑。
+7. Memory 候选目前是可审阅事实源，显式上下文包也只供预览/复制，不是 Runtime 长时记忆；未实现可见注入前不得宣传为自动记忆。
+8. Automation 已有 Runtime 进度 heartbeat，但 lease 过期仍采取不重试策略以避免重复副作用；安全 replacement/retry 与系统级常驻调度仍需单独里程碑。
 
 ## 验证入口
 
@@ -99,4 +101,4 @@ cd src-tauri && cargo test
 
 覆盖率门禁另运行 `pnpm test:coverage`、`pnpm coverage:changed` 和 Rust coverage audit。Windows 发布还必须执行仓库中的物理机验收脚本。
 
-本轮自动验收快照：151 个 Tauri command、25 个 event、515 个前端测试、45 个视觉回归用例、310 个 Rust 测试通过（另 1 个夹具生成测试按设计忽略）；改动代码覆盖率为 91.00% 行 / 71.32% 分支，Rust 行覆盖率为 43.45%。
+本轮自动验收快照：152 个 Tauri command、25 个 event、519 个前端测试、45 个视觉回归用例、319 个 Rust 测试通过（另 1 个夹具生成测试按设计忽略）；改动代码覆盖率为 90.41% 行 / 86.05% 分支，Rust 行覆盖率为 44.39%。
