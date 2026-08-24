@@ -51,6 +51,7 @@ export const SETTINGS_REGISTRY: readonly SettingsSectionRegistration[] = [
       "settings.storeApiKeysInKeychain",
       "settings.memory.title",
       "settings.memory.reviewOnly",
+      "settings.memory.packTitle",
     ],
   },
   {

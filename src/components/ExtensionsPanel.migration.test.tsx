@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   catalog: vi.fn(),
   hooks: vi.fn(),
+  uninstall: vi.fn(),
 }));
 
 vi.mock("@/lib/api", async (importOriginal) => {
@@ -17,6 +18,7 @@ vi.mock("@/lib/api", async (importOriginal) => {
     inspectMcp: vi.fn(async () => ({ servers: [] })),
     runtimePluginsCatalogV1: mocks.catalog,
     runtimeHooksInventoryV1: mocks.hooks,
+    pluginUninstall: mocks.uninstall,
     providersList: vi.fn(async () => null),
   };
 });
@@ -34,6 +36,9 @@ beforeEach(() => {
     version: 1,
     source: "runtime_cli",
     installActionAvailable: false,
+    uninstallActionAvailable: false,
+    actionUnavailableReason:
+      "runtime_plugin_mutations_are_not_machine_verifiable",
     plugins: [plugin(query?.trim() ? "needle-plugin" : "base-plugin")],
   }));
   mocks.hooks.mockResolvedValue([
@@ -54,6 +59,12 @@ describe("ExtensionsPanel Runtime catalog bridge", () => {
 
     expect(await screen.findByText("base-plugin")).toBeTruthy();
     expect(screen.getByText(/Hooks providers: 2/)).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "Uninstall" }).hasAttribute("disabled"),
+    ).toBe(true);
+    expect(
+      screen.getByText(/Install and uninstall stay in the Runtime CLI/),
+    ).toBeTruthy();
 
     fireEvent.change(screen.getByLabelText("Search Runtime plugins…"), {
       target: { value: "needle" },
@@ -77,5 +88,23 @@ describe("ExtensionsPanel Runtime catalog bridge", () => {
       "catalog unavailable",
     );
     expect(screen.getByText(/No plugins installed/)).toBeTruthy();
+  });
+
+  it("fails closed when an older Host omits uninstall availability", async () => {
+    mocks.catalog.mockResolvedValue({
+      version: 1,
+      source: "runtime_cli",
+      installActionAvailable: false,
+      plugins: [plugin("legacy-host-plugin")],
+    });
+    const { ExtensionsPanel } = await import("./ExtensionsPanel");
+    render(<ExtensionsPanel locale="en" />);
+
+    expect(await screen.findByText("legacy-host-plugin")).toBeTruthy();
+    const uninstall = screen.getByRole("button", { name: "Uninstall" });
+    expect(uninstall.hasAttribute("disabled")).toBe(true);
+    fireEvent.click(uninstall);
+    expect(mocks.uninstall).not.toHaveBeenCalled();
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 });

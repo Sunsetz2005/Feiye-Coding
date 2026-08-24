@@ -29,6 +29,12 @@ export function MemoryCandidatesPanel({
   const [candidateType, setCandidateType] =
     useState<api.MemoryCandidateTypeV1>("user_preference");
   const [content, setContent] = useState("");
+  const [selectedHashes, setSelectedHashes] = useState<Record<string, string>>(
+    {},
+  );
+  const [contextPack, setContextPack] =
+    useState<api.MemoryContextPackV1 | null>(null);
+  const [copied, setCopied] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -38,7 +44,22 @@ export function MemoryCandidatesPanel({
       return;
     }
     try {
-      setCandidates(await api.memoryCandidatesListV1());
+      const rows = await api.memoryCandidatesListV1();
+      setCandidates(rows);
+      const approvedHashes = new Map(
+        rows
+          .filter((candidate) => candidate.status === "approved")
+          .map((candidate) => [candidate.id, candidate.contentHash]),
+      );
+      setSelectedHashes((current) =>
+        Object.fromEntries(
+          Object.entries(current).filter(
+            ([id, hash]) => approvedHashes.get(id) === hash,
+          ),
+        ),
+      );
+      setContextPack(null);
+      setCopied(false);
       setError(null);
     } catch (reason) {
       setError(String(reason));
@@ -91,6 +112,68 @@ export function MemoryCandidatesPanel({
       setError(String(reason));
     } finally {
       setBusy(null);
+    }
+  };
+
+  const selectedCandidates = useMemo(
+    () =>
+      candidates.filter(
+        (candidate) =>
+          candidate.status === "approved" &&
+          selectedHashes[candidate.id] === candidate.contentHash,
+      ),
+    [candidates, selectedHashes],
+  );
+
+  const toggleContextCandidate = (
+    candidate: api.MemoryCandidateV1,
+    checked: boolean,
+  ) => {
+    setContextPack(null);
+    setCopied(false);
+    setSelectedHashes((current) => {
+      const next = { ...current };
+      if (checked) next[candidate.id] = candidate.contentHash;
+      else delete next[candidate.id];
+      return next;
+    });
+  };
+
+  const buildContextPack = async () => {
+    if (busy || selectedCandidates.length === 0) return;
+    setBusy("context-pack");
+    setError(null);
+    setCopied(false);
+    try {
+      setContextPack(
+        await api.memoryContextPackBuildV1(
+          selectedCandidates.map((candidate) => ({
+            id: candidate.id,
+            expectedContentHash: candidate.contentHash,
+          })),
+        ),
+      );
+    } catch (reason) {
+      setContextPack(null);
+      setError(String(reason));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const contextPackJson = contextPack
+    ? JSON.stringify(contextPack, null, 2)
+    : "";
+
+  const copyContextPack = async () => {
+    if (!contextPackJson) return;
+    try {
+      await navigator.clipboard.writeText(contextPackJson);
+      setCopied(true);
+      setError(null);
+    } catch (reason) {
+      setCopied(false);
+      setError(String(reason));
     }
   };
 
@@ -170,6 +253,12 @@ export function MemoryCandidatesPanel({
                   {t(MEMORY_STATUS_LABELS[candidate.status])}
                 </div>
                 <div className="settings-row__desc">{candidate.content}</div>
+                <div className="settings-row__hint">
+                  {t("settings.memory.provenance", {
+                    sessionId: candidate.source.sessionId,
+                    messageId: candidate.source.messageId,
+                  })}
+                </div>
               </div>
               <div className="settings-row__actions">
                 {candidate.status === "pending" ? (
@@ -193,14 +282,31 @@ export function MemoryCandidatesPanel({
                   </>
                 ) : null}
                 {candidate.status === "approved" ? (
-                  <button
-                    type="button"
-                    className="btn btn--ghost btn--sm"
-                    disabled={busy !== null}
-                    onClick={() => void mutate(candidate, "supersede")}
-                  >
-                    {t("settings.memory.supersede")}
-                  </button>
+                  <>
+                    <label className="settings-row__hint">
+                      <input
+                        type="checkbox"
+                        checked={selectedHashes[candidate.id] === candidate.contentHash}
+                        disabled={
+                          busy !== null ||
+                          (selectedHashes[candidate.id] !== candidate.contentHash &&
+                            selectedCandidates.length >= 8)
+                        }
+                        onChange={(event) =>
+                          toggleContextCandidate(candidate, event.target.checked)
+                        }
+                      />{" "}
+                      {t("settings.memory.selectForPack")}
+                    </label>
+                    <button
+                      type="button"
+                      className="btn btn--ghost btn--sm"
+                      disabled={busy !== null}
+                      onClick={() => void mutate(candidate, "supersede")}
+                    >
+                      {t("settings.memory.supersede")}
+                    </button>
+                  </>
                 ) : null}
                 <button
                   type="button"
@@ -214,6 +320,64 @@ export function MemoryCandidatesPanel({
             </article>
           ))
         )}
+
+        <article className="settings-row settings-row--stack">
+          <div className="settings-row__text">
+            <div className="settings-row__label">
+              {t("settings.memory.packTitle")}
+            </div>
+            <div className="settings-row__desc">
+              {t("settings.memory.packDesc")}
+            </div>
+            <div className="settings-row__hint">
+              {t("settings.memory.selectedCount", {
+                n: selectedCandidates.length,
+              })}
+            </div>
+          </div>
+          <div className="settings-row__actions">
+            <button
+              type="button"
+              className="btn btn--primary btn--sm"
+              disabled={busy !== null || selectedCandidates.length === 0}
+              onClick={() => void buildContextPack()}
+            >
+              {busy === "context-pack"
+                ? t("settings.memory.buildingPack")
+                : t("settings.memory.buildPack")}
+            </button>
+          </div>
+          {selectedCandidates.length === 0 ? (
+            <div className="settings-row__hint">
+              {t("settings.memory.selectApproved")}
+            </div>
+          ) : null}
+          {contextPack ? (
+            <>
+              <textarea
+                className="settings-input"
+                value={contextPackJson}
+                readOnly
+                rows={8}
+                aria-label={t("settings.memory.packPreview")}
+              />
+              <div className="settings-row__actions">
+                <button
+                  type="button"
+                  className="btn btn--ghost btn--sm"
+                  onClick={() => void copyContextPack()}
+                >
+                  {t("settings.memory.copyPack")}
+                </button>
+                {copied ? (
+                  <span className="settings-row__hint" aria-live="polite">
+                    {t("settings.memory.copiedPack")}
+                  </span>
+                ) : null}
+              </div>
+            </>
+          ) : null}
+        </article>
       </div>
     </section>
   );

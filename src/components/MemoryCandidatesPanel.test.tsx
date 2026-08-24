@@ -13,6 +13,7 @@ const apiMocks = vi.hoisted(() => ({
   reject: vi.fn(),
   supersede: vi.fn(),
   delete: vi.fn(),
+  buildPack: vi.fn(),
 }));
 
 vi.mock("@/lib/api", async (importOriginal) => {
@@ -26,6 +27,7 @@ vi.mock("@/lib/api", async (importOriginal) => {
     memoryCandidateRejectV1: apiMocks.reject,
     memoryCandidateSupersedeV1: apiMocks.supersede,
     memoryCandidateDeleteV1: apiMocks.delete,
+    memoryContextPackBuildV1: apiMocks.buildPack,
   };
 });
 
@@ -55,6 +57,11 @@ beforeEach(() => {
   apiMocks.reject.mockResolvedValue(candidate({ status: "rejected" }));
   apiMocks.supersede.mockResolvedValue(candidate({ status: "superseded" }));
   apiMocks.delete.mockResolvedValue(candidate());
+  apiMocks.buildPack.mockResolvedValue({ version: 1, items: [] });
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: { writeText: vi.fn().mockResolvedValue(undefined) },
+  });
 });
 
 afterEach(() => {
@@ -168,6 +175,121 @@ describe("MemoryCandidatesPanel", () => {
 
     await user.click(createButton);
     expect(apiMocks.create).not.toHaveBeenCalled();
+  });
+
+  it("builds and copies a bounded pack only from explicitly selected approved candidates", async () => {
+    const user = userEvent.setup();
+    const writeText = vi.spyOn(navigator.clipboard, "writeText");
+    const approved = candidate({
+      id: "candidate-approved",
+      status: "approved",
+      type: "project_fact",
+      content: "The project uses one Runtime.",
+      contentHash: "b".repeat(64),
+    });
+    const pack = {
+      version: 1 as const,
+      items: [
+        {
+          candidateId: approved.id,
+          source: approved.source,
+          type: approved.type,
+          content: approved.content,
+          contentHash: approved.contentHash,
+        },
+      ],
+    };
+    apiMocks.list.mockResolvedValue([approved]);
+    apiMocks.buildPack.mockResolvedValue(pack);
+    render(<MemoryCandidatesPanel locale="en" source={source} />);
+
+    expect(await screen.findByText(approved.content)).toBeTruthy();
+    expect(screen.getByText(`Source: ${source.sessionId} / ${source.messageId}`)).toBeTruthy();
+    const build = screen.getByRole("button", { name: "Build context pack" });
+    expect(build.hasAttribute("disabled")).toBe(true);
+
+    await user.click(
+      screen.getByRole("checkbox", { name: "Select for context pack" }),
+    );
+    expect(build.hasAttribute("disabled")).toBe(false);
+    await user.click(build);
+
+    await waitFor(() =>
+      expect(apiMocks.buildPack).toHaveBeenCalledWith([
+        { id: approved.id, expectedContentHash: approved.contentHash },
+      ]),
+    );
+    const preview = await screen.findByRole("textbox", {
+      name: "Context pack JSON",
+    });
+    expect((preview as HTMLTextAreaElement).value).toBe(
+      JSON.stringify(pack, null, 2),
+    );
+    await user.click(screen.getByRole("button", { name: "Copy JSON" }));
+    expect(writeText).toHaveBeenCalledWith(
+      JSON.stringify(pack, null, 2),
+    );
+    expect(await screen.findByText("Copied")).toBeTruthy();
+  });
+
+  it("disables a ninth context candidate after eight explicit selections", async () => {
+    const user = userEvent.setup();
+    const approved = Array.from({ length: 9 }, (_, index) =>
+      candidate({
+        id: `candidate-approved-${index + 1}`,
+        status: "approved",
+        content: `Approved fact ${index + 1}`,
+        contentHash: (index + 1).toString(16).repeat(64),
+      }),
+    );
+    apiMocks.list.mockResolvedValue(approved);
+    render(<MemoryCandidatesPanel locale="en" source={source} />);
+
+    const checkboxes = await screen.findAllByRole("checkbox", {
+      name: "Select for context pack",
+    });
+    expect(checkboxes).toHaveLength(9);
+    for (const checkbox of checkboxes.slice(0, 8)) {
+      await user.click(checkbox);
+    }
+
+    expect(checkboxes[8].hasAttribute("disabled")).toBe(true);
+    expect(screen.getByText("Selected: 8")).toBeTruthy();
+    expect(apiMocks.buildPack).not.toHaveBeenCalled();
+  });
+
+  it("keeps candidates and explicit selections when context pack validation fails", async () => {
+    const user = userEvent.setup();
+    const approved = candidate({
+      id: "candidate-approved",
+      status: "approved",
+      content: "The project uses one Runtime.",
+      contentHash: "b".repeat(64),
+    });
+    apiMocks.list.mockResolvedValue([approved]);
+    apiMocks.buildPack.mockRejectedValueOnce(
+      new Error("STALE_MEMORY_CANDIDATE: content hash mismatch"),
+    );
+    render(<MemoryCandidatesPanel locale="en" source={source} />);
+
+    const checkbox = await screen.findByRole("checkbox", {
+      name: "Select for context pack",
+    });
+    await user.click(checkbox);
+    await user.click(
+      screen.getByRole("button", { name: "Build context pack" }),
+    );
+
+    expect(
+      await screen.findByText(/STALE_MEMORY_CANDIDATE: content hash mismatch/),
+    ).toBeTruthy();
+    expect(checkbox).toHaveProperty("checked", true);
+    expect(screen.getByText(approved.content)).toBeTruthy();
+    expect(screen.getByText("Selected: 1")).toBeTruthy();
+    expect(apiMocks.list).toHaveBeenCalledTimes(1);
+    expect(
+      screen.queryByRole("textbox", { name: "Context pack JSON" }),
+    ).toBeNull();
   });
 
   it("shows stale mutation errors without optimistically changing the list", async () => {

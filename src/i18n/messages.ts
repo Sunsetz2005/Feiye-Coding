@@ -609,6 +609,18 @@ const en = {
   "settings.memory.reviewOnly": "Review-only memory candidates",
   "settings.memory.desc":
     "Candidates are stored separately from chat search and are never injected into the Runtime automatically.",
+  "settings.memory.provenance": "Source: {sessionId} / {messageId}",
+  "settings.memory.selectForPack": "Select for context pack",
+  "settings.memory.packTitle": "Explicit context pack",
+  "settings.memory.packDesc":
+    "Select up to 8 approved items (1,000 characters each; 4,000 total), then build JSON to inspect or copy. Nothing is attached to a Runtime turn automatically.",
+  "settings.memory.selectedCount": "Selected: {n}",
+  "settings.memory.selectApproved": "Select at least one approved candidate.",
+  "settings.memory.buildPack": "Build context pack",
+  "settings.memory.buildingPack": "Building…",
+  "settings.memory.packPreview": "Context pack JSON",
+  "settings.memory.copyPack": "Copy JSON",
+  "settings.memory.copiedPack": "Copied",
   "settings.memory.type": "Memory type",
   "settings.memory.type.preference": "User preference",
   "settings.memory.type.projectFact": "Project fact",
@@ -1141,6 +1153,8 @@ const en = {
   "ext.plugins.filterEmpty": "No plugins match this filter.",
   "ext.plugins.note":
     "Same inventory as Sunsetz Runtime (the runtime plugin list). Enable/disable writes `shared runtime configuration`; the agent soft-respawns so the next turn reloads plugins.",
+  "ext.plugins.mutationsCliOnly":
+    "Install and uninstall stay in the Runtime CLI because repository-wide changes do not have a stable machine-readable result.",
   "ext.plugins.hooksInventory": "Hooks providers: {n}",
   "ext.skills.title": "Skills",
   "ext.skills.loading": "Loading skills…",
@@ -1883,6 +1897,18 @@ const zh: Record<MessageKey, string> = {
   "settings.memory.reviewOnly": "仅经审阅的记忆候选",
   "settings.memory.desc":
     "候选与会话搜索分开存储，绝不会自动注入 Runtime。",
+  "settings.memory.provenance": "来源：{sessionId} / {messageId}",
+  "settings.memory.selectForPack": "选择到上下文包",
+  "settings.memory.packTitle": "显式上下文包",
+  "settings.memory.packDesc":
+    "最多选择 8 条已批准候选（单条 1,000 字、总计 4,000 字），构建 JSON 供检查或复制；不会自动附加到 Runtime 对话。",
+  "settings.memory.selectedCount": "已选择：{n}",
+  "settings.memory.selectApproved": "请至少选择一条已批准候选。",
+  "settings.memory.buildPack": "构建上下文包",
+  "settings.memory.buildingPack": "构建中…",
+  "settings.memory.packPreview": "上下文包 JSON",
+  "settings.memory.copyPack": "复制 JSON",
+  "settings.memory.copiedPack": "已复制",
   "settings.memory.type": "记忆类型",
   "settings.memory.type.preference": "用户偏好",
   "settings.memory.type.projectFact": "项目事实",
@@ -2405,6 +2431,8 @@ const zh: Record<MessageKey, string> = {
   "ext.plugins.filterEmpty": "没有符合筛选条件的插件。",
   "ext.plugins.note":
     "与 Sunsetz Runtime 共用同一清单（the runtime plugin list）。启用/禁用写入 `shared runtime configuration`；agent soft-respawn 后下一轮对话重新加载插件。",
+  "ext.plugins.mutationsCliOnly":
+    "安装与卸载继续使用 Runtime CLI；仓库级变更尚无稳定的机器可读结果。",
   "ext.plugins.hooksInventory": "Hooks 提供方：{n}",
   "ext.skills.title": "技能",
   "ext.skills.loading": "正在加载技能…",

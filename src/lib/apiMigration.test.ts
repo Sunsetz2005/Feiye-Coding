@@ -137,6 +137,7 @@ describe("migration API contracts", () => {
     await api.memoryCandidateRejectV1(memoryMutation);
     await api.memoryCandidateSupersedeV1(memoryMutation);
     await api.memoryCandidateDeleteV1(memoryMutation);
+    await api.memoryContextPackBuildV1([memoryMutation]);
     await api.resourceOpenV1("/project/a.png");
     await api.resourceReadV1("handle");
     await api.sessionSearchV1("migration");
@@ -156,6 +157,9 @@ describe("migration API contracts", () => {
     });
     expect(invokeMock).toHaveBeenCalledWith("memory_candidate_approve_v1", {
       request: memoryMutation,
+    });
+    expect(invokeMock).toHaveBeenCalledWith("memory_context_pack_build_v1", {
+      request: { version: 1, selections: [memoryMutation] },
     });
     expect(invokeMock).toHaveBeenCalledWith("skill_candidate_cancel_v2", {
       request: skillDecision,

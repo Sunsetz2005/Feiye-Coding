@@ -66,6 +66,8 @@ export function ExtensionsPanel({
   const [skillsError, setSkillsError] = useState<string | null>(null);
   const [mcpError, setMcpError] = useState<string | null>(null);
   const [pluginsError, setPluginsError] = useState<string | null>(null);
+  const [pluginUninstallAvailable, setPluginUninstallAvailable] =
+    useState(false);
   const [loading, setLoading] = useState(true);
   const [agentHome, setAgentHome] = useState<string | null>(null);
   const [configPath, setConfigPath] = useState<string | null>(null);
@@ -91,6 +93,7 @@ export function ExtensionsPanel({
       setSkillsError(tr("ext.needTauri"));
       setMcpError(null);
       setPluginsError(null);
+      setPluginUninstallAvailable(false);
       setLoading(false);
       return;
     }
@@ -113,6 +116,9 @@ export function ExtensionsPanel({
         version: 1 as const,
         source: "runtime_cli",
         installActionAvailable: false as const,
+        uninstallActionAvailable: false,
+        actionUnavailableReason:
+          "runtime_plugin_mutations_are_not_machine_verifiable",
         plugins: [] as api.PluginDto[],
         error: String(e),
       })),
@@ -122,6 +128,9 @@ export function ExtensionsPanel({
     setSkills(sortSkillsByName(skillsRes.skills ?? []));
     setServers(sortMcpByName(mcpRes.servers ?? []));
     setPlugins(sortPluginsByName(pluginsRes.plugins ?? []));
+    setPluginUninstallAvailable(
+      pluginsRes.uninstallActionAvailable === true,
+    );
     setHooksInventory(hooksRes);
     setSkillsError(skillsRes.error?.trim() ? skillsRes.error : null);
     setMcpError(mcpRes.error?.trim() ? mcpRes.error : null);
@@ -144,6 +153,9 @@ export function ExtensionsPanel({
         .runtimePluginsCatalogV1(pluginQuery)
         .then((result) => {
           setPlugins(sortPluginsByName(result.plugins ?? []));
+          setPluginUninstallAvailable(
+            result.uninstallActionAvailable === true,
+          );
           setPluginsError(result.error?.trim() || null);
         })
         .catch((error) => setPluginsError(String(error)));
@@ -540,7 +552,14 @@ export function ExtensionsPanel({
                     <button
                       type="button"
                       className="btn btn--ghost btn--sm ext-item__danger"
-                      disabled={busy || !!actionBusy}
+                      disabled={
+                        busy || !!actionBusy || !pluginUninstallAvailable
+                      }
+                      title={
+                        pluginUninstallAvailable
+                          ? undefined
+                          : tr("ext.plugins.mutationsCliOnly")
+                      }
                       onClick={() => setUninstallTarget(p)}
                     >
                       <IconTrash size={13} />
@@ -557,6 +576,9 @@ export function ExtensionsPanel({
             {tr("ext.plugins.note")} · {tr("ext.plugins.hooksInventory", {
               n: hooksInventory.length,
             })}
+            {!pluginUninstallAvailable
+              ? ` · ${tr("ext.plugins.mutationsCliOnly")}`
+              : ""}
           </p>
         ) : null}
       </div>

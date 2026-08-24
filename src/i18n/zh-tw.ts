@@ -574,6 +574,18 @@ export const zhTW: Record<MessageKey, string> = {
   "settings.memory.reviewOnly": "僅經審閱的記憶候選",
   "settings.memory.desc":
     "候選與對話搜尋分開儲存，絕不會自動注入 Runtime。",
+  "settings.memory.provenance": "來源：{sessionId} / {messageId}",
+  "settings.memory.selectForPack": "選取到上下文包",
+  "settings.memory.packTitle": "明確上下文包",
+  "settings.memory.packDesc":
+    "最多選取 8 條已批准候選（單條 1,000 字、總計 4,000 字），建立 JSON 供檢查或複製；不會自動附加到 Runtime 對話。",
+  "settings.memory.selectedCount": "已選取：{n}",
+  "settings.memory.selectApproved": "請至少選取一條已批准候選。",
+  "settings.memory.buildPack": "建立上下文包",
+  "settings.memory.buildingPack": "建立中…",
+  "settings.memory.packPreview": "上下文包 JSON",
+  "settings.memory.copyPack": "複製 JSON",
+  "settings.memory.copiedPack": "已複製",
   "settings.memory.type": "記憶類型",
   "settings.memory.type.preference": "使用者偏好",
   "settings.memory.type.projectFact": "專案事實",
@@ -1095,6 +1107,8 @@ export const zhTW: Record<MessageKey, string> = {
   "ext.plugins.filterEmpty": "沒有符合篩選條件的外掛。",
   "ext.plugins.note":
     "與 Sunsetz Runtime 共用同一清單（the runtime plugin list）。啟用/停用寫入 `shared runtime configuration`；agent soft-respawn 後下一輪對話重新載入外掛。",
+  "ext.plugins.mutationsCliOnly":
+    "安裝與解除安裝繼續使用 Runtime CLI；儲存庫層級變更尚無穩定的機器可讀結果。",
   "ext.plugins.hooksInventory": "Hooks 提供方：{n}",
   "ext.skills.title": "技能",
   "ext.skills.loading": "正在載入技能…",

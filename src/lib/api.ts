@@ -403,8 +403,29 @@ export interface MemoryCandidateMutationRequestV1 {
   expectedContentHash: string;
 }
 
+export interface MemoryContextPackItemV1 {
+  candidateId: string;
+  source: { sessionId: string; messageId: string };
+  type: MemoryCandidateTypeV1;
+  content: string;
+  contentHash: string;
+}
+
+export interface MemoryContextPackV1 {
+  version: 1;
+  items: MemoryContextPackItemV1[];
+}
+
 export async function memoryCandidatesListV1() {
   return invoke<MemoryCandidateV1[]>("memory_candidates_list_v1");
+}
+
+export async function memoryContextPackBuildV1(
+  selections: MemoryCandidateMutationRequestV1[],
+) {
+  return invoke<MemoryContextPackV1>("memory_context_pack_build_v1", {
+    request: { version: 1, selections },
+  });
 }
 
 export async function memoryCandidateCreateV1(request: {
@@ -1553,6 +1574,8 @@ export interface RuntimePluginCatalogV1 {
   version: 1;
   source: "runtime_cli" | string;
   installActionAvailable: false;
+  uninstallActionAvailable?: boolean;
+  actionUnavailableReason?: string | null;
   plugins: PluginDto[];
   error?: string | null;
 }
@@ -1600,7 +1623,7 @@ export async function pluginDisable(name: string) {
   return invoke<PluginActionResult>("plugin_disable", { name });
 }
 
-/** Uninstall plugin (`grok plugin uninstall --confirm`) and soft-respawn agent. */
+/** Legacy compatibility route. Current Host fails closed until Runtime exposes a safe target contract. */
 export async function pluginUninstall(name: string) {
   return invoke<PluginActionResult>("plugin_uninstall", { name });
 }
