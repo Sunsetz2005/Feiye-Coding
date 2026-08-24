@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 use tauri::{AppHandle, Emitter};
@@ -17,6 +17,10 @@ const MAX_OBJECT_FIELDS: usize = 96;
 const MAX_DEPTH: usize = 6;
 
 static SEQUENCES: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
+static AUTOMATION_HEARTBEAT_ATTEMPTS: OnceLock<Mutex<HashMap<String, DateTime<Utc>>>> =
+    OnceLock::new();
+const AUTOMATION_HEARTBEAT_INTERVAL_SECONDS: i64 = 30;
+const MAX_AUTOMATION_HEARTBEAT_SESSION_TRACKERS: usize = 256;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -41,6 +45,44 @@ fn next_sequence(session_id: &str) -> u64 {
     let slot = sequences.entry(session_id.to_string()).or_insert(0);
     *slot = slot.saturating_add(1);
     *slot
+}
+
+fn is_automation_progress_event(event_type: &str) -> bool {
+    matches!(
+        event_type,
+        "stream"
+            | "tool_call"
+            | "plan"
+            | "ask_user"
+            | "permission"
+            | "retry_state"
+            | "context_compact"
+            | "usage"
+    )
+}
+
+fn should_record_automation_heartbeat(session_id: &str, now: DateTime<Utc>) -> bool {
+    let attempts = AUTOMATION_HEARTBEAT_ATTEMPTS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut attempts = attempts.lock().unwrap_or_else(|error| error.into_inner());
+    if attempts.get(session_id).is_some_and(|previous| {
+        now.signed_duration_since(*previous)
+            < ChronoDuration::seconds(AUTOMATION_HEARTBEAT_INTERVAL_SECONDS)
+    }) {
+        return false;
+    }
+    if !attempts.contains_key(session_id)
+        && attempts.len() >= MAX_AUTOMATION_HEARTBEAT_SESSION_TRACKERS
+    {
+        if let Some(oldest) = attempts
+            .iter()
+            .min_by(|left, right| left.1.cmp(right.1))
+            .map(|(id, _)| id.clone())
+        {
+            attempts.remove(&oldest);
+        }
+    }
+    attempts.insert(session_id.to_string(), now);
+    true
 }
 
 fn is_sensitive_key(key: &str) -> bool {
@@ -265,11 +307,12 @@ pub fn emit(
     event: &AcpEvent,
 ) {
     let (event_type, tool_call_id, payload) = event_parts(event);
+    let occurred_at = Utc::now();
     let envelope = RuntimeEventEnvelopeV1 {
         version: 1,
         event_id: Uuid::new_v4().to_string(),
         sequence: next_sequence(session_id),
-        occurred_at: Utc::now(),
+        occurred_at,
         session_id: session_id.to_string(),
         agent_session_id,
         process_id: process_id.to_string(),
@@ -278,7 +321,21 @@ pub fn emit(
         event_type: event_type.to_string(),
         payload: sanitize_payload(&payload),
     };
-    let _ = app.emit("session://runtime_event_v1", envelope);
+    let _ = app.emit("session://runtime_event_v1", envelope.clone());
+    if is_automation_progress_event(&envelope.event_type)
+        && should_record_automation_heartbeat(session_id, occurred_at)
+    {
+        if let Err(error) = crate::automation_scheduler::record_runtime_heartbeat_for_session_v1(
+            session_id,
+            envelope.sequence,
+        ) {
+            tracing::warn!(
+                session_id,
+                sequence = envelope.sequence,
+                "automation Runtime heartbeat rejected: {error}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -304,5 +361,27 @@ mod tests {
         assert_eq!(next_sequence(&session), 2);
         let other = Uuid::new_v4().to_string();
         assert_eq!(next_sequence(&other), 1);
+    }
+
+    #[test]
+    fn automation_heartbeat_accepts_only_progress_and_is_rate_limited_per_session() {
+        assert!(is_automation_progress_event("stream"));
+        assert!(is_automation_progress_event("tool_call"));
+        assert!(!is_automation_progress_event("stderr"));
+        assert!(!is_automation_progress_event("process_exited"));
+
+        let session = Uuid::new_v4().to_string();
+        let other = Uuid::new_v4().to_string();
+        let now = Utc::now();
+        assert!(should_record_automation_heartbeat(&session, now));
+        assert!(!should_record_automation_heartbeat(
+            &session,
+            now + ChronoDuration::seconds(AUTOMATION_HEARTBEAT_INTERVAL_SECONDS - 1),
+        ));
+        assert!(should_record_automation_heartbeat(
+            &session,
+            now + ChronoDuration::seconds(AUTOMATION_HEARTBEAT_INTERVAL_SECONDS),
+        ));
+        assert!(should_record_automation_heartbeat(&other, now));
     }
 }

@@ -42,6 +42,10 @@ pub struct AutomationRunLedgerEntryV1 {
     pub catch_up: bool,
     pub status: AutomationRunStatusV1,
     pub error: Option<String>,
+    #[serde(default)]
+    pub last_heartbeat_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub last_runtime_session_sequence: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -53,6 +57,28 @@ pub struct AutomationClaimV1 {
     pub catch_up: bool,
     pub session_id: Option<String>,
     pub automation: Automation,
+}
+
+/// Host-internal progress evidence. Callers must construct this only from a
+/// RuntimeEventEnvelopeV1 for the claim's bound Runtime session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AutomationRuntimeHeartbeatV1 {
+    pub version: u8,
+    pub claim_id: String,
+    pub session_id: String,
+    pub runtime_session_sequence: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutomationRuntimeHeartbeatAckV1 {
+    pub version: u8,
+    pub claim_id: String,
+    pub session_id: String,
+    pub runtime_session_sequence: u64,
+    pub recorded_at: DateTime<Utc>,
+    pub lease_until: DateTime<Utc>,
 }
 
 /// Policy for an occurrence discovered after its scheduled wall-clock slot.
@@ -242,6 +268,8 @@ fn new_claim_entry(
         catch_up,
         status: AutomationRunStatusV1::Claimed,
         error: None,
+        last_heartbeat_at: None,
+        last_runtime_session_sequence: None,
     }
 }
 
@@ -297,6 +325,8 @@ fn claim_occurrence_in_ledger(
             catch_up: true,
             status: AutomationRunStatusV1::Skipped,
             error: Some("missed run skipped by policy".into()),
+            last_heartbeat_at: None,
+            last_runtime_session_sequence: None,
         });
         trim_ledger(ledger);
         return LedgerClaimDecision::Suppressed;
@@ -504,6 +534,117 @@ pub fn bind_session(claim_id: &str, session_id: &str) -> Result<(), String> {
     )
 }
 
+fn apply_runtime_heartbeat_v1(
+    ledger: &mut [AutomationRunLedgerEntryV1],
+    heartbeat: &AutomationRuntimeHeartbeatV1,
+    now: DateTime<Utc>,
+) -> Result<AutomationRuntimeHeartbeatAckV1, String> {
+    if heartbeat.version != 1 {
+        return Err("unsupported automation heartbeat version".into());
+    }
+    if heartbeat.claim_id.is_empty()
+        || heartbeat.claim_id.len() > 128
+        || heartbeat.claim_id.trim() != heartbeat.claim_id
+    {
+        return Err("invalid automation claim id".into());
+    }
+    if !valid_session_id(&heartbeat.session_id)
+        || heartbeat.session_id.trim() != heartbeat.session_id
+    {
+        return Err("invalid automation session id".into());
+    }
+    if heartbeat.runtime_session_sequence == 0 {
+        return Err("runtime session sequence must be positive".into());
+    }
+
+    let entry = ledger
+        .iter_mut()
+        .find(|entry| entry.claim_id == heartbeat.claim_id)
+        .ok_or_else(|| "automation claim not found".to_string())?;
+    if entry.status != AutomationRunStatusV1::Claimed {
+        return Err("automation claim is not active".into());
+    }
+    if entry.lease_until <= now {
+        return Err("automation claim lease expired".into());
+    }
+    if entry.session_id.as_deref() != Some(heartbeat.session_id.as_str()) {
+        return Err("automation heartbeat session binding mismatch".into());
+    }
+    if entry
+        .last_runtime_session_sequence
+        .is_some_and(|known| heartbeat.runtime_session_sequence <= known)
+    {
+        return Err("runtime session sequence is not increasing".into());
+    }
+
+    let lease_until = now + ChronoDuration::minutes(CLAIM_LEASE_MINUTES);
+    entry.lease_until = lease_until;
+    entry.last_heartbeat_at = Some(now);
+    entry.last_runtime_session_sequence = Some(heartbeat.runtime_session_sequence);
+    Ok(AutomationRuntimeHeartbeatAckV1 {
+        version: 1,
+        claim_id: heartbeat.claim_id.clone(),
+        session_id: heartbeat.session_id.clone(),
+        runtime_session_sequence: heartbeat.runtime_session_sequence,
+        recorded_at: now,
+        lease_until,
+    })
+}
+
+/// Extend an active automation lease from monotonic Runtime progress evidence.
+/// This is intentionally not exposed as a Tauri command or driven by a UI timer.
+pub fn record_runtime_heartbeat_v1(
+    heartbeat: AutomationRuntimeHeartbeatV1,
+) -> Result<AutomationRuntimeHeartbeatAckV1, String> {
+    let now = Utc::now();
+    crate::store_lock::update_json_locked(
+        &crate::paths::automation_runs_file(),
+        Vec::<AutomationRunLedgerEntryV1>::new,
+        |ledger| apply_runtime_heartbeat_v1(ledger, &heartbeat, now),
+    )
+}
+
+fn active_claim_id_for_heartbeat_session(
+    ledger: &[AutomationRunLedgerEntryV1],
+    session_id: &str,
+) -> Result<Option<String>, String> {
+    let matches = ledger
+        .iter()
+        .filter(|entry| {
+            entry.status == AutomationRunStatusV1::Claimed
+                && entry.session_id.as_deref() == Some(session_id)
+        })
+        .map(|entry| entry.claim_id.clone())
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [] => Ok(None),
+        [claim_id] => Ok(Some(claim_id.clone())),
+        _ => Err("multiple active automation claims for heartbeat session".into()),
+    }
+}
+
+/// Resolve a Host-generated Runtime event sequence to the active claim bound
+/// to that session. Sessions without an automation claim are a normal no-op.
+pub fn record_runtime_heartbeat_for_session_v1(
+    session_id: &str,
+    runtime_session_sequence: u64,
+) -> Result<Option<AutomationRuntimeHeartbeatAckV1>, String> {
+    let session_id = session_id.trim();
+    if !valid_session_id(session_id) {
+        return Err("invalid automation session id".into());
+    }
+    let Some(claim_id) = active_claim_id_for_heartbeat_session(&load_ledger(), session_id)? else {
+        return Ok(None);
+    };
+    record_runtime_heartbeat_v1(AutomationRuntimeHeartbeatV1 {
+        version: 1,
+        claim_id,
+        session_id: session_id.to_string(),
+        runtime_session_sequence,
+    })
+    .map(Some)
+}
+
 fn active_claim_id_for_session(
     ledger: &[AutomationRunLedgerEntryV1],
     session_id: &str,
@@ -641,6 +782,19 @@ mod tests {
         }
     }
 
+    fn heartbeat(
+        claim_id: &str,
+        session_id: &str,
+        runtime_session_sequence: u64,
+    ) -> AutomationRuntimeHeartbeatV1 {
+        AutomationRuntimeHeartbeatV1 {
+            version: 1,
+            claim_id: claim_id.into(),
+            session_id: session_id.into(),
+            runtime_session_sequence,
+        }
+    }
+
     #[test]
     fn invalid_time_never_schedules() {
         assert!(latest_due_slot(&automation("daily", "25:99", vec![]), Utc::now()).is_none());
@@ -753,6 +907,171 @@ mod tests {
 
         assert_eq!(second.claim_id, first.claim_id);
         assert_eq!(ledger.len(), 1);
+    }
+
+    #[test]
+    fn legacy_ledger_rows_without_heartbeat_fields_remain_readable() {
+        let now = fixed_now();
+        let entry = new_claim_entry("legacy", now, now, false);
+        let mut value = serde_json::to_value(entry).unwrap();
+        let object = value.as_object_mut().unwrap();
+        object.remove("lastHeartbeatAt");
+        object.remove("lastRuntimeSessionSequence");
+
+        let decoded: AutomationRunLedgerEntryV1 = serde_json::from_value(value).unwrap();
+        assert!(decoded.last_heartbeat_at.is_none());
+        assert!(decoded.last_runtime_session_sequence.is_none());
+    }
+
+    #[test]
+    fn runtime_heartbeat_requires_monotonic_evidence_and_bounds_the_lease() {
+        let now = fixed_now();
+        let mut claim = new_claim_entry("heartbeat", now, now - ChronoDuration::minutes(1), false);
+        claim.claim_id = "heartbeat-claim".into();
+        claim.session_id = Some("runtime-session".into());
+        let mut ledger = vec![claim];
+
+        let first = apply_runtime_heartbeat_v1(
+            &mut ledger,
+            &heartbeat("heartbeat-claim", "runtime-session", 41),
+            now,
+        )
+        .unwrap();
+        assert_eq!(first.version, 1);
+        assert_eq!(first.runtime_session_sequence, 41);
+        assert_eq!(
+            first.lease_until,
+            now + ChronoDuration::minutes(CLAIM_LEASE_MINUTES)
+        );
+        assert_eq!(ledger[0].last_heartbeat_at, Some(now));
+        assert_eq!(ledger[0].last_runtime_session_sequence, Some(41));
+
+        let next_time = now + ChronoDuration::minutes(1);
+        apply_runtime_heartbeat_v1(
+            &mut ledger,
+            &heartbeat("heartbeat-claim", "runtime-session", 42),
+            next_time,
+        )
+        .unwrap();
+        let accepted_lease = ledger[0].lease_until;
+        assert_eq!(ledger[0].last_heartbeat_at, Some(next_time));
+        assert_eq!(ledger[0].last_runtime_session_sequence, Some(42));
+
+        for sequence in [42, 40] {
+            let error = apply_runtime_heartbeat_v1(
+                &mut ledger,
+                &heartbeat("heartbeat-claim", "runtime-session", sequence),
+                next_time + ChronoDuration::seconds(1),
+            )
+            .unwrap_err();
+            assert!(error.contains("not increasing"));
+        }
+        assert_eq!(ledger[0].lease_until, accepted_lease);
+        assert_eq!(ledger[0].last_runtime_session_sequence, Some(42));
+    }
+
+    #[test]
+    fn runtime_heartbeat_rejects_wrong_binding_and_never_revives_dead_claims() {
+        let now = fixed_now();
+        let mut claim = new_claim_entry("heartbeat", now, now, false);
+        claim.claim_id = "heartbeat-claim".into();
+        let mut ledger = vec![claim];
+
+        let mut unsupported = heartbeat("heartbeat-claim", "runtime-session", 1);
+        unsupported.version = 2;
+        assert!(apply_runtime_heartbeat_v1(&mut ledger, &unsupported, now)
+            .unwrap_err()
+            .contains("unsupported"));
+        assert!(apply_runtime_heartbeat_v1(
+            &mut ledger,
+            &heartbeat("heartbeat-claim", "runtime-session", 0),
+            now,
+        )
+        .unwrap_err()
+        .contains("must be positive"));
+
+        assert!(apply_runtime_heartbeat_v1(
+            &mut ledger,
+            &heartbeat("heartbeat-claim", "runtime-session", 1),
+            now,
+        )
+        .unwrap_err()
+        .contains("binding mismatch"));
+        ledger[0].session_id = Some("runtime-session".into());
+        assert!(apply_runtime_heartbeat_v1(
+            &mut ledger,
+            &heartbeat("heartbeat-claim", "other-session", 1),
+            now,
+        )
+        .unwrap_err()
+        .contains("binding mismatch"));
+
+        ledger[0].lease_until = now;
+        assert!(apply_runtime_heartbeat_v1(
+            &mut ledger,
+            &heartbeat("heartbeat-claim", "runtime-session", 1),
+            now,
+        )
+        .unwrap_err()
+        .contains("lease expired"));
+        assert!(ledger[0].last_heartbeat_at.is_none());
+
+        expire_claims_in_ledger(&mut ledger, now);
+        assert_eq!(ledger[0].status, AutomationRunStatusV1::Interrupted);
+        assert!(apply_runtime_heartbeat_v1(
+            &mut ledger,
+            &heartbeat("heartbeat-claim", "runtime-session", 1),
+            now,
+        )
+        .unwrap_err()
+        .contains("not active"));
+        assert_eq!(ledger[0].status, AutomationRunStatusV1::Interrupted);
+        assert!(ledger[0].last_runtime_session_sequence.is_none());
+
+        ledger[0].status = AutomationRunStatusV1::Succeeded;
+        assert!(apply_runtime_heartbeat_v1(
+            &mut ledger,
+            &heartbeat("heartbeat-claim", "runtime-session", 2),
+            now,
+        )
+        .unwrap_err()
+        .contains("not active"));
+        assert_eq!(ledger[0].status, AutomationRunStatusV1::Succeeded);
+    }
+
+    #[test]
+    fn heartbeat_session_lookup_ignores_interrupted_and_terminal_claims() {
+        let now = fixed_now();
+        let mut active = new_claim_entry("heartbeat", now, now, false);
+        active.claim_id = "active".into();
+        active.session_id = Some("runtime-session".into());
+        let mut interrupted = active.clone();
+        interrupted.claim_id = "interrupted".into();
+        interrupted.status = AutomationRunStatusV1::Interrupted;
+        interrupted.error = Some(LEASE_EXPIRED_ERROR.into());
+        let mut succeeded = active.clone();
+        succeeded.claim_id = "succeeded".into();
+        succeeded.status = AutomationRunStatusV1::Succeeded;
+
+        assert_eq!(
+            active_claim_id_for_heartbeat_session(
+                &[interrupted.clone(), succeeded, active.clone()],
+                "runtime-session",
+            )
+            .unwrap(),
+            Some("active".into()),
+        );
+        assert_eq!(
+            active_claim_id_for_heartbeat_session(&[interrupted], "runtime-session").unwrap(),
+            None,
+        );
+
+        let duplicate = vec![active.clone(), active];
+        assert!(
+            active_claim_id_for_heartbeat_session(&duplicate, "runtime-session")
+                .unwrap_err()
+                .contains("multiple active")
+        );
     }
 
     #[test]

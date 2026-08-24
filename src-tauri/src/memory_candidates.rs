@@ -16,6 +16,10 @@ use sha2::{Digest, Sha256};
 pub const MEMORY_CANDIDATE_STORE_VERSION: u8 = 1;
 pub const MAX_MEMORY_CANDIDATES: usize = 256;
 pub const MAX_MEMORY_CONTENT_CHARS: usize = 2_000;
+pub const MEMORY_CONTEXT_PACK_VERSION: u8 = 1;
+pub const MAX_MEMORY_CONTEXT_PACK_ITEMS: usize = 8;
+pub const MAX_MEMORY_CONTEXT_ITEM_CHARS: usize = 1_000;
+pub const MAX_MEMORY_CONTEXT_TOTAL_CHARS: usize = 4_000;
 
 const MAX_SOURCE_ID_CHARS: usize = 256;
 
@@ -78,6 +82,32 @@ pub struct MemoryCandidateCreateRequestV1 {
 pub struct MemoryCandidateMutationRequestV1 {
     pub id: String,
     pub expected_content_hash: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MemoryContextPackRequestV1 {
+    pub version: u8,
+    #[serde(default)]
+    pub selections: Vec<MemoryCandidateMutationRequestV1>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryContextPackItemV1 {
+    pub candidate_id: String,
+    pub source: MemoryCandidateSourceV1,
+    #[serde(rename = "type")]
+    pub candidate_type: MemoryCandidateTypeV1,
+    pub content: String,
+    pub content_hash: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryContextPackV1 {
+    pub version: u8,
+    pub items: Vec<MemoryContextPackItemV1>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -445,6 +475,89 @@ fn validate_mutation_request(request: &MemoryCandidateMutationRequestV1) -> Resu
     Ok(())
 }
 
+pub fn build_memory_context_pack_v1(
+    request: MemoryContextPackRequestV1,
+) -> Result<MemoryContextPackV1, String> {
+    build_memory_context_pack_at(&store_path(), request, &crate::store::redact_text)
+}
+
+fn build_memory_context_pack_at(
+    path: &Path,
+    request: MemoryContextPackRequestV1,
+    redact: &impl Fn(&str) -> String,
+) -> Result<MemoryContextPackV1, String> {
+    if request.version != MEMORY_CONTEXT_PACK_VERSION {
+        return Err(format!(
+            "unsupported memory context pack version: {}",
+            request.version
+        ));
+    }
+    if request.selections.len() > MAX_MEMORY_CONTEXT_PACK_ITEMS {
+        return Err(format!(
+            "memory context pack exceeds {MAX_MEMORY_CONTEXT_PACK_ITEMS} selections"
+        ));
+    }
+
+    let mut selection_ids = HashSet::with_capacity(request.selections.len());
+    let mut selections = Vec::with_capacity(request.selections.len());
+    for selection in request.selections {
+        validate_mutation_request(&selection)?;
+        let id = selection.id.trim().to_string();
+        if !selection_ids.insert(id.clone()) {
+            return Err("memory context pack contains duplicate candidate ids".into());
+        }
+        selections.push((id, selection.expected_content_hash.trim().to_string()));
+    }
+
+    crate::store_lock::with_exclusive_lock(path, || {
+        let store = read_store_at(path, redact)?;
+        let mut total_chars = 0_usize;
+        let mut items = Vec::with_capacity(selections.len());
+        for (id, expected_content_hash) in selections {
+            let candidate = store
+                .candidates
+                .iter()
+                .find(|candidate| candidate.id == id)
+                .ok_or_else(|| "memory context candidate not found".to_string())?;
+            if candidate.content_hash != expected_content_hash {
+                return Err("STALE_MEMORY_CANDIDATE: content hash mismatch".into());
+            }
+            if candidate.status != MemoryCandidateStatusV1::Approved {
+                return Err("memory context candidate is not approved".into());
+            }
+
+            // Re-run the full persisted-candidate validation at the exact
+            // point where content crosses into the explicit context contract.
+            validate_candidate(candidate, redact)?;
+            let item_chars = candidate.content.chars().count();
+            if item_chars > MAX_MEMORY_CONTEXT_ITEM_CHARS {
+                return Err(format!(
+                    "memory context item exceeds {MAX_MEMORY_CONTEXT_ITEM_CHARS} characters"
+                ));
+            }
+            total_chars = total_chars
+                .checked_add(item_chars)
+                .ok_or_else(|| "memory context pack size overflow".to_string())?;
+            if total_chars > MAX_MEMORY_CONTEXT_TOTAL_CHARS {
+                return Err(format!(
+                    "memory context pack exceeds {MAX_MEMORY_CONTEXT_TOTAL_CHARS} characters"
+                ));
+            }
+            items.push(MemoryContextPackItemV1 {
+                candidate_id: candidate.id.clone(),
+                source: candidate.source.clone(),
+                candidate_type: candidate.candidate_type,
+                content: candidate.content.clone(),
+                content_hash: candidate.content_hash.clone(),
+            });
+        }
+        Ok(MemoryContextPackV1 {
+            version: MEMORY_CONTEXT_PACK_VERSION,
+            items,
+        })
+    })
+}
+
 fn find_and_compare<'a>(
     store: &'a mut MemoryCandidateStoreV1,
     request: &MemoryCandidateMutationRequestV1,
@@ -598,6 +711,40 @@ mod tests {
         }
     }
 
+    fn context_request(
+        selections: Vec<MemoryCandidateMutationRequestV1>,
+    ) -> MemoryContextPackRequestV1 {
+        MemoryContextPackRequestV1 {
+            version: MEMORY_CONTEXT_PACK_VERSION,
+            selections,
+        }
+    }
+
+    fn create_approved(store: &TestStore, index: usize) -> MemoryCandidateV1 {
+        create_approved_with_content(
+            store,
+            index,
+            format!("Prefer concise verification notes for workflow {index}."),
+        )
+    }
+
+    fn create_approved_with_content(
+        store: &TestStore,
+        index: usize,
+        content: String,
+    ) -> MemoryCandidateV1 {
+        let mut create = request(index);
+        create.content = content;
+        let candidate = create_pending_at(&store.path, create, &identity_redact).expect("create");
+        transition_pending_at(
+            &store.path,
+            mutation(&candidate),
+            MemoryCandidateStatusV1::Approved,
+            &identity_redact,
+        )
+        .expect("approve")
+    }
+
     fn stored_candidate(index: usize) -> MemoryCandidateV1 {
         let content = format!("Safe bounded project fact {index}");
         let now = Utc::now();
@@ -701,6 +848,172 @@ mod tests {
             delete_at(&store.path, mutation(&approved), &identity_redact).expect("delete approved");
         assert_eq!(deleted.id, approved.id);
         assert!(list_at(&store.path, &identity_redact).unwrap().is_empty());
+    }
+
+    #[test]
+    fn context_pack_is_explicit_ordered_and_read_only() {
+        let store = TestStore::new("context-pack");
+        let first = create_approved(&store, 1);
+        let second = create_approved(&store, 2);
+        let pending =
+            create_pending_at(&store.path, request(3), &identity_redact).expect("create pending");
+        let before = fs::read(&store.path).unwrap();
+
+        let empty = build_memory_context_pack_at(
+            &store.path,
+            context_request(Vec::new()),
+            &identity_redact,
+        )
+        .unwrap();
+        assert_eq!(empty.version, MEMORY_CONTEXT_PACK_VERSION);
+        assert!(empty.items.is_empty());
+
+        let selection = context_request(vec![mutation(&second), mutation(&first)]);
+        let pack =
+            build_memory_context_pack_at(&store.path, selection.clone(), &identity_redact).unwrap();
+        let repeated =
+            build_memory_context_pack_at(&store.path, selection, &identity_redact).unwrap();
+        assert_eq!(repeated, pack);
+        assert_eq!(
+            pack.items
+                .iter()
+                .map(|item| item.candidate_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![second.id.as_str(), first.id.as_str()]
+        );
+        assert_eq!(pack.items[0].source, second.source);
+        assert_eq!(pack.items[0].candidate_type, second.candidate_type);
+        assert_eq!(pack.items[0].content, second.content);
+        assert_eq!(pack.items[0].content_hash, second.content_hash);
+        assert_eq!(fs::read(&store.path).unwrap(), before);
+
+        let stored = list_at(&store.path, &identity_redact).unwrap();
+        assert_eq!(
+            stored
+                .iter()
+                .find(|candidate| candidate.id == pending.id)
+                .unwrap()
+                .status,
+            MemoryCandidateStatusV1::Pending
+        );
+        assert!(stored
+            .iter()
+            .filter(|candidate| candidate.id == first.id || candidate.id == second.id)
+            .all(|candidate| candidate.status == MemoryCandidateStatusV1::Approved));
+    }
+
+    #[test]
+    fn context_pack_requires_approved_candidates_and_fresh_hashes() {
+        let store = TestStore::new("context-pack-cas");
+        let pending =
+            create_pending_at(&store.path, request(1), &identity_redact).expect("create pending");
+        assert!(build_memory_context_pack_at(
+            &store.path,
+            context_request(vec![mutation(&pending)]),
+            &identity_redact,
+        )
+        .unwrap_err()
+        .contains("not approved"));
+
+        let approved = transition_pending_at(
+            &store.path,
+            mutation(&pending),
+            MemoryCandidateStatusV1::Approved,
+            &identity_redact,
+        )
+        .unwrap();
+        let stale = MemoryCandidateMutationRequestV1 {
+            id: approved.id.clone(),
+            expected_content_hash: "0".repeat(64),
+        };
+        assert!(build_memory_context_pack_at(
+            &store.path,
+            context_request(vec![stale]),
+            &identity_redact,
+        )
+        .unwrap_err()
+        .contains("STALE_MEMORY_CANDIDATE"));
+
+        let superseded = supersede_at(&store.path, mutation(&approved), &identity_redact).unwrap();
+        assert!(build_memory_context_pack_at(
+            &store.path,
+            context_request(vec![mutation(&superseded)]),
+            &identity_redact,
+        )
+        .unwrap_err()
+        .contains("not approved"));
+        assert_eq!(
+            list_at(&store.path, &identity_redact).unwrap()[0].status,
+            MemoryCandidateStatusV1::Superseded
+        );
+    }
+
+    #[test]
+    fn context_pack_enforces_selection_item_total_and_validation_limits() {
+        let store = TestStore::new("context-pack-limits");
+        let too_many = (0..=MAX_MEMORY_CONTEXT_PACK_ITEMS)
+            .map(|_| MemoryCandidateMutationRequestV1 {
+                id: uuid::Uuid::new_v4().to_string(),
+                expected_content_hash: "0".repeat(64),
+            })
+            .collect();
+        assert!(build_memory_context_pack_at(
+            &store.path,
+            context_request(too_many),
+            &identity_redact,
+        )
+        .unwrap_err()
+        .contains("selections"));
+
+        let oversized =
+            create_approved_with_content(&store, 1, "x".repeat(MAX_MEMORY_CONTEXT_ITEM_CHARS + 1));
+        assert!(build_memory_context_pack_at(
+            &store.path,
+            context_request(vec![mutation(&oversized)]),
+            &identity_redact,
+        )
+        .unwrap_err()
+        .contains("context item exceeds"));
+
+        delete_at(&store.path, mutation(&oversized), &identity_redact).unwrap();
+        let item_chars = MAX_MEMORY_CONTEXT_TOTAL_CHARS / 5 + 1;
+        let selections = (0..5)
+            .map(|index| {
+                mutation(&create_approved_with_content(
+                    &store,
+                    index + 10,
+                    "y".repeat(item_chars),
+                ))
+            })
+            .collect();
+        assert!(build_memory_context_pack_at(
+            &store.path,
+            context_request(selections),
+            &identity_redact,
+        )
+        .unwrap_err()
+        .contains("context pack exceeds"));
+
+        let safe = list_at(&store.path, &identity_redact).unwrap()[0].clone();
+        assert!(build_memory_context_pack_at(
+            &store.path,
+            context_request(vec![mutation(&safe)]),
+            &redacts_everything,
+        )
+        .unwrap_err()
+        .contains("sensitive material"));
+
+        let duplicate = mutation(&safe);
+        assert!(build_memory_context_pack_at(
+            &store.path,
+            context_request(vec![duplicate.clone(), duplicate]),
+            &identity_redact,
+        )
+        .unwrap_err()
+        .contains("duplicate"));
+        let mut unsupported = context_request(Vec::new());
+        unsupported.version += 1;
+        assert!(build_memory_context_pack_at(&store.path, unsupported, &identity_redact).is_err());
     }
 
     #[test]

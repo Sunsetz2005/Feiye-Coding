@@ -303,6 +303,17 @@ pub async fn memory_candidates_list_v1(
 }
 
 #[tauri::command]
+pub async fn memory_context_pack_build_v1(
+    request: crate::memory_candidates::MemoryContextPackRequestV1,
+) -> Result<crate::memory_candidates::MemoryContextPackV1, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::memory_candidates::build_memory_context_pack_v1(request)
+    })
+    .await
+    .map_err(|error| format!("Memory context pack task failed: {error}"))?
+}
+
+#[tauri::command]
 pub async fn memory_candidate_create_v1(
     request: crate::memory_candidates::MemoryCandidateCreateRequestV1,
 ) -> Result<crate::memory_candidates::MemoryCandidateV1, String> {
@@ -2117,6 +2128,8 @@ pub struct RuntimePluginCatalogV1 {
     pub version: u8,
     pub source: String,
     pub install_action_available: bool,
+    pub uninstall_action_available: bool,
+    pub action_unavailable_reason: String,
     pub plugins: Vec<PluginDto>,
     pub error: Option<String>,
 }
@@ -2558,6 +2571,9 @@ pub async fn runtime_plugins_catalog_v1(
                 version: 1,
                 source: "runtime_cli".into(),
                 install_action_available: false,
+                uninstall_action_available: false,
+                action_unavailable_reason:
+                    "runtime_plugin_mutations_are_not_machine_verifiable".into(),
                 plugins,
                 error: None,
             })
@@ -2566,6 +2582,9 @@ pub async fn runtime_plugins_catalog_v1(
             version: 1,
             source: "runtime_cli".into(),
             install_action_available: false,
+            uninstall_action_available: false,
+            action_unavailable_reason:
+                "runtime_plugin_mutations_are_not_machine_verifiable".into(),
             plugins: Vec::new(),
             error: Some(error),
         }),
@@ -2670,44 +2689,24 @@ pub async fn plugin_disable(
     }))
 }
 
-/// Uninstall a plugin by name. Soft-respawns agent on success.
-#[tauri::command]
-pub async fn plugin_uninstall(
-    app: tauri::AppHandle,
-    mgr: State<'_, Arc<SessionManager>>,
-    name: String,
-) -> Result<serde_json::Value, String> {
-    let name = name.trim().to_string();
+fn reject_unverifiable_plugin_uninstall(name: &str) -> Result<serde_json::Value, String> {
+    let name = name.trim();
     if name.is_empty() {
         return Err("plugin name required".into());
     }
-    let name_for_cmd = name.clone();
-    let result = tauri::async_runtime::spawn_blocking(move || {
-        run_grok_cli_args(
-            &["plugin", "uninstall", &name_for_cmd, "--confirm"],
-            PLUGIN_CMD_TIMEOUT_SECS,
-        )
-    })
-    .await
-    .map_err(|e| e.to_string())??;
+    Err("PLUGIN_UNINSTALL_UNAVAILABLE: Sunsetz cannot safely prove the Runtime repository target; use the Runtime CLI after reviewing repository-wide collateral".into())
+}
 
-    let (stdout, stderr, ok) = result;
-    if !ok {
-        let msg = if !stderr.is_empty() {
-            stderr
-        } else if !stdout.is_empty() {
-            stdout
-        } else {
-            format!("failed to uninstall plugin {name}")
-        };
-        return Err(msg.chars().take(400).collect());
-    }
-    mgr.soft_respawn(&app).await;
-    Ok(serde_json::json!({
-        "ok": true,
-        "name": name,
-        "message": stdout.chars().take(200).collect::<String>(),
-    }))
+/// Legacy compatibility route. Runtime 0.2.x resolves only by plugin name and
+/// may remove the entire containing repository, so Sunsetz cannot prove the
+/// target or collateral set. Keep the command registered but fail closed.
+#[tauri::command]
+pub async fn plugin_uninstall(
+    _app: tauri::AppHandle,
+    _mgr: State<'_, Arc<SessionManager>>,
+    name: String,
+) -> Result<serde_json::Value, String> {
+    reject_unverifiable_plugin_uninstall(&name)
 }
 
 /// Plugin component inventory text (`grok plugin details <name>`).
@@ -2852,6 +2851,16 @@ disabled = ["yes"]
         assert_eq!(plugins[0].provides.as_ref().unwrap().skills, 14);
         assert!(plugins[0].provides.as_ref().unwrap().hooks);
         assert!(plugins[0].enabled);
+    }
+
+    #[test]
+    fn legacy_plugin_uninstall_is_fail_closed_without_a_unique_runtime_target() {
+        assert!(reject_unverifiable_plugin_uninstall("  ")
+            .unwrap_err()
+            .contains("name required"));
+        let error = reject_unverifiable_plugin_uninstall("shared-name").unwrap_err();
+        assert!(error.contains("PLUGIN_UNINSTALL_UNAVAILABLE"));
+        assert!(error.contains("repository target"));
     }
 }
 

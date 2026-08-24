@@ -222,6 +222,7 @@ pub fn run() {
             commands::skill_candidate_reject_v2,
             commands::skill_candidate_cancel_v2,
             commands::memory_candidates_list_v1,
+            commands::memory_context_pack_build_v1,
             commands::memory_candidate_create_v1,
             commands::memory_candidate_approve_v1,
             commands::memory_candidate_reject_v1,
