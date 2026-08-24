@@ -12,7 +12,7 @@ Agent 与贡献者的**可执行知识库**。改产品行为或 UI 文案前，
 | [automations.md](./automations.md) | 自动化任务设计（Build `/loop` / scheduler；不阻塞 P0） |
 | [slash-composer.md](./slash-composer.md) | 斜杠面板、技能标签、Goal 模式、Doctor |
 | [session-continuity.md](./session-continuity.md) | Agent 续会话（load/bootstrap）、自动压缩归属 |
-| [runtime-migration-v1.md](./runtime-migration-v1.md) | **成熟能力迁移权威边界**：统一交互、桌面安全、Runtime 事件、检索、候选 Skill 与 Host 调度 |
+| [runtime-migration-v1.md](./runtime-migration-v1.md) | **成熟能力迁移权威边界**：统一交互、桌面安全、原子 Settings、Runtime 事件、检索、Memory/Skill 候选与 Host 调度 |
 | [account.md](./account.md) | 官方登录 / 会员额度 / 热力图 / 调用日志 |
 | [providers.md](./providers.md) | 自定义中转、agent GROK_HOME、编辑器探测 |
 | [setup.md](./setup.md) | 首次初始化门禁：CLI 必装、账户可跳过、多镜像安装 |

@@ -18,6 +18,17 @@
 
 每个栏目登记标题、分组、图标和当前真实配置项的搜索关键词。搜索必须能通过具体配置名称定位栏目，例如“默认权限”定位常规、“MCP”定位扩展、“CLI 路径”定位 Runtime；搜索不到时显示本地化空状态，不保留空分组标题。
 
+## 保存与并发语义
+
+- 设置控件使用 `settings_patch_v1` 只提交白名单字段；Host 在同一跨进程锁内读取、合并并原子替换，不用前端旧快照覆盖整份 `settings.json`。
+- UI 可先乐观更新，但只应用仍归该字段最新 sequence 所有的 Host 响应；失败时重新读取 `settings_get` 并回滚该字段，同时显示错误。
+- 旧 `settings_set` 只保留兼容适配：零差异不写，一个字段转为 patch，多字段或疑似陈旧全量写 fail-closed。
+- `storeApiKeysInKeychain` 的字段提交、凭据迁移和失败回滚共享独立事务锁。禁用时必须先原子写入完整磁盘副本，成功后才 best-effort 删除 Keychain 副本。
+
+## 有限 Memory 候选
+
+常规页在 Tauri 环境提供 `MemoryCandidatesPanel`。候选必须引用 Host 已持久化的 user 消息，类型只允许 user preference、project fact 或 workflow hint；创建只产生 pending，批准、拒绝、替代和删除均用内容 hash CAS。内容与总量有界并在写入前拒绝敏感材料。批准不会自动写入 Runtime prompt、会话检索或工具上下文。
+
 ## 视觉与交互
 
 - 左侧保持中性系统侧栏；当前栏目用整行中性背景，不使用 coral 边框或品牌渐变。

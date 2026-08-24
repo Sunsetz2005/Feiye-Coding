@@ -35,15 +35,16 @@
 - 文件：`paths::automations_file()`（macOS 常见：`~/Library/Application Support/dev.sunsetz.desktop/automations.json`）
 - 运行账本：`automation-runs.v1.json`（最多 512 条；10 分钟 claim lease）
 - 浏览器兜底：`localStorage["sunsetz.automations"]`
-- 字段：`title` `prompt` `enabled` `projectId` `modelId` `effort` `frequency` `time` `weekdays` `notify` `lastRunAt` `nextRunAt`
+- 字段：`title` `prompt` `enabled` `projectId` `modelId` `effort` `frequency` `time` `weekdays` `missedRunPolicy` `notify` `lastRunAt` `nextRunAt`
+- `missedRunPolicy`：`run_once`（默认，只对尚未认领的错过 occurrence 补跑一次）或 `skip`（记录 skipped 并推进计划）。旧数据缺字段时按 `run_once` 读取。
 
 ## 执行
 
 1. Rust Host 每 30s 检查 `enabled` 且 `nextRunAt` 到期的任务，并在账本中原子认领；同一 occurrence 只能认领一次。
-2. Host 只保留一个 active claim；错过的周期最多补跑一次，不回放一串历史周期。
+2. Host 只保留一个 active claim；尚未认领的错过周期按任务的 `run_once | skip` 策略处理，不回放一串历史周期。
 3. WebView 空闲后执行：`session_create` → `automation_claim_bind_v1` → 写 session prefs → `session_connect` → `session_send`。
 4. 绑定后由 Host 依据真实 ACP turn 结果调用账本完成逻辑；“prompt 已发送”不等于成功。
-5. WebView 重载时，已绑定 claim 会重新广播但不会再次发送。lease 到期而未完成的记录为 `interrupted`。
+5. WebView 重载时，已绑定 claim 会重新广播但不会再次发送。lease 到期而未完成的记录为 `interrupted`；固定墙钟不能证明 Runtime 已停止，因此不会自动生成 replacement claim。晚到 completion 只能结算原 claim，且重复完成 fail-closed。
 6. **connect 失败**：删除空壳 session并记 failed；**send/turn 失败**：保留会话错误记录并记 failed。
 7. 完成后原子推进 `lastRunAt` / `nextRunAt`；`once` 任务禁用。
 
@@ -74,6 +75,8 @@
 - [x] 助手 fence 自动 `automation_create`，气泡不展示配置块
 - [x] 应用打开时到期可触发（不阻塞主对话架构）
 - [x] 原子认领、运行账本、单次补跑与 WebView 重载去重
+- [x] 每任务 `run_once | skip` missed-run policy；过期 claim 不自动重试
 - [x] connect 失败不留空壳会话；已有空会话不伪装成新建页
 - [ ] 后台无窗口常驻触发（可选 P2：系统服务 / headless CLI）
+- [ ] 基于 Host 活性证明或 heartbeat 的可靠重试；在此之前保持过期不重试
 - [ ] 与 CLI scheduler 双向同步（可选 P2）

@@ -31,7 +31,7 @@
 
 `update_json_locked` / `update_text_locked` 的锁覆盖读取、修改、临时文件写入和原子替换。锁侧车保持稳定 inode，防止等待者与新进程锁住不同文件。Unix 在替换前同步临时文件并同步父目录；Windows 使用 `MoveFileExW(REPLACE_EXISTING | WRITE_THROUGH)`。
 
-已迁移的读改写包括 session index、消息 journal、automations、extensions JSON 和 Runtime `config.toml` 开关。JSON 形状不变，旧数据按需读取，无一次性迁移。
+已迁移的读改写包括 session index、消息 journal、automations、extensions JSON、Runtime `config.toml` 开关和 Settings 字段级更新。`settings_patch_v1` 只接受白名单字段，以同一把锁完成读取、合并和原子替换；前端失败时从 Host 权威值回滚当前字段，并用字段级 sequence 防止较早响应覆盖较新操作。旧 `settings_set` 仅作为 fail-safe 兼容适配，不再允许多字段全量替换。Keychain 偏好切换另由共同事务锁串行化，避免快速开关与回滚交错。JSON 形状不变，旧数据按需读取，无一次性迁移。
 
 ## Runtime 能力与事件
 
@@ -53,11 +53,19 @@ JSON journal 仍是事实源。`session-search.v1.sqlite3` 是可删除、可重
 
 ### 自学习 Skill
 
-只有完成且实际使用工具的任务才可能生成 Host-owned pending candidate。候选记录来源 session/message、内容哈希和所有权；用户审阅后才复用 `skill_draft_save` 的原子保存。自动流程不能覆盖用户、插件或外部 Skill；覆盖冲突必须再次明确确认。
+只有完成且实际使用工具的任务才可能生成 Host-owned pending candidate。候选记录来源 session/message、来源内容哈希、审阅内容哈希、所有权和有界去敏审计；用户审阅后才复用 `skill_draft_save` 的原子保存。V2 决策用 expected hash 拒绝陈旧窗口，编辑后的最终草稿另以 final hash 绑定。目标 Skill 的所有权检查、树 hash 和替换位于目标级事务边界内；候选状态提交失败必须回滚或由恢复记录重放。自动流程不能覆盖用户、插件或外部 Skill；覆盖冲突必须再次明确确认。
+
+### 有界 Memory 候选
+
+`memory-candidates.v1.json` 是独立的待审事实源，只接受 `user_preference | project_fact | workflow_hint`，状态为 `pending | approved | rejected | superseded`。创建必须引用 Host 已持久化的真实 user 消息；内容限制为 2,000 字符、总量限制为 256 条，并在写入前拒绝 API key、token、私钥、带密码数据库 URL 和 JWT 等敏感材料。批准、拒绝、替代和删除都使用内容 hash CAS。
+
+批准只表示用户确认了候选；当前不会自动注入 Runtime prompt、工具上下文或 FTS，会话检索也不会被称作长期记忆。后续若接 Runtime memory，必须另建能力契约、可见注入点和删除/导出路径。
 
 ### 自动化
 
-Rust Host 每 30 秒检查到期任务，并在 `automation-runs.v1.json` 中原子认领、设置 10 分钟 lease、记录 scheduled/claimed/succeeded/failed/interrupted 和一次 catch-up。WebView 只负责为认领项创建会话并绑定 `claimId → sessionId`；真实 ACP turn 完成后由 Host 结账。重载后的已绑定 claim 不会重复发送。
+Rust Host 每 30 秒通过可独立调用的 `tick_once` 检查到期任务，并在 `automation-runs.v1.json` 中原子认领、设置 10 分钟 lease、记录 claimed/succeeded/failed/interrupted/skipped。每个任务显式保存 `run_once | skip` missed-run policy。WebView 只负责为认领项创建会话并绑定 `claimId → sessionId`；真实 ACP turn 完成后由 Host 结账。重载后的已绑定 claim 不会重复发送。
+
+固定 lease 到期不能证明原 Runtime 已停止，因此过期 claim 只标记为 interrupted，不自动创建 replacement；晚到 completion 仍只能结算原 claim，且重复完成 fail-closed。这优先保证不会并发重复执行外部副作用。若未来需要可靠重试，必须先增加 Host 活性证明或 heartbeat，而不是仅凭墙钟超时。
 
 该调度器只在应用进程存活时运行。应用关闭后的系统服务、launchd、Task Scheduler 或 headless 常驻仍是独立里程碑。
 
@@ -73,6 +81,8 @@ Rust Host 每 30 秒检查到期任务，并在 `automation-runs.v1.json` 中原
 4. `media://` 是受 provenance 校验的兼容通道；全部调用方迁移到 ResourceHandle 后再删除。
 5. 旧 `session://*` 事件至少保留一个完整版本周期；移除必须单独立项并更新契约 golden。
 6. SQLite 索引可在崩溃后短暂落后，下一次搜索会按 journal 指纹重建并清理已删除会话；不得把索引当事实源或备份。
+7. Memory 候选目前是可审阅事实源，不是 Runtime 长时记忆；未实现可见注入前不得宣传为自动记忆。
+8. Automation 的 lease 过期采取不重试策略以避免重复副作用；可靠重试与系统级常驻调度仍需单独里程碑。
 
 ## 验证入口
 
@@ -89,4 +99,4 @@ cd src-tauri && cargo test
 
 覆盖率门禁另运行 `pnpm test:coverage`、`pnpm coverage:changed` 和 Rust coverage audit。Windows 发布还必须执行仓库中的物理机验收脚本。
 
-本轮自动验收快照：141 个 Tauri command、25 个 event、501 个前端测试、45 个视觉回归用例、272 个 Rust 测试通过（另 1 个夹具生成测试按设计忽略）；改动代码覆盖率为 80.42% 行 / 73.93% 分支，Rust 行覆盖率为 38.73%。
+本轮自动验收快照：151 个 Tauri command、25 个 event、515 个前端测试、45 个视觉回归用例、310 个 Rust 测试通过（另 1 个夹具生成测试按设计忽略）；改动代码覆盖率为 91.00% 行 / 71.32% 分支，Rust 行覆盖率为 43.45%。

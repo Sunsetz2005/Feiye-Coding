@@ -152,9 +152,11 @@ Record a skill 只处理当前会话的可见材料：
 - 项目级：`.grok/skills/<slug>-skill/`
 - 用户级：`~/.grok/skills/<slug>-skill/`
 
-Host 校验名称、frontmatter、相对路径、体积、路径穿越、符号链接、密钥特征和覆盖冲突，并通过暂存目录与 rename 完成原子保存。取消审阅或校验失败不会留下技能目录。
+Host 校验名称、frontmatter、相对路径、体积、路径穿越、符号链接、密钥特征和覆盖冲突，并通过暂存目录与 rename 完成原子保存。目标级跨进程锁覆盖二次所有权/tree-hash 检查、替换和候选状态提交；提交失败会恢复原目标，发现非协作外部改写时先隔离为隐藏 conflict 目录而不删除。取消审阅或校验失败不会留下已启用的半提交技能。
 
-工具型任务完成后，Host 可另外生成 `SkillCandidateV1` pending 草稿。候选包含来源消息、内容 hash 和 Host ownership；它不会自动保存，也不能自动覆盖用户、插件或外部 Skill。用户确认后才复用同一 `skill_draft_save` 原子写入路径。
+工具型任务完成后，Host 可另外生成 `SkillCandidateV1` pending 草稿。候选包含来源消息、来源 hash、审阅 hash、Host ownership 和有界审计；它不会自动保存，也不能自动覆盖用户、插件或外部 Skill。V2 用 expected hash 防陈旧窗口，编辑后的最终草稿另以 final hash 绑定。用户确认后才复用同一原子写入路径。
+
+有限 Memory 候选是另一套独立事实源：只接受引用真实持久化 user 消息的偏好、项目事实或工作流提示，内容/总量有界并拒绝 Secret。批准只表示用户审阅通过，当前不会自动注入 Runtime、FTS 或工具上下文。
 
 ## 9. 能力与命令边界
 
@@ -169,6 +171,7 @@ Host 校验名称、frontmatter、相对路径、体积、路径穿越、符号�
 | 统一交互查询/决策 | live Runtime 期间 `available`；死亡 RPC 仅审计为 interrupted | `session_interactions_list`、`session_resolve_interaction_v1` |
 | Runtime 能力/事件 | `available` | `runtime_capabilities_v1`、`session://runtime_event_v1` |
 | 会话可见消息检索 | `available`，SQLite 可删可重建 | `session_search_v1` |
+| 有限 Memory 候选 | 可审阅但不注入 Runtime | `memory_candidates_list_v1`、`memory_candidate_*_v1` |
 | 模型/推理切换 | 按声明能力 | `models_list_available`、`session_set_model` |
 | 精确上下文 | 仅有可靠遥测时展示 | Runtime usage + 已知 capacity |
 | 原生语音 | `unavailable` | v2 能力表 + `speechRecognition: false`；无 speech 命令 |
