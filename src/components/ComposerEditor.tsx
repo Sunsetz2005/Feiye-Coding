@@ -319,6 +319,7 @@ export function ComposerEditor({
     renderSegmentsInto(el, parseStoredContent(value));
     lastValue.current = value;
     resize();
+    emitSlash();
   }, [value, resize, emitSlash]);
 
   const onInput = (e: FormEvent<HTMLDivElement>) => {

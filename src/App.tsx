@@ -1,4 +1,6 @@
 import {
+  lazy,
+  Suspense,
   useCallback,
   useEffect,
   useMemo,
@@ -40,8 +42,6 @@ import {
   parseCompactContent,
   parseToolStepContent,
   canSend,
-  canStop,
-  canType,
   clearPriorTurnStreaming,
   isSessionBusy,
   isSessionLiveStreaming,
@@ -77,7 +77,6 @@ import {
   resolveContextUsageDisplay,
   type ContextUsageState,
 } from "@/lib/contextUsage";
-import { ContextUsageChip } from "@/components/ContextUsageChip";
 import * as api from "@/lib/api";
 import { createT, resolveLocale, type Locale } from "@/i18n";
 import {
@@ -124,7 +123,6 @@ import {
   applyResolvedSessionMedia,
   buildAgentPrompt,
   collectSessionRelativeMediaRefs,
-  isImagePath,
   mergeAttachments,
   mergeMessageAttachments,
   parseAttachmentsFromContent,
@@ -134,14 +132,10 @@ import {
   applySkillAtSlash,
   isDraftEmpty,
   hydrateDisplayContent,
-  detectSlashQueryFromEditor,
   parseStoredContent,
   serializeForAgent,
 } from "@/lib/draftDoc";
-import {
-  queuePreviewText,
-  shouldEnqueueSend,
-} from "@/lib/sendQueue";
+import { shouldEnqueueSend } from "@/lib/sendQueue";
 import {
   useSendQueue,
   type ExecuteSendFromQueue,
@@ -153,16 +147,12 @@ import {
   type SkillInfo,
 } from "@/lib/slashCatalog";
 import type { MessageKey } from "@/i18n";
-import { AttachmentCard } from "@/components/AttachmentCard";
 import { ImageViewerProvider } from "@/components/ImageViewer";
 import { SunsetzLogo } from "@/components/SunsetzLogo";
 import { SetupWizard, type SetupCliInfo } from "@/components/SetupWizard";
-import { ComposerEditor } from "@/components/ComposerEditor";
-import { ComposerProjectMenu } from "@/components/ComposerProjectMenu";
-import { ComposerPlanModeButton } from "@/components/ComposerPlanModeButton";
+import { ComposerDock } from "@/components/ComposerDock";
 import { pathsEqual } from "@/lib/gitWorktree";
 import {
-  ComposerPlusPanel,
   buildComposerPlusEntries,
   uploadMatchesQuery,
   type ComposerPlusEntry,
@@ -170,16 +160,11 @@ import {
 import { StatusModal } from "@/components/StatusModal";
 import { McpStatusModal } from "@/components/McpStatusModal";
 import {
-  IconPlus,
   IconSearch,
   IconAttach,
-  IconSend,
-  IconStop,
   IconFolder,
-  IconClock,
   IconClose,
   IconNewChat as IconSquarePen,
-  IconImagine,
   IconArchive,
   IconPin,
   IconPinOff,
@@ -232,14 +217,7 @@ import {
   unseenSkillCandidateForSession,
   updateActiveInteractions,
 } from "@/lib/runtimeMigrationUi";
-import {
-  ComposerAccessMenu,
-  ComposerModelMenu,
-} from "@/components/ComposerModelMenu";
-import {
-  ResourceViewer,
-  type ResourceOpenTarget,
-} from "@/components/ResourceViewer";
+import type { ResourceOpenTarget } from "@/components/ResourceViewer";
 import {
   mergeSessionChange,
   sessionChangesFromMessages,
@@ -262,7 +240,6 @@ import {
   sunsetzProBrandKind,
 } from "@/lib/accountUi";
 import type { SunsetzProBrandKind } from "@/components/SunsetzProMark";
-import { Tip } from "@/components/ui/tooltip";
 import {
   WindowControls,
   toggleMaximizeFromTitlebar,
@@ -302,6 +279,11 @@ type ContextMenuState =
   | ({ kind: "project-policy"; id: string } & ContextMenuPosition)
   | ({ kind: "session"; id: string } & ContextMenuPosition)
   | null;
+
+const ResourceViewer = lazy(async () => {
+  const module = await import("@/components/ResourceViewer");
+  return { default: module.ResourceViewer };
+});
 
 /** In-app dialogs — window.prompt/confirm are unreliable in Tauri WebView. */
 type AppDialog =
@@ -386,7 +368,6 @@ export default function App() {
   liveSlashRef.current = liveSlash;
   /** After Escape, suppress re-open until the `/token` text changes. */
   const slashDismissedSigRef = useRef<string | null>(null);
-  const showComposerPlusRef = useRef(false);
   const [slashActiveIndex, setSlashActiveIndex] = useState(0);
   const [showStatusModal, setShowStatusModal] = useState(false);
   const [showMcpModal, setShowMcpModal] = useState(false);
@@ -439,7 +420,6 @@ export default function App() {
   const [finderSelectionFeedback, setFinderSelectionFeedback] = useState<
     string | null
   >(null);
-  showComposerPlusRef.current = showComposerPlus;
   /** Incremented when the + menu delegates to the project picker in the rail. */
   const [projectMenuOpenKey, setProjectMenuOpenKey] = useState(0);
   /** Review sheet for creating a reusable skill from visible conversation data. */
@@ -3966,21 +3946,40 @@ export default function App() {
     liveSlashRef.current = cleared;
   }, []);
 
-  /** Stable slash-query setter: skip no-op updates so filter effects don't thrash. */
+  /**
+   * Event-driven slash state from ComposerEditor. Escape suppresses the current
+   * token until it changes; no idle DOM polling is needed.
+   */
   const onSlashQueryChange = useCallback(
     (q: { start: number; query: string; end: number } | null) => {
-      setSlashQuery((prev) => {
-        if (q == null) return prev == null ? prev : null;
-        if (
-          prev &&
-          prev.start === q.start &&
-          prev.query === q.query &&
-          prev.end === q.end
-        ) {
-          return prev;
+      let next = q
+        ? { present: true, ...q }
+        : { present: false, query: "", start: 0, end: 0 };
+
+      if (next.present && slashDismissedSigRef.current != null) {
+        const signature = `${next.start}:${next.query}`;
+        if (signature === slashDismissedSigRef.current) {
+          next = { present: false, query: "", start: 0, end: 0 };
+        } else {
+          slashDismissedSigRef.current = null;
         }
-        return q;
-      });
+      } else if (!next.present) {
+        slashDismissedSigRef.current = null;
+      }
+
+      const previous = liveSlashRef.current;
+      if (
+        previous.present === next.present &&
+        previous.query === next.query &&
+        previous.start === next.start &&
+        previous.end === next.end
+      ) {
+        return;
+      }
+
+      liveSlashRef.current = next;
+      setLiveSlash(next);
+      setSlashQuery(next.present ? q : null);
     },
     [],
   );
@@ -4485,70 +4484,6 @@ export default function App() {
 
   /** + button and `/` open the same panel. */
   const composerMenuOpen = showComposerPlus || liveSlash.present;
-
-  /**
-   * rAF poll of composer innerText → live slash token.
-   * Single source of truth for open state + filter (not React draft).
-   */
-  useEffect(() => {
-    let raf = 0;
-    let alive = true;
-    const tick = () => {
-      if (!alive) return;
-      const el = composerInputRef.current;
-      const detected = detectSlashQueryFromEditor(el);
-      let next = detected
-        ? {
-            present: true as const,
-            query: detected.query,
-            start: detected.start,
-            end: detected.end,
-          }
-        : {
-            present: false as const,
-            query: "",
-            start: 0,
-            end: 0,
-          };
-      // Honor Escape dismiss until the user edits the `/token`.
-      if (next.present && slashDismissedSigRef.current != null) {
-        const sig = `${next.start}:${next.query}`;
-        if (sig === slashDismissedSigRef.current) {
-          next = { present: false, query: "", start: 0, end: 0 };
-        } else {
-          slashDismissedSigRef.current = null;
-        }
-      }
-      if (!next.present && detected == null) {
-        slashDismissedSigRef.current = null;
-      }
-      const prev = liveSlashRef.current;
-      if (
-        prev.present !== next.present ||
-        prev.query !== next.query ||
-        prev.start !== next.start ||
-        prev.end !== next.end
-      ) {
-        liveSlashRef.current = next;
-        setLiveSlash(next);
-        if (next.present) {
-          setSlashQuery({
-            start: next.start,
-            query: next.query,
-            end: next.end,
-          });
-        } else if (!showComposerPlusRef.current) {
-          setSlashQuery((q) => (q == null ? q : null));
-        }
-      }
-      raf = requestAnimationFrame(tick);
-    };
-    raf = requestAnimationFrame(tick);
-    return () => {
-      alive = false;
-      cancelAnimationFrame(raf);
-    };
-  }, []);
 
   /** Pin above input card; width matches composer shell.
    * Re-anchor when filter results change height (short list must sit on input). */
@@ -5098,15 +5033,15 @@ export default function App() {
     syncComposerHeight();
   }, [draft, mainPane, session.sessionId, requestComposerFocus, syncComposerHeight]);
 
-  /** Context usage chip label/state from compact events + message estimate. */
+  /** Context usage chip label/state from exact Runtime or compact telemetry. */
   const contextUsageDisplay = useMemo(
     () =>
       resolveContextUsageDisplay(
         contextUsage,
-        messages,
+        [],
         session.contextUsage ?? null,
       ),
-    [contextUsage, messages, session.contextUsage],
+    [contextUsage, session.contextUsage],
   );
 
   /**
@@ -5226,7 +5161,7 @@ export default function App() {
 
   // Floating composer height → chat bottom pad so messages can scroll under it.
   useEffect(() => {
-    if (mainPane !== "chat") return;
+    if (appView !== "workbench" || mainPane !== "chat") return;
     const el = composerWrapRef.current;
     if (!el) return;
     const measure = () => {
@@ -5240,15 +5175,7 @@ export default function App() {
     const ro = new ResizeObserver(measure);
     ro.observe(el);
     return () => ro.disconnect();
-  }, [
-    mainPane,
-    attachments.length,
-    draft,
-    showComposerPlus,
-    messages.length,
-    welcomeSession,
-    welcomeBrandKind,
-  ]);
+  }, [appView, mainPane]);
 
   const stop = async () => {
     try {
@@ -7692,587 +7619,238 @@ export default function App() {
                 }}
               />
             ) : (
-            <div className="composer-dock">
-              {!taskProgressVisible ? (
-              <div className="composer-context-rail">
-                {goalMode ? (
-                  <button
-                    type="button"
-                    className="composer-context-rail__activity"
-                    onClick={() => {
-                      composerInputRef.current?.focus();
-                    }}
-                  >
-                    <IconImagine size={14} aria-hidden />
-                    <span className="composer-context-rail__label">
-                      {tr("composer.goal")}
-                    </span>
-                  </button>
-                ) : (
-                  <ComposerProjectMenu
-                    activeProject={activeProject}
-                    projects={projects}
-                    openRequestKey={projectMenuOpenKey}
-                    labels={{
-                      noProject: tr("composer.noProject"),
-                      pickProject: tr("composer.pickProject"),
-                      addProject: tr("composer.addProject"),
-                      worktrees: tr("composer.worktrees"),
-                      worktreesEmpty: tr("composer.worktreesEmpty"),
-                      worktreesUnavailable: tr(
-                        "composer.worktreesUnavailable",
-                      ),
-                      worktreeCurrent: tr("composer.worktreeCurrent"),
-                      worktreeSwitch: tr("composer.worktreeSwitch"),
-                      worktreeMain: tr("composer.worktreeMain"),
-                      worktreeDetached: tr("composer.worktreeDetached"),
-                    }}
-                    worktrees={gitWorktrees}
-                    worktreesAvailable={gitWorktreesAvailable}
-                    worktreesLoading={gitWorktreesLoading}
-                    worktreesReason={gitWorktreesReason}
-                    disabled={composerSettingsLocked}
-                    onSelect={(project) => {
-                      if (composerSettingsLocked) return;
-                      void bindSessionProject(project);
-                    }}
-                    onAdd={() => {
-                      if (composerSettingsLocked) return;
-                      void addProjectFromPicker({ bindSession: true });
-                    }}
-                    onSwitchWorktree={(worktree) => {
-                      if (composerSettingsLocked) return;
-                      void switchToWorktree(worktree);
-                    }}
-                    onOpen={refreshGitWorktrees}
-                  />
-                )}
-              </div>
-              ) : null}
-            <div
-              ref={composerShellRef}
-              className={
-                "composer" +
-                (dragZone === "main" ? " composer--drop-ready" : "")
-              }
-            >
-              {sendQueue.activeQueue.length > 0 && (
-                <div
-                  className="composer__queue"
-                  aria-label={tr("composer.queueCount", {
-                    n: String(sendQueue.activeQueue.length),
-                  })}
-                >
-                  <div className="composer__queue-head">
-                    <IconClock size={14} aria-hidden />
-                    <span className="composer__queue-title">
-                      {tr("composer.queueCount", {
-                        n: String(sendQueue.activeQueue.length),
-                      })}
-                    </span>
-                    <button
-                      type="button"
-                      className="composer__queue-clear"
-                      onClick={sendQueue.clearQueue}
-                    >
-                      {tr("composer.queueClear")}
-                    </button>
-                  </div>
-                  {sendQueue.flushHold ? (
-                    <div className="composer__queue-hold" role="status">
-                      <span className="composer__queue-hold-text">
-                        {tr("composer.queueHold")}
-                      </span>
-                      <button
-                        type="button"
-                        className="composer__queue-hold-retry"
-                        onClick={() => sendQueue.resumeFlush()}
-                      >
-                        {tr("composer.queueHoldRetry")}
-                      </button>
-                    </div>
-                  ) : null}
-                  <ul className="composer__queue-list">
-                    {sendQueue.activeQueue.map((item, idx) => (
-                      <li key={item.id} className="composer__queue-item">
-                        <span className="composer__queue-idx" aria-hidden>
-                          {idx + 1}
-                        </span>
-                        <span
-                          className="composer__queue-text"
-                          title={queuePreviewText(
-                            item.storedDisplay,
-                            item.attachments,
-                            200,
-                            queuePreviewLabels,
-                          )}
-                        >
-                          {queuePreviewText(
-                            item.storedDisplay,
-                            item.attachments,
-                            72,
-                            queuePreviewLabels,
-                          )}
-                        </span>
-                        <button
-                          type="button"
-                          className="composer__queue-remove"
-                          aria-label={tr("composer.queueRemove")}
-                          onClick={() => sendQueue.removeItem(item.id)}
-                        >
-                          <IconClose size={12} />
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-              {attachments.length > 0 && (
-                <div
-                  className="composer__attachments"
-                  aria-label={tr("composer.attachCount", {
-                    n: String(attachments.length),
-                  })}
-                >
-                  {attachments.map((a) => (
-                    <AttachmentCard
-                      key={a.path}
-                      attachment={a}
-                      variant="chip"
-                      labels={attachLabels}
-                      galleryPaths={attachments
-                        .filter((x) => !x.isDir && isImagePath(x.path))
-                        .map((x) => x.path)}
-                      onRemove={(att) =>
-                        setAttachments((prev) =>
-                          prev.filter((x) => x.path !== att.path),
-                        )
-                      }
-                      onAddToComposer={(att) =>
-                        setAttachments((prev) => mergeAttachments(prev, [att]))
-                      }
-                    />
-                  ))}
-                </div>
-              )}
-              {composerMenuOpen &&
-                composerPlusPos &&
-                typeof document !== "undefined" &&
-                createPortal(
-                  <ComposerPlusPanel
-                    open
-                    mode={plusMenuMode ? "plus" : "slash"}
-                    panelRef={composerPlusPanelRef}
-                    locale={locale}
-                    entries={composerMenuEntries}
-                    filterQuery={
-                      liveSlash.present ? slashFilterQuery : undefined
-                    }
-                    skillsLoading={skillsLoading}
-                    activeIndex={slashActiveIndex}
-                    onActiveIndexChange={setSlashActiveIndex}
-                    onSelectUpload={() => {
-                      void pickComposerFiles();
-                    }}
-                    onSelectAction={(entry) => {
-                      void selectComposerPlusAction(entry);
-                    }}
-                    onSelectSlash={applySlashItem}
-                    resolveTitle={resolveSlashTitle}
-                    resolveDescription={resolveSlashDescription}
-                    style={{
-                      ...composerPlusStyle,
-                      zIndex: 10050,
-                    }}
-                  />,
-                  document.body,
-                )}
-              <ComposerEditor
-                editorRef={composerInputRef}
-                className="composer__input"
-                value={draft}
-                disabled={!canType(session.state)}
-                placeholder={
-                  goalMode
-                    ? tr("composer.goalPlaceholder")
-                    : tr("composer.placeholder")
-                }
-                onChange={setDraft}
-                onPasteFiles={(files) => {
-                  void addAttachmentsFromFiles(files);
-                }}
-                onPasteMediaFallback={(opts) => {
-                  void pasteMediaFromNativeClipboard(opts);
-                }}
-                onSlashQueryChange={onSlashQueryChange}
-                onKeyDown={(e) => {
-                  if (
-                    e.nativeEvent.isComposing ||
-                    (e.nativeEvent as KeyboardEvent).keyCode === 229
-                  ) {
-                    return;
-                  }
+            <ComposerDock
+              locale={locale}
+              taskProgressVisible={taskProgressVisible}
+              goalMode={goalMode}
+              settingsLocked={composerSettingsLocked}
+              sessionState={session.state}
+              connecting={connecting}
+              dropReady={dragZone === "main"}
+              draft={draft}
+              attachments={attachments}
+              attachmentLabels={attachLabels}
+              contextUsage={contextUsageDisplay}
+              project={{
+                active: activeProject,
+                options: projects,
+                openRequestKey: projectMenuOpenKey,
+                worktrees: gitWorktrees,
+                worktreesAvailable: gitWorktreesAvailable,
+                worktreesLoading: gitWorktreesLoading,
+                worktreesReason: gitWorktreesReason,
+                onSelect: (project) => {
+                  if (composerSettingsLocked) return;
+                  void bindSessionProject(project);
+                },
+                onAdd: () => {
+                  if (composerSettingsLocked) return;
+                  void addProjectFromPicker({ bindSession: true });
+                },
+                onSwitchWorktree: (worktree) => {
+                  if (composerSettingsLocked) return;
+                  void switchToWorktree(worktree);
+                },
+                onOpen: refreshGitWorktrees,
+              }}
+              queue={{
+                items: sendQueue.activeQueue,
+                flushHold: sendQueue.flushHold,
+                previewLabels: queuePreviewLabels,
+                onClear: sendQueue.clearQueue,
+                onRemove: sendQueue.removeItem,
+                onRetry: sendQueue.resumeFlush,
+              }}
+              menu={{
+                open: composerMenuOpen,
+                positioned: composerPlusPos != null,
+                plusMode: plusMenuMode,
+                showPlus: showComposerPlus,
+                liveSlashPresent: liveSlash.present,
+                slashFilterQuery,
+                skillsLoading,
+                activeIndex: slashActiveIndex,
+                entries: composerMenuEntries,
+                style: composerPlusStyle,
+                onActiveIndexChange: setSlashActiveIndex,
+                onPickFiles: pickComposerFiles,
+                onSelectAction: selectComposerPlusAction,
+                onSelectSlash: applySlashItem,
+                resolveTitle: resolveSlashTitle,
+                resolveDescription: resolveSlashDescription,
+                onClose: closeComposerMenu,
+                onTogglePlus: () => {
                   if (composerMenuOpen) {
-                    // Ref = same array the panel renders (never desync).
-                    const flat = composerMenuEntriesRef.current;
-                    const n = flat.length;
-                    if (e.key === "ArrowDown") {
-                      e.preventDefault();
-                      if (!n) return;
-                      setSlashActiveIndex((i) => (i + 1) % n);
-                      return;
-                    }
-                    if (e.key === "ArrowUp") {
-                      e.preventDefault();
-                      if (!n) return;
-                      setSlashActiveIndex((i) => (i - 1 + n) % n);
-                      return;
-                    }
-                    if (e.key === "Enter" && !e.shiftKey) {
-                      e.preventDefault();
-                      const entry =
-                        flat[
-                          Math.min(
-                            Math.max(0, slashActiveIndex),
-                            Math.max(0, n - 1),
-                          )
-                        ];
-                      if (!entry) return;
-                      if (entry.kind === "upload") void pickComposerFiles();
-                      else if (entry.kind === "action") {
-                        void selectComposerPlusAction(entry);
-                      } else {
-                        applySlashItem(entry.item);
-                      }
-                      return;
-                    }
-                    if (e.key === "Escape") {
-                      e.preventDefault();
-                      closeComposerMenu();
-                      return;
-                    }
-                    if (e.key === "Tab" && n > 0) {
-                      e.preventDefault();
-                      const entry =
-                        flat[
-                          Math.min(
-                            Math.max(0, slashActiveIndex),
-                            n - 1,
-                          )
-                      ]!;
-                      if (entry.kind === "upload") void pickComposerFiles();
-                      else if (entry.kind === "action") {
-                        void selectComposerPlusAction(entry);
-                      } else {
-                        applySlashItem(entry.item);
-                      }
-                      return;
-                    }
+                    closeComposerMenu();
+                  } else {
+                    setFinderSelectionFeedback(null);
+                    setShowComposerPlus(true);
                   }
-                  if (e.key === "Enter" && !e.shiftKey) {
-                    e.preventDefault();
-                    const hasBody =
-                      !isDraftEmpty(parseStoredContent(draft)) ||
-                      attachments.length > 0;
-                    if (
-                      hasBody &&
-                      session.state !== "awaiting_permission"
-                    ) {
-                      void send();
-                    }
-                  }
-                  if (e.key === "Escape") closeComposerMenu();
-                }}
-              />
-              <div className="composer__row">
-                <Tip label={tr("composer.add")}>
-                  <button
-                    ref={composerPlusTriggerRef}
-                    type="button"
-                    className={
-                      "icon-btn icon-btn--plus" +
-                      (showComposerPlus ? " is-open" : "")
-                    }
-                    aria-label={tr("composer.add")}
-                    aria-haspopup="menu"
-                    aria-expanded={showComposerPlus}
-                    aria-controls={
-                      showComposerPlus ? "composer-plus-panel" : undefined
-                    }
-                    onClick={() => {
-                      if (composerMenuOpen) {
-                        closeComposerMenu();
-                      } else {
-                        setFinderSelectionFeedback(null);
-                        setShowComposerPlus(true);
-                      }
-                    }}
-                  >
-                    <IconPlus size={18} />
-                  </button>
-                </Tip>
-                <ComposerAccessMenu
-                  mode={mode}
-                  policy={policy}
-                  disabled={composerSettingsLocked}
-                  labels={{
-                    access: tr("composer.access"),
-                    accessHint: tr("composer.accessHint"),
-                    mode: tr("composer.mode"),
-                    modeAgent: tr("mode.agent"),
-                    modePlan: tr("mode.plan"),
-                    modeAsk: tr("mode.ask"),
-                    modeAgentDesc: tr("mode.agentDesc"),
-                    modePlanDesc: tr("mode.planDesc"),
-                    modeAskDesc: tr("mode.askDesc"),
-                    permission: tr("composer.permission"),
-                    policyAsk: tr("policy.ask"),
-                    policyAcceptEdits: tr("policy.accept_edits"),
-                    policySession: tr("policy.allow_for_session"),
-                    policyDontAsk: tr("policy.dont_ask"),
-                    policyYolo: tr("policy.always_approve"),
-                    policyAskDesc: tr("policy.askDesc"),
-                    policyAcceptEditsDesc: tr("policy.accept_editsDesc"),
-                    policySessionDesc: tr("policy.allow_for_sessionDesc"),
-                    policyDontAskDesc: tr("policy.dont_askDesc"),
-                    policyYoloDesc: tr("policy.always_approveDesc"),
-                    policyShortAsk: tr("policy.short.ask"),
-                    policyShortAccept: tr("policy.short.accept_edits"),
-                    policyShortSession: tr("policy.short.allow_for_session"),
-                    policyShortDontAsk: tr("policy.short.dont_ask"),
-                    policyShortYolo: tr("policy.short.always_approve"),
-                  }}
-                  onMode={(value) => {
-                    if (composerSettingsLocked) return;
-                    const previousMode = mode;
-                    setMode(value);
-                    if (value === "plan") setGoalMode(false);
-                    void api
-                      .composerPrefsSet({
-                        projectId: activeProject?.id ?? null,
-                        sessionId: session.sessionId ?? null,
-                        mode: value,
-                      })
-                      .catch((error) => {
-                        setMode((current) =>
-                          rollbackOptimisticSetting(
-                            current,
-                            value,
-                            previousMode,
-                          ),
-                        );
-                        showToast(String(error), 4000);
-                      });
-                  }}
-                  onPolicy={(value: PermissionPolicyId) => {
-                    if (composerSettingsLocked) return;
-                    applyPermissionPolicy(value);
-                  }}
-                />
-                {mode === "plan" ? (
-                  <ComposerPlanModeButton
-                    label={tr("composer.planMode")}
-                    disabled={composerSettingsLocked}
-                    onDisable={() => {
-                      if (composerSettingsLocked) return;
-                      const previousMode = mode;
-                      setMode("agent");
-                      void api
-                        .composerPrefsSet({
-                          projectId: activeProject?.id ?? null,
-                          sessionId: session.sessionId ?? null,
-                          mode: "agent",
-                        })
-                        .catch((error) => {
-                          setMode((current) =>
-                            rollbackOptimisticSetting(
-                              current,
-                              "agent",
-                              previousMode,
-                            ),
-                          );
-                          showToast(String(error), 4000);
-                        });
-                    }}
-                  />
-                ) : null}
-                {goalMode ? (
-                  <Tip label={tr("composer.goalHint")}>
-                    <button
-                      type="button"
-                      className="chip chip--goal"
-                      disabled={composerSettingsLocked}
-                      onClick={() => {
-                        if (composerSettingsLocked) return;
-                        setGoalMode(false);
-                      }}
-                      aria-label={tr("composer.goalClear")}
-                    >
-                      <IconImagine size={14} />
-                      <span className="chip__label">{tr("composer.goal")}</span>
-                      <IconClose size={12} />
-                    </button>
-                  </Tip>
-                ) : null}
-                <span className="composer__spacer" />
-                <ContextUsageChip
-                  display={contextUsageDisplay}
-                  labels={{
-                    aria: tr("context.chipAria"),
-                    menuTitle: tr("context.menuTitle"),
-                    used: tr("context.used"),
-                    remaining: tr("context.remaining"),
-                    total: tr("context.total"),
-                    latestInput: tr("context.latestInput"),
-                    latestOutput: tr("context.latestOutput"),
-                    cacheRead: tr("context.cacheRead"),
-                    reasoning: tr("context.reasoning"),
-                    model: tr("context.model"),
-                    modelCalls: tr("context.modelCalls"),
-                    exactSource: tr("context.exactSource"),
-                    updatedAt: tr("context.updatedAt"),
-                    waiting: tr("context.waiting"),
-                    capacityUnknown: tr("context.capacityUnknown"),
-                    lastCompact: tr("context.lastCompact"),
-                    lastCompactNone: tr("context.lastCompactNone"),
-                    tokensRange: tr("compact.tokensRange"),
-                    compactAction: tr("context.compactAction"),
-                    auto: tr("context.triggerAuto"),
-                    manual: tr("context.triggerManual"),
-                  }}
-                  compactDisabled={composerSettingsLocked}
-                  onCompact={() => {
-                    if (composerSettingsLocked) return;
-                    setCompactNote("");
-                    setShowCompactModal(true);
-                  }}
-                />
-                <ComposerModelMenu
-                  modelId={modelId}
-                  effort={effort}
-                  models={availableModels}
-                  disabled={composerSettingsLocked}
-                  labels={{
-                    model: tr("composer.model"),
-                    effort: tr("composer.effort"),
-                    effortHigh: tr("effort.high"),
-                    effortMedium: tr("effort.medium"),
-                    effortLow: tr("effort.low"),
-                    resetDefaults: tr("composer.resetDefaults"),
-                    resetDefaultsHint: tr("composer.resetDefaultsHint"),
-                  }}
-                  onModel={(value) => {
-                    if (composerSettingsLocked) return;
-                    if (!isValidModelId(value, availableModels)) return;
-                    const previousModelId = modelId;
-                    setModelId(value);
-                    void api
-                      .composerPrefsSet({
-                        projectId: activeProject?.id ?? null,
-                        sessionId: session.sessionId ?? null,
-                        modelId: value,
-                      })
-                      .catch((error) => {
-                        setModelId((current) =>
-                          rollbackOptimisticSetting(
-                            current,
-                            value,
-                            previousModelId,
-                          ),
-                        );
-                        showToast(String(error), 4000);
-                      });
-                  }}
-                  onEffort={(value) => {
-                    if (composerSettingsLocked) return;
-                    if (!isValidEffort(value)) return;
-                    const previousEffort = effort;
-                    setEffort(value);
-                    void api
-                      .composerPrefsSet({
-                        projectId: activeProject?.id ?? null,
-                        sessionId: session.sessionId ?? null,
-                        effort: value,
-                      })
-                      .catch((error) => {
-                        setEffort((current) =>
-                          rollbackOptimisticSetting(
-                            current,
-                            value,
-                            previousEffort,
-                          ),
-                        );
-                        showToast(String(error), 4000);
-                      });
-                  }}
-                  onReset={() => {
-                    if (composerSettingsLocked) return;
-                    const nextModelId = pickDefaultModelId(availableModels);
-                    const previousModelId = modelId;
-                    const previousEffort = effort;
-                    setModelId(nextModelId);
-                    setEffort(DEFAULT_EFFORT);
-                    void api
-                      .composerPrefsSet({
-                        projectId: activeProject?.id ?? null,
-                        sessionId: session.sessionId ?? null,
-                        modelId: nextModelId,
-                        effort: DEFAULT_EFFORT,
-                      })
-                      .catch((error) => {
-                        setModelId((current) =>
-                          rollbackOptimisticSetting(
-                            current,
-                            nextModelId,
-                            previousModelId,
-                          ),
-                        );
-                        setEffort((current) =>
-                          rollbackOptimisticSetting(
-                            current,
-                            DEFAULT_EFFORT,
-                            previousEffort,
-                          ),
-                        );
-                        showToast(String(error), 4000);
-                      });
-                  }}
-                />
-                {canStop(session.state) ? (
-                  <>
-                    <Tip label={tr("composer.stop")}>
-                      <button
-                        type="button"
-                        className="icon-btn icon-btn--primary icon-btn--stop"
-                        onClick={() => void stop()}
-                        aria-label={tr("composer.stop")}
-                      >
-                        <IconStop size={14} />
-                      </button>
-                    </Tip>
-                  </>
-                ) : (
-                  <Tip label={tr("composer.send")}>
-                    <button
-                      type="button"
-                      className="icon-btn icon-btn--primary"
-                      disabled={
-                        (!canSend(session.state) &&
-                          !shouldEnqueueSend(session.state, connecting)) ||
-                        (isDraftEmpty(parseStoredContent(draft)) &&
-                          attachments.length === 0) ||
-                        session.state === "awaiting_permission"
-                      }
-                      onClick={() => void send()}
-                      aria-label={tr("composer.send")}
-                    >
-                      <IconSend size={16} />
-                    </button>
-                  </Tip>
-                )}
-              </div>
-            </div>
-            </div>
+                },
+              }}
+              preferences={{
+                mode,
+                policy,
+                modelId,
+                effort,
+                models: availableModels,
+                onMode: (value) => {
+                  if (composerSettingsLocked) return;
+                  const previousMode = mode;
+                  setMode(value);
+                  if (value === "plan") setGoalMode(false);
+                  void api
+                    .composerPrefsSet({
+                      projectId: activeProject?.id ?? null,
+                      sessionId: session.sessionId ?? null,
+                      mode: value,
+                    })
+                    .catch((error) => {
+                      setMode((current) =>
+                        rollbackOptimisticSetting(
+                          current,
+                          value,
+                          previousMode,
+                        ),
+                      );
+                      showToast(String(error), 4000);
+                    });
+                },
+                onPolicy: (value) => {
+                  if (composerSettingsLocked) return;
+                  applyPermissionPolicy(value);
+                },
+                onDisablePlan: () => {
+                  if (composerSettingsLocked) return;
+                  const previousMode = mode;
+                  setMode("agent");
+                  void api
+                    .composerPrefsSet({
+                      projectId: activeProject?.id ?? null,
+                      sessionId: session.sessionId ?? null,
+                      mode: "agent",
+                    })
+                    .catch((error) => {
+                      setMode((current) =>
+                        rollbackOptimisticSetting(
+                          current,
+                          "agent",
+                          previousMode,
+                        ),
+                      );
+                      showToast(String(error), 4000);
+                    });
+                },
+                onClearGoal: () => {
+                  if (composerSettingsLocked) return;
+                  setGoalMode(false);
+                },
+                onModel: (value) => {
+                  if (composerSettingsLocked) return;
+                  if (!isValidModelId(value, availableModels)) return;
+                  const previousModelId = modelId;
+                  setModelId(value);
+                  void api
+                    .composerPrefsSet({
+                      projectId: activeProject?.id ?? null,
+                      sessionId: session.sessionId ?? null,
+                      modelId: value,
+                    })
+                    .catch((error) => {
+                      setModelId((current) =>
+                        rollbackOptimisticSetting(
+                          current,
+                          value,
+                          previousModelId,
+                        ),
+                      );
+                      showToast(String(error), 4000);
+                    });
+                },
+                onEffort: (value) => {
+                  if (composerSettingsLocked) return;
+                  if (!isValidEffort(value)) return;
+                  const previousEffort = effort;
+                  setEffort(value);
+                  void api
+                    .composerPrefsSet({
+                      projectId: activeProject?.id ?? null,
+                      sessionId: session.sessionId ?? null,
+                      effort: value,
+                    })
+                    .catch((error) => {
+                      setEffort((current) =>
+                        rollbackOptimisticSetting(
+                          current,
+                          value,
+                          previousEffort,
+                        ),
+                      );
+                      showToast(String(error), 4000);
+                    });
+                },
+                onReset: () => {
+                  if (composerSettingsLocked) return;
+                  const nextModelId = pickDefaultModelId(availableModels);
+                  const previousModelId = modelId;
+                  const previousEffort = effort;
+                  setModelId(nextModelId);
+                  setEffort(DEFAULT_EFFORT);
+                  void api
+                    .composerPrefsSet({
+                      projectId: activeProject?.id ?? null,
+                      sessionId: session.sessionId ?? null,
+                      modelId: nextModelId,
+                      effort: DEFAULT_EFFORT,
+                    })
+                    .catch((error) => {
+                      setModelId((current) =>
+                        rollbackOptimisticSetting(
+                          current,
+                          nextModelId,
+                          previousModelId,
+                        ),
+                      );
+                      setEffort((current) =>
+                        rollbackOptimisticSetting(
+                          current,
+                          DEFAULT_EFFORT,
+                          previousEffort,
+                        ),
+                      );
+                      showToast(String(error), 4000);
+                    });
+                },
+              }}
+              refs={{
+                input: composerInputRef,
+                shell: composerShellRef,
+                plusTrigger: composerPlusTriggerRef,
+                plusPanel: composerPlusPanelRef,
+                menuEntries: composerMenuEntriesRef,
+              }}
+              onDraftChange={setDraft}
+              onRemoveAttachment={(attachment) =>
+                setAttachments((current) =>
+                  current.filter((item) => item.path !== attachment.path),
+                )
+              }
+              onAddAttachment={(attachment) =>
+                setAttachments((current) =>
+                  mergeAttachments(current, [attachment]),
+                )
+              }
+              onPasteFiles={addAttachmentsFromFiles}
+              onPasteMediaFallback={pasteMediaFromNativeClipboard}
+              onSlashQueryChange={onSlashQueryChange}
+              onCompact={() => {
+                if (composerSettingsLocked) return;
+                setCompactNote("");
+                setShowCompactModal(true);
+              }}
+              onSend={send}
+              onStop={stop}
+            />
             )}
           </div>
           </div>
@@ -8340,26 +7918,36 @@ export default function App() {
           )}
           {!layout.asideCollapsed ? (
             <div className="aside__inner">
-              <ResourceViewer
-                projectPath={activeProject?.path ?? null}
-                projectName={activeProject?.name ?? null}
-                locale={locale}
-                paneActive
-                openRequest={resourceOpenTarget}
-                onOpenRequestConsumed={() => setResourceOpenTarget(null)}
-                sessionChanges={
-                  sessionChangesById[session.sessionId || ""] ?? []
+              <Suspense
+                fallback={
+                  <div className="rp__empty-state" role="status">
+                    <div className="rp__empty-desc">
+                      {tr("resources.loading")}
+                    </div>
+                  </div>
                 }
-                plan={plan}
-                planFocusKey={planFocusKey}
-                onClose={() =>
-                  setLayout((l) => {
-                    const n = { ...l, asideCollapsed: true };
-                    saveLayout(localStorage, n);
-                    return n;
-                  })
-                }
-              />
+              >
+                <ResourceViewer
+                  projectPath={activeProject?.path ?? null}
+                  projectName={activeProject?.name ?? null}
+                  locale={locale}
+                  paneActive
+                  openRequest={resourceOpenTarget}
+                  onOpenRequestConsumed={() => setResourceOpenTarget(null)}
+                  sessionChanges={
+                    sessionChangesById[session.sessionId || ""] ?? []
+                  }
+                  plan={plan}
+                  planFocusKey={planFocusKey}
+                  onClose={() =>
+                    setLayout((l) => {
+                      const n = { ...l, asideCollapsed: true };
+                      saveLayout(localStorage, n);
+                      return n;
+                    })
+                  }
+                />
+              </Suspense>
             </div>
           ) : null}
         </aside>

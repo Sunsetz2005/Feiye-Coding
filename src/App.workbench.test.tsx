@@ -22,6 +22,8 @@ import {
 } from "vitest";
 import type { SidebarNavigatorProps } from "@/components/SidebarNavigator";
 import type { SettingsPageProps } from "@/components/SettingsPage";
+import type { ComposerDockProps } from "@/components/ComposerDock";
+import type { ResourceViewerProps } from "@/components/ResourceViewer";
 
 type EventHandler = (payload: unknown) => void;
 
@@ -166,9 +168,32 @@ vi.mock("@/lib/api", async (importOriginal) => {
   };
 });
 
-vi.mock("@/components/ResourceViewer", () => ({
-  ResourceViewer: () => <aside data-testid="resource-viewer-mock" />,
+const resourceCapture = vi.hoisted(() => ({
+  current: null as ResourceViewerProps | null,
 }));
+
+vi.mock("@/components/ResourceViewer", () => ({
+  ResourceViewer: (props: ResourceViewerProps) => {
+    resourceCapture.current = props;
+    return <aside data-testid="resource-viewer-mock" />;
+  },
+}));
+
+const composerCapture = vi.hoisted(() => ({
+  current: null as ComposerDockProps | null,
+}));
+
+vi.mock("@/components/ComposerDock", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("@/components/ComposerDock")>();
+  return {
+    ...actual,
+    ComposerDock: (props: ComposerDockProps) => {
+      composerCapture.current = props;
+      return <actual.ComposerDock {...props} />;
+    },
+  };
+});
 
 const settingsCapture = vi.hoisted(() => ({
   current: null as SettingsPageProps | null,
@@ -273,6 +298,8 @@ afterEach(() => {
   localStorage.clear();
   sidebarCapture.current = null;
   settingsCapture.current = null;
+  composerCapture.current = null;
+  resourceCapture.current = null;
   apiListenerCapture.handlers.clear();
   apiListenerCapture.tauri = false;
   apiListenerCapture.resolvePlan.mockClear();
@@ -410,6 +437,137 @@ describe("App workbench integration", () => {
         ).toBeNull();
       });
       expect(invoke).toHaveBeenCalledTimes(2);
+    },
+    20_000,
+  );
+
+  it(
+    "drives the slash palette from editor events and keeps Escape dismissal sticky",
+    async () => {
+      const { default: App } = await import("./App");
+      render(<App />);
+      await screen.findByTestId("workbench-shell");
+
+      const editor = screen.getByRole("textbox");
+      editor.textContent = "/go";
+      fireEvent.input(editor);
+      expect(await screen.findByRole("listbox")).toBeTruthy();
+
+      fireEvent.keyDown(editor, { key: "Escape" });
+      await waitFor(() => {
+        expect(screen.queryByRole("listbox")).toBeNull();
+      });
+
+      // ComposerEditor reports again on keyup. The unchanged token stays
+      // dismissed instead of immediately reopening the palette.
+      fireEvent.keyUp(editor, { key: "Escape" });
+      await act(async () => Promise.resolve());
+      expect(screen.queryByRole("listbox")).toBeNull();
+
+      editor.textContent = "/goal";
+      fireEvent.input(editor);
+      expect(await screen.findByRole("listbox")).toBeTruthy();
+    },
+    20_000,
+  );
+
+  it(
+    "keeps ComposerDock commands behind App-owned orchestration",
+    async () => {
+      const invoke = vi.fn(
+        async (command: string, args: Record<string, unknown> = {}) => {
+          if (command === "composer_prefs_set") {
+            return {
+              modelId: args.modelId ?? "sunsetz-4.5",
+              effort: args.effort ?? "medium",
+              mode: args.mode ?? "agent",
+              permissionPolicy: "ask",
+              scope: "global",
+              source: "test",
+            };
+          }
+          return null;
+        },
+      );
+      Object.assign(window, { __TAURI_INTERNALS__: { invoke } });
+
+      const { default: App } = await import("./App");
+      render(<App />);
+      await waitFor(() => expect(composerCapture.current).not.toBeNull());
+
+      const dock = composerCapture.current;
+      if (!dock) throw new Error("composer missing");
+      const modelId = dock.preferences.models[0]?.id ?? "sunsetz-4.5";
+      const attachment = {
+        path: "/tmp/coverage.png",
+        name: "coverage.png",
+        isDir: false,
+      };
+
+      await act(async () => {
+        dock.project.onSelect(null);
+        dock.project.onAdd();
+        dock.project.onSwitchWorktree({
+          path: "/tmp/worktree",
+          branch: "coverage",
+          detached: false,
+          isMain: false,
+          locked: false,
+          prunable: false,
+        });
+        dock.menu.onTogglePlus();
+        dock.preferences.onMode("ask");
+        dock.preferences.onPolicy("ask");
+        dock.preferences.onModel("invalid-model");
+        dock.preferences.onModel(modelId);
+        dock.preferences.onEffort("high");
+        dock.preferences.onReset();
+        dock.preferences.onClearGoal();
+        dock.onRemoveAttachment(attachment);
+        dock.onAddAttachment(attachment);
+        dock.onCompact();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      await waitFor(() => {
+        expect(composerCapture.current?.menu.showPlus).toBe(true);
+      });
+      act(() => composerCapture.current?.menu.onTogglePlus());
+      await waitFor(() => {
+        expect(composerCapture.current?.menu.showPlus).toBe(false);
+      });
+
+      expect(
+        invoke.mock.calls.filter(([command]) => command === "composer_prefs_set")
+          .length,
+      ).toBeGreaterThanOrEqual(3);
+    },
+    20_000,
+  );
+
+  it(
+    "loads the resource viewer only after opening the right pane",
+    async () => {
+      const user = userEvent.setup();
+      const { default: App } = await import("./App");
+      render(<App />);
+      await screen.findByTestId("workbench-shell");
+
+      expect(resourceCapture.current).toBeNull();
+      await user.click(
+        screen.getByRole("button", { name: /Show files|显示文件/ }),
+      );
+      await waitFor(() => expect(resourceCapture.current).not.toBeNull());
+      expect(await screen.findByTestId("resource-viewer-mock")).toBeTruthy();
+
+      act(() => {
+        resourceCapture.current?.onOpenRequestConsumed?.();
+        resourceCapture.current?.onClose?.();
+      });
+      await waitFor(() => {
+        expect(screen.queryByTestId("resource-viewer-mock")).toBeNull();
+      });
     },
     20_000,
   );
