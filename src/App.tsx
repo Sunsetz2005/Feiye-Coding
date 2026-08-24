@@ -135,11 +135,16 @@ import {
   parseStoredContent,
   serializeForAgent,
 } from "@/lib/draftDoc";
-import { shouldEnqueueSend } from "@/lib/sendQueue";
+import {
+  shouldEnqueueSend,
+  type QueuedSend,
+} from "@/lib/sendQueue";
 import {
   useSendQueue,
   type ExecuteSendFromQueue,
 } from "@/hooks/useSendQueue";
+import { useComposerRecovery } from "@/hooks/useComposerRecovery";
+import { COMPOSER_RECOVERY_DRAFT_KEY } from "@/lib/composerRecovery";
 import {
   buildSlashCatalog,
   flattenFilteredCatalog,
@@ -340,12 +345,27 @@ export default function App() {
   >({});
   /** Composer stored form (may include [[skill:name]] tokens). */
   const [draft, setDraft] = useState("");
+  /** Composer identity changes before the slower session journal finishes loading. */
+  const [composerRecoveryKey, setComposerRecoveryKey] = useState<string>(
+    COMPOSER_RECOVERY_DRAFT_KEY,
+  );
   const [goalMode, setGoalMode] = useState(false);
   /** Prevent overlapping executeSend / queue auto-flush races. */
   const sendInFlightRef = useRef(false);
   const executeSendFromQueueRef = useRef<ExecuteSendFromQueue>(
     async () => false,
   );
+  const persistQueuedStateRef = useRef<
+    (key: string, queue: QueuedSend[]) => Promise<boolean>
+  >(async () => false);
+  const persistQueuedState = useCallback(
+    (key: string, queue: QueuedSend[]) =>
+      persistQueuedStateRef.current(key, queue),
+    [],
+  );
+  const composerRecoveryActionsRef = useRef<
+    ReturnType<typeof useComposerRecovery> | null
+  >(null);
   const [skillInfos, setSkillInfos] = useState<SkillInfo[]>([]);
   const [skillsLoading, setSkillsLoading] = useState(false);
   const [slashQuery, setSlashQuery] = useState<{
@@ -1214,6 +1234,7 @@ export default function App() {
   useEffect(() => {
     if (!api.isTauri()) return;
     let cancelled = false;
+    let recoveryActivated = false;
     const cleanups: Array<() => void> = [];
 
     const track = async (p: Promise<() => void>) => {
@@ -1229,6 +1250,13 @@ export default function App() {
       try {
         const snap = await api.sessionGetState();
         if (!cancelled) {
+          const recovery = composerRecoveryActionsRef.current;
+          if (recovery) {
+            recoveryActivated = true;
+            void recovery.activate(
+              snap.sessionId ?? COMPOSER_RECOVERY_DRAFT_KEY,
+            );
+          }
           setLiveHost(snap);
           liveHostRef.current = snap;
           // Only bind the viewed session when Host already has a live row.
@@ -1790,7 +1818,14 @@ export default function App() {
           pendingInteractions.forEach(applyInteractionSnapshot);
         }
       } catch (e) {
-        if (!cancelled) setLocalError(String(e));
+        if (!cancelled) {
+          if (!recoveryActivated) {
+            void composerRecoveryActionsRef.current?.activate(
+              COMPOSER_RECOVERY_DRAFT_KEY,
+            );
+          }
+          setLocalError(String(e));
+        }
       }
     })();
 
@@ -1897,6 +1932,8 @@ export default function App() {
       messagesBySessionRef.current.set(leavingId, messagesRef.current);
     }
 
+    // Composer state switches immediately; journal loading may take much longer.
+    void composerRecoveryActionsRef.current?.activate(s.id);
     // Point viewing id immediately so late stream chunks land in the right cache.
     openingSessionIdRef.current = s.id;
     viewingSessionIdRef.current = s.id;
@@ -2110,7 +2147,6 @@ export default function App() {
     }
     // Orphan sessions clear project context; project sessions select their folder.
     setActiveProject(proj);
-    setAttachments([]);
     // Reattach live host snapshot when reopening the session that is still running.
     const live = liveHostRef.current;
     if (live.sessionId === s.id) {
@@ -2287,12 +2323,18 @@ export default function App() {
         messagesBySessionRef.current.set(leavingId, cachedLeaving);
       }
     }
+    const seedDraft = opts?.seedDraft ?? "";
+    const recovery = composerRecoveryActionsRef.current;
+    const recoveryReset = recovery?.resetDraft(seedDraft);
+    if (!recovery) {
+      setComposerRecoveryKey(COMPOSER_RECOVERY_DRAFT_KEY);
+      setDraft(seedDraft);
+      setAttachments([]);
+      sendQueue.clearDraftQueue();
+    }
     viewingSessionIdRef.current = null;
     setMessages([]);
     setContextUsage(INITIAL_CONTEXT_USAGE);
-    setDraft(opts?.seedDraft ?? "");
-    setAttachments([]);
-    sendQueue.clearDraftQueue();
     setPlan({
       title: "Plan ready for review",
       body: "",
@@ -2311,6 +2353,7 @@ export default function App() {
       backend: "grok_agent_stdio",
     });
     setLocalError(null);
+    await recoveryReset;
     // Disconnect any live agent for previous session (best-effort).
     if (api.isTauri()) {
       try {
@@ -3000,12 +3043,15 @@ export default function App() {
           const viewingRow = wasViewing
             ? rows.find((s) => s.id === openId)
             : null;
-          const deletedIds = new Set(rows.map((s) => s.id));
           for (const s of rows) {
+            const recovery = composerRecoveryActionsRef.current;
+            if (recovery && !(await recovery.deleteKey(s.id))) {
+              throw new Error(`Failed to delete composer recovery for ${s.id}`);
+            }
             await api.sessionDelete(s.id);
             messagesBySessionRef.current.delete(s.id);
+            if (!recovery) sendQueue.dropKeys([s.id]);
           }
-          sendQueue.dropSessions(deletedIds);
           await refreshSessions();
           if (wasViewing && viewingRow) {
             const proj = viewingRow.projectId
@@ -3227,6 +3273,20 @@ export default function App() {
           tr("session.new"),
         )) as { id: string; title?: string };
         sessionId = meta.id;
+        const recovery = composerRecoveryActionsRef.current;
+        const recoveryMigrated = recovery
+          ? await recovery.migrateDraft(meta.id)
+          : true;
+        if (!recoveryMigrated) {
+          // The row is still empty; roll it back so retry keeps the same draft.
+          await api.sessionDelete(meta.id).catch(() => {});
+          setLocalError("COMPOSER_RECOVERY_MIGRATION_FAILED");
+          return null;
+        }
+        if (!recovery) {
+          sendQueue.migrateDraft(meta.id);
+          setComposerRecoveryKey(meta.id);
+        }
         // Bind draft messages cache to the new id (was under null / unkeyed).
         const draftMsgs = messagesBySessionRef.current.get("__draft__");
         if (draftMsgs?.length) {
@@ -3332,6 +3392,39 @@ export default function App() {
     !rewindBusy;
 
   /**
+   * Recovery stores attachment references, never capabilities. Re-run the
+   * normal Host classification immediately before every send and use only the
+   * fresh canonical metadata; missing/filtered paths abort the turn.
+   */
+  const classifyAttachmentsForSend = async (
+    input: Attachment[],
+  ): Promise<Attachment[] | null> => {
+    if (!input.length || !api.isTauri()) {
+      return input.map((attachment) => ({ ...attachment }));
+    }
+    try {
+      const classified = await api.pathsClassify(
+        input.map((attachment) => attachment.path),
+      );
+      if (
+        classified.length !== input.length ||
+        classified.some((entry) => !entry.exists)
+      ) {
+        setLocalError(tr("attach.droppedNone"));
+        return null;
+      }
+      return classified.map((entry) => ({
+        path: entry.path,
+        name: entry.name,
+        isDir: entry.isDir,
+      }));
+    } catch (error) {
+      setLocalError(String(error) || tr("attach.droppedNone"));
+      return null;
+    }
+  };
+
+  /**
    * Dispatch one user turn (optimistic UI + connect + session_send).
    * @param targetSessionId When set (queue flush), bind optimistic UI to this id.
    * @param fromQueue Drop user+assistant on failure so requeue does not duplicate.
@@ -3342,17 +3435,32 @@ export default function App() {
     goalMode: boolean;
     /** Optional private Agent form; the journal still stores storedDisplay. */
     agentTextOverride?: string;
+    /** Direct composer send already classified immediately before dispatch. */
+    attachmentsClassified?: boolean;
     fromQueue?: boolean;
     targetSessionId?: string | null;
   }): Promise<boolean> => {
     if (sendInFlightRef.current) return false;
     sendInFlightRef.current = true;
-    const { storedDisplay, att, goalMode: useGoal, fromQueue } = opts;
+    const {
+      storedDisplay,
+      att: requestedAttachments,
+      goalMode: useGoal,
+      fromQueue,
+    } = opts;
     const segments = parseStoredContent(storedDisplay);
-    if (isDraftEmpty(segments) && !att.length) {
+    if (isDraftEmpty(segments) && !requestedAttachments.length) {
       sendInFlightRef.current = false;
       return false;
     }
+    const classifiedAttachments = opts.attachmentsClassified
+      ? requestedAttachments.map((attachment) => ({ ...attachment }))
+      : await classifyAttachmentsForSend(requestedAttachments);
+    if (!classifiedAttachments) {
+      sendInFlightRef.current = false;
+      return false;
+    }
+    const att = classifiedAttachments;
     const sendTargetId =
       opts.targetSessionId !== undefined
         ? opts.targetSessionId
@@ -3545,11 +3653,6 @@ export default function App() {
         storedDisplay,
         att.map(({ path, name, isDir }) => ({ path, name, isDir })),
       );
-      // Only after a successful send: move remaining draft follow-ups onto the
-      // real session. If this threw, claim requeues under `__draft__` intact.
-      if (!sendTargetId) {
-        sendQueue.migrateDraft(sessionId);
-      }
       if (shouldAutoTitle && api.isTauri()) {
         void api
           .sessionAutoTitle(sessionId, titleSeed)
@@ -3725,6 +3828,7 @@ export default function App() {
   ]);
 
   const clearComposerAfterSubmit = () => {
+    composerRecoveryActionsRef.current?.captureComposer("", []);
     setDraft("");
     setSlashQuery(null);
     setAttachments([]);
@@ -3765,11 +3869,19 @@ export default function App() {
       return;
     }
 
+    // Validate before clearing the visible composer. A stale restored path must
+    // leave the draft intact so the user can remove/replace the attachment.
+    if (sendInFlightRef.current) return;
+    sendInFlightRef.current = true;
+    const classifiedAttachments = await classifyAttachmentsForSend(att);
+    sendInFlightRef.current = false;
+    if (!classifiedAttachments) return;
     clearComposerAfterSubmit();
     await executeSend({
       storedDisplay,
-      att,
+      att: classifiedAttachments,
       goalMode,
+      attachmentsClassified: true,
       targetSessionId: session.sessionId,
     });
   };
@@ -4567,16 +4679,31 @@ export default function App() {
     [tr],
   );
   const sendQueue = useSendQueue({
-    sessionId: session.sessionId,
+    queueKey: composerRecoveryKey,
     sessionState: session.state,
     connecting,
     liveHostRef,
     viewingSessionIdRef,
     sendInFlightRef,
     executeSendRef: executeSendFromQueueRef,
+    persistQueuedState,
     showToast,
     labels: sendQueueLabels,
   });
+  const composerRecovery = useComposerRecovery({
+    enabled: api.isTauri(),
+    recoveryKey: composerRecoveryKey,
+    setRecoveryKey: setComposerRecoveryKey,
+    draft,
+    attachments,
+    activeQueue: sendQueue.activeQueue,
+    setDraft,
+    setAttachments,
+    queue: sendQueue,
+    onError: (error) => console.warn("composer recovery:", error),
+  });
+  persistQueuedStateRef.current = composerRecovery.persistQueuedState;
+  composerRecoveryActionsRef.current = composerRecovery;
 
   /**
    * Fork a session (full history or through a user-prompt index) and open it.

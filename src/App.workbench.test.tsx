@@ -56,6 +56,15 @@ const apiListenerCapture = vi.hoisted(() => ({
     title: "Scheduled",
   })),
   sessionSend: vi.fn(async () => undefined),
+  sessionAutoTitle: vi.fn(async () => null),
+  pathsClassify: vi.fn(async (paths: string[]) =>
+    paths.map((path) => ({
+      path,
+      name: path.split(/[/\\]/).pop() || path,
+      isDir: false,
+      exists: true,
+    })),
+  ),
   automationBind: vi.fn(async () => undefined),
   automationComplete: vi.fn(async () => undefined),
   sessionSearch: vi.fn(async () => [] as Array<Record<string, unknown>>),
@@ -114,6 +123,13 @@ const apiListenerCapture = vi.hoisted(() => ({
   })),
 }));
 
+const recoveryCapture = vi.hoisted(() => ({
+  get: vi.fn(),
+  put: vi.fn(),
+  migrate: vi.fn(),
+  delete: vi.fn(),
+}));
+
 vi.mock("@/lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/api")>();
   return {
@@ -160,11 +176,25 @@ vi.mock("@/lib/api", async (importOriginal) => {
     sessionDisconnect: apiListenerCapture.sessionDisconnect,
     sessionConnect: apiListenerCapture.sessionConnect,
     sessionSend: apiListenerCapture.sessionSend,
+    sessionAutoTitle: apiListenerCapture.sessionAutoTitle,
+    pathsClassify: apiListenerCapture.pathsClassify,
     automationClaimBindV1: apiListenerCapture.automationBind,
     automationClaimCompleteV1: apiListenerCapture.automationComplete,
     settingsSet: apiListenerCapture.settingsSet,
     settingsPatchV1: apiListenerCapture.settingsPatch,
     trayRefresh: vi.fn(async () => undefined),
+  };
+});
+
+vi.mock("@/lib/composerRecovery", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("@/lib/composerRecovery")>();
+  return {
+    ...actual,
+    composerRecoveryGetV1: recoveryCapture.get,
+    composerRecoveryPutV1: recoveryCapture.put,
+    composerRecoveryMigrateV1: recoveryCapture.migrate,
+    composerRecoveryDeleteV1: recoveryCapture.delete,
   };
 });
 
@@ -291,6 +321,30 @@ beforeEach(() => {
   apiListenerCapture.sessionSearch.mockImplementation(async () =>
     apiListenerCapture.searchHits,
   );
+  recoveryCapture.get.mockReset().mockResolvedValue(null);
+  recoveryCapture.put.mockReset().mockImplementation(
+    async (key: string, _state: unknown, revision: number) => ({
+      version: 1,
+      key,
+      revision: revision + 1,
+    }),
+  );
+  recoveryCapture.migrate.mockReset().mockImplementation(
+    async (toKey: string, fromRevision: number, toRevision: number) => ({
+      version: 1,
+      fromKey: "__draft__",
+      fromRevision: fromRevision + 1,
+      toKey,
+      toRevision: toRevision + 1,
+    }),
+  );
+  recoveryCapture.delete.mockReset().mockImplementation(
+    async (key: string, revision: number) => ({
+      version: 1,
+      key,
+      revision: revision + 1,
+    }),
+  );
 });
 
 afterEach(() => {
@@ -307,6 +361,8 @@ afterEach(() => {
   apiListenerCapture.sessionDisconnect.mockClear();
   apiListenerCapture.sessionConnect.mockClear();
   apiListenerCapture.sessionSend.mockClear();
+  apiListenerCapture.sessionAutoTitle.mockClear();
+  apiListenerCapture.pathsClassify.mockClear();
   apiListenerCapture.automationBind.mockClear();
   apiListenerCapture.automationComplete.mockClear();
   apiListenerCapture.sessionSearch.mockClear();
@@ -336,6 +392,7 @@ describe("App workbench integration", () => {
       });
       expect(screen.getByTestId("sidebar-navigator")).toBeTruthy();
       expect(screen.getByRole("heading", { name: /new|新会话/i })).toBeTruthy();
+      expect(recoveryCapture.get).not.toHaveBeenCalled();
 
       const sidebar = sidebarCapture.current;
       expect(sidebar).not.toBeNull();
@@ -385,6 +442,221 @@ describe("App workbench integration", () => {
       expect(
         screen.getByText(/No matching settings|没有匹配的设置/),
       ).toBeTruthy();
+    },
+    20_000,
+  );
+
+  it(
+    "restores composer state on reload and keeps drafts isolated while switching sessions",
+    async () => {
+      apiListenerCapture.tauri = true;
+      apiListenerCapture.sessionState = {
+        ...apiListenerCapture.sessionState,
+        sessionId: "session-1",
+        agentSessionId: "agent-1",
+        state: "ready",
+      };
+      apiListenerCapture.sessions = [
+        {
+          id: "session-1",
+          title: "One",
+          projectId: null,
+          updatedAt: "2026-08-24T00:00:00Z",
+        },
+        {
+          id: "session-2",
+          title: "Two",
+          projectId: null,
+          updatedAt: "2026-08-24T00:00:01Z",
+        },
+      ];
+      recoveryCapture.get.mockImplementation(async (key: string) => ({
+        version: 1,
+        key,
+        revision: key === "session-1" ? 3 : 7,
+        state: {
+          draft: key === "session-1" ? "draft one" : "draft two",
+          attachments:
+            key === "session-1"
+              ? [{ path: "/tmp/one.txt", name: "one.txt", isDir: false }]
+              : [],
+          queue:
+            key === "session-1"
+              ? [
+                  {
+                    id: "queued-one",
+                    storedDisplay: "follow up",
+                    attachments: [],
+                    goalMode: false,
+                    createdAt: 1,
+                  },
+                ]
+              : [],
+        },
+        filteredAttachmentCount: 0,
+        filteredQueueItemCount: 0,
+      }));
+
+      const { default: App } = await import("./App");
+      render(<App />);
+      await screen.findByTestId("workbench-shell");
+      await waitFor(() => {
+        expect(composerCapture.current?.draft).toBe("draft one");
+        expect(composerCapture.current?.attachments[0]?.path).toBe(
+          "/tmp/one.txt",
+        );
+        expect(composerCapture.current?.queue.items[0]?.id).toBe("queued-one");
+        expect(composerCapture.current?.queue.flushHold).toBe(true);
+      });
+
+      act(() => sidebarCapture.current?.tree.onOpenSession("session-2", null));
+      await waitFor(() => {
+        expect(composerCapture.current?.draft).toBe("draft two");
+      });
+      act(() => composerCapture.current?.onDraftChange("edited draft two"));
+      await waitFor(() => {
+        expect(composerCapture.current?.draft).toBe("edited draft two");
+      });
+
+      act(() => sidebarCapture.current?.tree.onOpenSession("session-1", null));
+      await waitFor(() => {
+        expect(composerCapture.current?.draft).toBe("draft one");
+      });
+      act(() => sidebarCapture.current?.tree.onOpenSession("session-2", null));
+      await waitFor(() => {
+        expect(composerCapture.current?.draft).toBe("edited draft two");
+      });
+      expect(
+        recoveryCapture.get.mock.calls.filter(([key]) => key === "session-2"),
+      ).toHaveLength(1);
+    },
+    20_000,
+  );
+
+  it(
+    "reclassifies restored attachments and migrates draft recovery before first send",
+    async () => {
+      apiListenerCapture.tauri = true;
+      apiListenerCapture.sessionState = {
+        ...apiListenerCapture.sessionState,
+        sessionId: null,
+        state: "idle",
+      };
+      recoveryCapture.get.mockImplementation(async (key: string) => {
+        if (key !== "__draft__") return null;
+        return {
+          version: 1,
+          key,
+          revision: 4,
+          state: {
+            draft: "restored prompt",
+            attachments: [
+              { path: "/tmp/stored.txt", name: "stored.txt", isDir: false },
+            ],
+            queue: [],
+          },
+          filteredAttachmentCount: 0,
+          filteredQueueItemCount: 0,
+        };
+      });
+      apiListenerCapture.sessionCreate.mockResolvedValueOnce({
+        id: "materialized-session",
+        title: "Materialized",
+      });
+      apiListenerCapture.pathsClassify.mockResolvedValueOnce([
+        {
+          path: "/tmp/canonical.txt",
+          name: "canonical.txt",
+          isDir: false,
+          exists: true,
+        },
+      ]);
+
+      const { default: App } = await import("./App");
+      render(<App />);
+      await screen.findByTestId("workbench-shell");
+      await waitFor(() => {
+        expect(composerCapture.current?.draft).toBe("restored prompt");
+      });
+
+      await act(async () => {
+        await composerCapture.current?.onSend();
+      });
+      await waitFor(() => {
+        expect(recoveryCapture.migrate).toHaveBeenCalledWith(
+          "materialized-session",
+          5,
+          0,
+        );
+        expect(apiListenerCapture.sessionSend).toHaveBeenCalledTimes(1);
+      });
+
+      expect(apiListenerCapture.pathsClassify).toHaveBeenCalledWith([
+        "/tmp/stored.txt",
+      ]);
+      expect(apiListenerCapture.sessionSend).toHaveBeenCalledWith(
+        expect.any(String),
+        "restored prompt",
+        [
+          {
+            path: "/tmp/canonical.txt",
+            name: "canonical.txt",
+            isDir: false,
+          },
+        ],
+      );
+      expect(recoveryCapture.migrate.mock.invocationCallOrder[0]).toBeLessThan(
+        apiListenerCapture.sessionSend.mock.invocationCallOrder[0]!,
+      );
+    },
+    20_000,
+  );
+
+  it(
+    "keeps the restored composer intact when attachment reclassification fails",
+    async () => {
+      apiListenerCapture.tauri = true;
+      recoveryCapture.get.mockImplementation(async (key: string) => ({
+        version: 1,
+        key,
+        revision: 2,
+        state: {
+          draft: "do not lose this",
+          attachments: [
+            { path: "/tmp/missing.txt", name: "missing.txt", isDir: false },
+          ],
+          queue: [],
+        },
+        filteredAttachmentCount: 0,
+        filteredQueueItemCount: 0,
+      }));
+      apiListenerCapture.pathsClassify.mockResolvedValueOnce([
+        {
+          path: "/tmp/missing.txt",
+          name: "missing.txt",
+          isDir: false,
+          exists: false,
+        },
+      ]);
+
+      const { default: App } = await import("./App");
+      render(<App />);
+      await screen.findByTestId("workbench-shell");
+      await waitFor(() => {
+        expect(composerCapture.current?.draft).toBe("do not lose this");
+      });
+
+      await act(async () => {
+        await composerCapture.current?.onSend();
+      });
+
+      expect(composerCapture.current?.draft).toBe("do not lose this");
+      expect(composerCapture.current?.attachments[0]?.path).toBe(
+        "/tmp/missing.txt",
+      );
+      expect(apiListenerCapture.sessionCreate).not.toHaveBeenCalled();
+      expect(recoveryCapture.migrate).not.toHaveBeenCalled();
+      expect(apiListenerCapture.sessionSend).not.toHaveBeenCalled();
     },
     20_000,
   );
