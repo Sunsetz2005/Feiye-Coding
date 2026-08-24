@@ -435,6 +435,15 @@ fn interrupt_pending_interactions(session: &mut LiveSession) -> Vec<InteractionS
             .set_status(InteractionStatusV1::Interrupted);
         interrupted.push(pending.interaction.clone());
     }
+    if let Err(error) =
+        crate::plan_artifacts::interrupt_process(&session.app_session_id, &session.process_id)
+    {
+        tracing::warn!(
+            session_id = %session.app_session_id,
+            process_id = %session.process_id,
+            "interrupt durable Plan artifacts failed: {error}"
+        );
+    }
     interrupted
 }
 
@@ -2979,7 +2988,7 @@ impl SessionManager {
                 rpc_id,
                 tool_call_id,
             } => {
-                let (app_sid, interaction) = {
+                let (app_sid, process_id, interaction) = {
                     let mut guard = self.inner.lock();
                     if let Some(s) = guard.as_mut() {
                         let interaction = rpc_id.map(|id| {
@@ -2998,11 +3007,31 @@ impl SessionManager {
                             });
                             snapshot
                         });
-                        (s.app_session_id.clone(), interaction)
+                        (s.app_session_id.clone(), s.process_id.clone(), interaction)
                     } else {
-                        (String::new(), None)
+                        (String::new(), String::new(), None)
                     }
                 };
+                if !app_sid.is_empty() {
+                    let record = crate::plan_artifacts::RuntimePlanArtifactRecordV1 {
+                        version: 1,
+                        session_id: app_sid.clone(),
+                        process_id,
+                        interaction_id: interaction
+                            .as_ref()
+                            .map(|snapshot| snapshot.interaction_id.clone()),
+                        tool_call_id: tool_call_id.clone(),
+                        body: body.clone(),
+                        entries: entries.clone(),
+                        awaiting_review: rpc_id.is_some(),
+                    };
+                    if let Err(error) = crate::plan_artifacts::record_runtime_plan(record) {
+                        tracing::warn!(
+                            session_id = app_sid,
+                            "persist Plan artifact failed: {error}"
+                        );
+                    }
+                }
                 if let Some(interaction) = interaction.as_ref() {
                     Self::publish_interaction(app, interaction);
                 }
@@ -3766,7 +3795,7 @@ impl SessionManager {
                 rpc_id,
                 tool_call_id,
             } => {
-                let (session_id, interaction) = {
+                let (session_id, process_id, interaction) = {
                     let mut background = self.background.lock();
                     let Some(session) = background.get_mut(app_session_id) else {
                         return;
@@ -3787,8 +3816,30 @@ impl SessionManager {
                         });
                         snapshot
                     });
-                    (session.app_session_id.clone(), interaction)
+                    (
+                        session.app_session_id.clone(),
+                        session.process_id.clone(),
+                        interaction,
+                    )
                 };
+                let record = crate::plan_artifacts::RuntimePlanArtifactRecordV1 {
+                    version: 1,
+                    session_id: session_id.clone(),
+                    process_id,
+                    interaction_id: interaction
+                        .as_ref()
+                        .map(|snapshot| snapshot.interaction_id.clone()),
+                    tool_call_id: tool_call_id.clone(),
+                    body: body.clone(),
+                    entries: entries.clone(),
+                    awaiting_review: rpc_id.is_some(),
+                };
+                if let Err(error) = crate::plan_artifacts::record_runtime_plan(record) {
+                    tracing::warn!(
+                        session_id,
+                        "persist background Plan artifact failed: {error}"
+                    );
+                }
                 if let Some(interaction) = interaction.as_ref() {
                     Self::publish_interaction(app, interaction);
                 }
@@ -5047,6 +5098,8 @@ impl SessionManager {
         };
         Self::publish_interaction(&app, &resolving);
 
+        let artifact_decision = decision.clone();
+        let artifact_feedback = feedback.clone();
         if let Err(error) = target
             .acp
             .respond_exit_plan_mode(target.rpc_id, &decision, feedback)
@@ -5087,6 +5140,21 @@ impl SessionManager {
                 Self::publish_interaction(&app, restored);
             }
             return Err(error);
+        }
+
+        // The durable artifact advances only after Runtime accepted the RPC.
+        // A sidecar failure cannot make the already-written RPC safely retryable.
+        if let Err(error) = crate::plan_artifacts::resolve_plan(
+            &target.session_id,
+            &target.interaction_id,
+            &artifact_decision,
+            artifact_feedback.as_deref(),
+        ) {
+            tracing::warn!(
+                session_id = %target.session_id,
+                interaction_id = %target.interaction_id,
+                "persist Plan artifact resolution failed: {error}"
+            );
         }
 
         let (resolved, finished, empty_run, was_background) = {

@@ -49,8 +49,12 @@ mod tray_i18n;
 // reverted without replacing the ACP/Grok Runtime core.
 mod automation_scheduler;
 mod capability_exchange;
+mod composer_recovery;
+mod ecosystem_packages;
 mod interactions;
 mod memory_candidates;
+mod memory_recall;
+mod plan_artifacts;
 mod resource_handles;
 mod runtime_events;
 mod session_search;
@@ -207,12 +211,19 @@ pub fn run() {
             commands::session_get_pending_ask_user,
             commands::session_pending_interactions,
             commands::session_interactions_list,
+            commands::session_plan_artifacts_list_v1,
+            commands::composer_recovery_get_v1,
+            commands::composer_recovery_put_v1,
+            commands::composer_recovery_migrate_v1,
+            commands::composer_recovery_delete_v1,
             commands::session_resolve_interaction_v1,
             commands::session_resolve_ask_user,
             commands::host_capabilities,
             commands::runtime_capabilities_v1,
             commands::capability_manifest_export_v1,
             commands::capability_manifest_validate_v1,
+            commands::ecosystem_package_manifest_validate_v1,
+            commands::ecosystem_package_import_preview_v1,
             commands::finder_selected_paths,
             commands::skill_draft_save,
             commands::skill_candidates_list_v1,
@@ -222,6 +233,7 @@ pub fn run() {
             commands::skill_candidate_reject_v2,
             commands::skill_candidate_cancel_v2,
             commands::memory_candidates_list_v1,
+            commands::memory_recall_preview_v1,
             commands::memory_context_pack_build_v1,
             commands::memory_candidate_create_v1,
             commands::memory_candidate_approve_v1,

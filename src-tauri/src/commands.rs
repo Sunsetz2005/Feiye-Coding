@@ -161,6 +161,113 @@ pub fn session_interactions_list(
     Ok(mgr.interactions_list(session_id.as_deref()))
 }
 
+/// List durable Plan artifacts. These survive after their live approval RPC is gone.
+#[tauri::command]
+pub async fn session_plan_artifacts_list_v1(
+    session_id: String,
+) -> Result<Vec<crate::plan_artifacts::PlanArtifactV1>, String> {
+    tauri::async_runtime::spawn_blocking(move || crate::plan_artifacts::list(&session_id))
+        .await
+        .map_err(|error| format!("Plan artifact list task failed: {error}"))?
+}
+
+fn require_live_composer_recovery_key(key: &str) -> Result<(), String> {
+    if key == crate::composer_recovery::COMPOSER_DRAFT_KEY
+        || store::load_sessions_index()
+            .iter()
+            .any(|session| session.id == key)
+    {
+        Ok(())
+    } else {
+        Err("COMPOSER_RECOVERY_SESSION_NOT_FOUND: session key is not current".into())
+    }
+}
+
+fn normalize_composer_recovery_attachment(
+    attachment: &mut crate::composer_recovery::ComposerAttachmentReferenceV1,
+) -> Result<(), String> {
+    let canonical = crate::resource_handles::authorize_composer_attachment(
+        std::path::Path::new(&attachment.path),
+        attachment.is_dir,
+    )?;
+    attachment.path = canonical.to_string_lossy().into_owned();
+    if let Some(name) = canonical.file_name() {
+        attachment.name = name.to_string_lossy().into_owned();
+    }
+    Ok(())
+}
+
+fn normalize_composer_recovery_attachments(
+    state: &mut crate::composer_recovery::ComposerRecoveryStateV1,
+) -> Result<(), String> {
+    for attachment in &mut state.attachments {
+        normalize_composer_recovery_attachment(attachment)?;
+    }
+    for item in &mut state.queue {
+        for attachment in &mut item.attachments {
+            normalize_composer_recovery_attachment(attachment)?;
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn composer_recovery_get_v1(
+    request: crate::composer_recovery::ComposerRecoveryGetRequestV1,
+) -> Result<crate::composer_recovery::ComposerRecoverySnapshotV1, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        require_live_composer_recovery_key(&request.key)?;
+        crate::composer_recovery::get(request, |attachment| {
+            crate::resource_handles::validate_persisted_composer_attachment(
+                &attachment.path,
+                attachment.is_dir,
+            )
+        })
+    })
+    .await
+    .map_err(|error| format!("Composer recovery read task failed: {error}"))?
+}
+
+#[tauri::command]
+pub async fn composer_recovery_put_v1(
+    mut request: crate::composer_recovery::ComposerRecoveryPutRequestV1,
+) -> Result<crate::composer_recovery::ComposerRecoveryRevisionV1, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        require_live_composer_recovery_key(&request.key)?;
+        normalize_composer_recovery_attachments(&mut request.state)?;
+        crate::composer_recovery::put(request, |attachment| {
+            crate::resource_handles::authorize_composer_attachment(
+                std::path::Path::new(&attachment.path),
+                attachment.is_dir,
+            )
+            .is_ok_and(|canonical| canonical == std::path::PathBuf::from(&attachment.path))
+        })
+    })
+    .await
+    .map_err(|error| format!("Composer recovery write task failed: {error}"))?
+}
+
+#[tauri::command]
+pub async fn composer_recovery_migrate_v1(
+    request: crate::composer_recovery::ComposerRecoveryMigrateRequestV1,
+) -> Result<crate::composer_recovery::ComposerRecoveryMigrationV1, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        require_live_composer_recovery_key(&request.to_key)?;
+        crate::composer_recovery::migrate(request)
+    })
+    .await
+    .map_err(|error| format!("Composer recovery migration task failed: {error}"))?
+}
+
+#[tauri::command]
+pub async fn composer_recovery_delete_v1(
+    request: crate::composer_recovery::ComposerRecoveryDeleteRequestV1,
+) -> Result<crate::composer_recovery::ComposerRecoveryRevisionV1, String> {
+    tauri::async_runtime::spawn_blocking(move || crate::composer_recovery::delete(request))
+        .await
+        .map_err(|error| format!("Composer recovery delete task failed: {error}"))?
+}
+
 /// Resolve one active interaction by stable interaction id.
 #[tauri::command]
 pub async fn session_resolve_interaction_v1(
@@ -219,6 +326,26 @@ pub fn capability_manifest_validate_v1(
     manifest: crate::capability_exchange::CapabilityManifestV1,
 ) -> crate::capability_exchange::CapabilityManifestValidationV1 {
     crate::capability_exchange::validate(&manifest)
+}
+
+/// Validate a clean-room ecosystem metadata package. This never installs or executes it.
+#[tauri::command]
+pub fn ecosystem_package_manifest_validate_v1(
+    manifest: crate::ecosystem_packages::EcosystemPackageManifestV1,
+) -> crate::ecosystem_packages::EcosystemPackageManifestValidationV1 {
+    crate::ecosystem_packages::validate_manifest_v1(&manifest)
+}
+
+/// Build a dependency-ordered, CAS-bound review preview without importing implementation bytes.
+#[tauri::command]
+pub async fn ecosystem_package_import_preview_v1(
+    request: crate::ecosystem_packages::EcosystemPackageImportPreviewRequestV1,
+) -> Result<crate::ecosystem_packages::EcosystemPackageImportPreviewV1, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::ecosystem_packages::preview_import_v1(request)
+    })
+    .await
+    .map_err(|error| format!("Ecosystem package preview task failed: {error}"))?
 }
 
 /// Read the current Finder selection without shell interpolation.
@@ -300,6 +427,18 @@ pub async fn memory_candidates_list_v1(
     tauri::async_runtime::spawn_blocking(crate::memory_candidates::list)
         .await
         .map_err(|error| format!("Memory candidate list task failed: {error}"))?
+}
+
+/// Preview approved Memory candidates and clearly separated, untrusted FTS evidence.
+#[tauri::command]
+pub async fn memory_recall_preview_v1(
+    request: crate::memory_recall::MemoryRecallRequestV1,
+) -> Result<crate::memory_recall::MemoryRecallPreviewV1, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::memory_recall::preview_memory_recall_v1(request)
+    })
+    .await
+    .map_err(|error| format!("Memory recall preview task failed: {error}"))?
 }
 
 #[tauri::command]
@@ -1773,8 +1912,33 @@ pub struct McpDto {
 
 /// Run probed CLI: `grok inspect --json` with optional project cwd.
 /// Returns (parsed JSON, error message). Never panics; empty on failure.
+fn build_grok_inspect_command(
+    cli_path: &std::path::Path,
+    cwd: Option<&std::path::Path>,
+    grok_home: &std::path::Path,
+) -> std::process::Command {
+    let mut cmd = std::process::Command::new(cli_path);
+    cmd.arg("inspect").arg("--json");
+    if let Some(dir) = cwd {
+        cmd.current_dir(dir);
+    }
+    crate::process_util::apply_no_window_std(&mut cmd);
+    if let Some(path_env) = crate::process_util::enriched_path_env() {
+        cmd.env("PATH", path_env);
+    }
+    cmd.env("GROK_HOME", grok_home);
+    cmd
+}
+
 fn run_grok_inspect(project_path: Option<&str>) -> (Option<serde_json::Value>, Option<String>) {
     let settings = store::load_settings();
+    let grok_home = match crate::paths::resolve_local_runtime_grok_home(
+        &settings.session_data_mode,
+        settings.acp_server_addr.as_deref(),
+    ) {
+        Ok(home) => home,
+        Err(error) => return (None, Some(error)),
+    };
     let probe = cli_probe::probe_cli(settings.manual_cli_path.as_deref());
     let Some(cli_path) = probe.path.filter(|_| probe.found) else {
         return (None, Some("Sunsetz Runtime not found".into()));
@@ -1787,15 +1951,8 @@ fn run_grok_inspect(project_path: Option<&str>) -> (Option<serde_json::Value>, O
 
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let mut cmd = std::process::Command::new(&cli_path);
-        cmd.arg("inspect").arg("--json");
-        if let Some(dir) = cwd {
-            cmd.current_dir(dir);
-        }
-        crate::process_util::apply_no_window_std(&mut cmd);
-        if let Some(path_env) = crate::process_util::enriched_path_env() {
-            cmd.env("PATH", path_env);
-        }
+        let mut cmd =
+            build_grok_inspect_command(std::path::Path::new(&cli_path), cwd.as_deref(), &grok_home);
         let result = cmd.output();
         let _ = tx.send(result);
     });
@@ -2007,6 +2164,34 @@ fn attach_skill_enabled(skills: Vec<SkillDto>) -> Vec<serde_json::Value> {
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod inspect_runtime_tests {
+    use super::build_grok_inspect_command;
+    use std::ffi::OsStr;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn inspect_command_targets_the_live_runtime_home_and_project_cwd() {
+        let cli = PathBuf::from("runtime-bin");
+        let cwd = PathBuf::from("project-root");
+        let grok_home = PathBuf::from("runtime-home");
+        let cmd = build_grok_inspect_command(&cli, Some(&cwd), &grok_home);
+
+        assert_eq!(cmd.get_program(), cli.as_os_str());
+        assert_eq!(
+            cmd.get_args().collect::<Vec<_>>(),
+            vec![OsStr::new("inspect"), OsStr::new("--json")]
+        );
+        assert_eq!(cmd.get_current_dir(), Some(cwd.as_path()));
+        let configured_home = cmd
+            .get_envs()
+            .find(|(name, _)| *name == OsStr::new("GROK_HOME"))
+            .and_then(|(_, value)| value)
+            .expect("inspect command must set GROK_HOME");
+        assert_eq!(Path::new(configured_home), grok_home);
+    }
 }
 
 /// Current Extensions enable prefs (`extensions.json`).

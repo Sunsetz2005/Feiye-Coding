@@ -65,6 +65,25 @@ pub fn resolve_agent_grok_home(session_data_mode: &str) -> PathBuf {
     agent_home_dir()
 }
 
+/// Resolve the filesystem root used by the live local Runtime.
+///
+/// ACP server mode has no negotiated shared-filesystem contract. Treating a
+/// local path as remotely visible would report successful Skill writes that
+/// the connected Runtime may never discover, so filesystem-backed operations
+/// must fail closed until such a capability exists.
+pub fn resolve_local_runtime_grok_home(
+    session_data_mode: &str,
+    acp_server_addr: Option<&str>,
+) -> Result<PathBuf, String> {
+    if acp_server_addr.is_some_and(|value| !value.trim().is_empty()) {
+        return Err(
+            "RUNTIME_FILESYSTEM_UNVERIFIED: ACP server mode does not declare a shared Runtime filesystem"
+                .into(),
+        );
+    }
+    Ok(resolve_agent_grok_home(session_data_mode))
+}
+
 pub fn projects_file() -> PathBuf {
     app_data_root().join("projects.json")
 }
@@ -222,5 +241,26 @@ mod tests {
         let root = PathBuf::from("/tmp/session");
         assert!(resolve_session_relative_media(&root, "../etc/passwd").is_none());
         assert!(resolve_session_relative_media(&root, "/etc/passwd").is_none());
+    }
+
+    #[test]
+    fn local_runtime_home_matches_independent_and_shared_spawn_roots() {
+        assert_eq!(
+            resolve_local_runtime_grok_home("independent", None).unwrap(),
+            agent_home_dir()
+        );
+        assert_eq!(
+            resolve_local_runtime_grok_home("shared", None).unwrap(),
+            crate::process_util::user_home().join(".grok")
+        );
+    }
+
+    #[test]
+    fn acp_server_runtime_filesystem_fails_closed() {
+        for mode in ["independent", "shared"] {
+            let error = resolve_local_runtime_grok_home(mode, Some("127.0.0.1:8799")).unwrap_err();
+            assert!(error.starts_with("RUNTIME_FILESYSTEM_UNVERIFIED:"));
+        }
+        assert!(resolve_local_runtime_grok_home("independent", Some("   ")).is_ok());
     }
 }

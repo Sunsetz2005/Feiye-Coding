@@ -1,6 +1,5 @@
 //! Validated, atomic persistence for skills generated from a conversation.
 
-use directories::BaseDirs;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
@@ -670,7 +669,15 @@ fn save_to_base(
     .map(|(result, ())| result)
 }
 
-fn resolve_base(request: &SkillDraftSaveRequest) -> Result<PathBuf, String> {
+fn resolve_base_for_runtime(
+    request: &SkillDraftSaveRequest,
+    session_data_mode: &str,
+    acp_server_addr: Option<&str>,
+) -> Result<PathBuf, String> {
+    // Project paths are local too. Until ACP negotiates a shared filesystem,
+    // neither scope may report a local-only write as visible to a server Runtime.
+    let runtime_home =
+        crate::paths::resolve_local_runtime_grok_home(session_data_mode, acp_server_addr)?;
     match request.scope {
         SkillDraftScope::Project => {
             let raw = request
@@ -691,14 +698,19 @@ fn resolve_base(request: &SkillDraftSaveRequest) -> Result<PathBuf, String> {
             Ok(project.join(".grok").join("skills"))
         }
         SkillDraftScope::User => {
-            let home = BaseDirs::new()
-                .ok_or_else(|| "Unable to resolve the user home directory".to_string())?
-                .home_dir()
-                .to_path_buf();
-            reject_symlink(&home.join(".grok"))?;
-            Ok(home.join(".grok").join("skills"))
+            reject_symlink(&runtime_home)?;
+            Ok(runtime_home.join("skills"))
         }
     }
+}
+
+fn resolve_base(request: &SkillDraftSaveRequest) -> Result<PathBuf, String> {
+    let settings = crate::store::load_settings();
+    resolve_base_for_runtime(
+        request,
+        &settings.session_data_mode,
+        settings.acp_server_addr.as_deref(),
+    )
 }
 
 pub(crate) fn save_with_target_transaction<T>(
@@ -751,7 +763,63 @@ mod tests {
         assert_eq!(result.slug, "review-helper-skill");
         assert!(root.join("SKILL.md").is_file());
         assert!(root.join("references/checklist.md").is_file());
+        assert_eq!(
+            fs::read_dir(&base)
+                .unwrap()
+                .flatten()
+                .filter(|entry| entry.file_name().to_string_lossy().starts_with('.'))
+                .count(),
+            0,
+            "atomic save must not leave staging or backup directories"
+        );
         fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn scope_paths_follow_live_runtime_home_and_keep_project_compatibility() {
+        let user = request();
+        assert_eq!(
+            resolve_base_for_runtime(&user, "independent", None).unwrap(),
+            crate::paths::agent_home_dir().join("skills")
+        );
+        assert_eq!(
+            resolve_base_for_runtime(&user, "shared", None).unwrap(),
+            crate::process_util::user_home()
+                .join(".grok")
+                .join("skills")
+        );
+
+        let project = temp_dir("project-scope");
+        let mut project_request = request();
+        project_request.scope = SkillDraftScope::Project;
+        project_request.project_path = Some(project.to_string_lossy().into_owned());
+        let expected_project = project.canonicalize().unwrap().join(".grok").join("skills");
+        for mode in ["independent", "shared"] {
+            assert_eq!(
+                resolve_base_for_runtime(&project_request, mode, None).unwrap(),
+                expected_project
+            );
+        }
+        fs::remove_dir_all(project).unwrap();
+    }
+
+    #[test]
+    fn remote_acp_refuses_user_and_project_skill_paths_without_shared_fs_contract() {
+        let user = request();
+        assert!(
+            resolve_base_for_runtime(&user, "independent", Some("127.0.0.1:8799"))
+                .unwrap_err()
+                .starts_with("RUNTIME_FILESYSTEM_UNVERIFIED:")
+        );
+
+        let mut project = request();
+        project.scope = SkillDraftScope::Project;
+        project.project_path = Some("/path/is/not/consulted".into());
+        assert!(
+            resolve_base_for_runtime(&project, "shared", Some("127.0.0.1:8799"))
+                .unwrap_err()
+                .starts_with("RUNTIME_FILESYSTEM_UNVERIFIED:")
+        );
     }
 
     #[test]

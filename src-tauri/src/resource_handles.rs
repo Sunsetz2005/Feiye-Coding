@@ -134,28 +134,49 @@ fn message_attachment_origin(path: &Path) -> Option<ResourceOriginV1> {
         .then_some(ResourceOriginV1::MessageAttachment)
 }
 
+fn authorized_origin(path: &Path) -> Option<ResourceOriginV1> {
+    if canonical_root_contains(path, &crate::paths::attachments_paste_dir()) {
+        return Some(ResourceOriginV1::AppAttachment);
+    }
+    user_selected_origin(path)
+        .or_else(|| trusted_project_origin(path))
+        .or_else(|| session_artifact_origin(path))
+        .or_else(|| message_attachment_origin(path))
+}
+
 pub fn authorize_path(path: &Path) -> Result<(PathBuf, ResourceOriginV1), String> {
     let canonical = canonical_existing(path)?;
     if !canonical.is_file() {
         return Err("resource is not a file".into());
     }
-
-    if canonical_root_contains(&canonical, &crate::paths::attachments_paste_dir()) {
-        return Ok((canonical, ResourceOriginV1::AppAttachment));
-    }
-    if let Some(origin) = user_selected_origin(&canonical) {
-        return Ok((canonical, origin));
-    }
-    if let Some(origin) = trusted_project_origin(&canonical) {
-        return Ok((canonical, origin));
-    }
-    if let Some(origin) = session_artifact_origin(&canonical) {
-        return Ok((canonical, origin));
-    }
-    if let Some(origin) = message_attachment_origin(&canonical) {
+    if let Some(origin) = authorized_origin(&canonical) {
         return Ok((canonical, origin));
     }
     Err("RESOURCE_DENIED: path is not a trusted project, attachment, session artifact, or user-selected file".into())
+}
+
+/// Validate a Composer attachment against a current Host provenance grant.
+/// This never creates or extends a grant.
+pub fn authorize_composer_attachment(path: &Path, is_dir: bool) -> Result<PathBuf, String> {
+    let canonical = canonical_existing(path)?;
+    if (is_dir && !canonical.is_dir()) || (!is_dir && !canonical.is_file()) {
+        return Err("RESOURCE_DENIED: composer attachment type changed".into());
+    }
+    authorized_origin(&canonical)
+        .map(|_| canonical)
+        .ok_or_else(|| {
+            "RESOURCE_DENIED: composer attachment has no trusted provenance".to_string()
+        })
+}
+
+/// Revalidate a previously Host-authorized, canonical Composer reference.
+/// The recovery sidecar is the authority record; this check only confirms the
+/// path still resolves to the same object kind and has not been retargeted.
+pub fn validate_persisted_composer_attachment(path: &str, is_dir: bool) -> bool {
+    let stored = PathBuf::from(path);
+    canonical_existing(&stored).is_ok_and(|canonical| {
+        canonical == stored && ((is_dir && canonical.is_dir()) || (!is_dir && canonical.is_file()))
+    })
 }
 
 pub fn require_trusted_project_root(path: &str) -> Result<PathBuf, String> {
