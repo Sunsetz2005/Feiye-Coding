@@ -69,6 +69,9 @@ describe("SetupWizard settings patch migration", () => {
     );
 
     await user.click(
+      await screen.findByRole("button", { name: /Legacy Grok CLI/ }),
+    );
+    await user.click(
       await screen.findByRole("button", { name: "Choose local binary…" }),
     );
 
@@ -107,8 +110,40 @@ describe("SetupWizard settings patch migration", () => {
         authSetupDeferred: true,
         onboardingDone: true,
         setupSkipped: true,
+        runtimeBackend: "sunsetz",
       });
       expect(onComplete).toHaveBeenCalledWith(installedCli);
+    });
+  });
+
+  it("reaches home without Grok CLI installed", async () => {
+    const user = userEvent.setup();
+    const onComplete = vi.fn();
+    render(
+      <SetupWizard
+        tr={createT("en")}
+        platform="mac"
+        useCustomWindowChrome={false}
+        initialCli={missingCli}
+        onComplete={onComplete}
+        onAccountLoginOauth={vi.fn(async () => false)}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Skip for now" }));
+    await user.click(
+      await screen.findByRole("button", { name: "Enter Sunsetz" }),
+    );
+
+    await waitFor(() => {
+      expect(apiMock.settingsPatchV1).toHaveBeenCalledWith({
+        setupWizardCompleted: true,
+        authSetupDeferred: true,
+        onboardingDone: true,
+        setupSkipped: true,
+        runtimeBackend: "sunsetz",
+      });
+      expect(onComplete).toHaveBeenCalledWith(missingCli);
     });
   });
 });

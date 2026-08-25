@@ -98,7 +98,6 @@ import {
   mapPermissionButtons,
 } from "@/lib/permissionOptions";
 import { AskUserDock } from "@/components/lobe-chat/AskUserDock";
-import { TaskProgressRail } from "@/components/lobe-chat/TaskProgressRail";
 import { SkillRecorderSheet } from "@/components/SkillRecorderSheet";
 import {
   parseSkillDraft,
@@ -133,6 +132,8 @@ import {
   isDraftEmpty,
   hydrateDisplayContent,
   parseStoredContent,
+  plainTextOf,
+  serializeDisplayForJournal,
   serializeForAgent,
 } from "@/lib/draftDoc";
 import {
@@ -368,6 +369,9 @@ export default function App() {
   >(null);
   const [skillInfos, setSkillInfos] = useState<SkillInfo[]>([]);
   const [skillsLoading, setSkillsLoading] = useState(false);
+  const [rankedSkillIds, setRankedSkillIds] = useState<Set<string>>(
+    () => new Set(),
+  );
   const [slashQuery, setSlashQuery] = useState<{
     start: number;
     query: string;
@@ -446,6 +450,15 @@ export default function App() {
   const [skillRecorderOpen, setSkillRecorderOpen] = useState(false);
   const [skillCandidate, setSkillCandidate] =
     useState<api.SkillCandidateV1 | null>(null);
+  /** Explicitly reviewed Memory pack for one immediate, non-queued turn. */
+  const [pendingMemoryContext, setPendingMemoryContext] =
+    useState<api.MemoryContextPackV1 | null>(null);
+  const pendingMemorySessionRef = useRef<string | null>(session.sessionId);
+  useEffect(() => {
+    if (pendingMemorySessionRef.current === session.sessionId) return;
+    pendingMemorySessionRef.current = session.sessionId;
+    setPendingMemoryContext(null);
+  }, [session.sessionId]);
   const seenSkillCandidateIdsRef = useRef<Set<string>>(new Set());
   const skillCandidatesReadyRef = useRef(false);
   const pendingSkillGenerationRef = useRef<{
@@ -1031,7 +1044,7 @@ export default function App() {
         project: p.some((x) => (x as Project).trusted) || p.length > 0,
       });
 
-      // ── Setup gate: CLI is hard-required; account may be deferred ──
+      // ── Setup gate: wizard is optional account setup; Grok CLI is not required ──
       const cliSeed: SetupCliInfo = {
         found: cli.found,
         path: cli.path,
@@ -1045,22 +1058,21 @@ export default function App() {
       const legacyDone =
         !!settings.onboardingDone || !!settings.setupSkipped;
 
-      if (cli.found && !wizardCompleted && legacyDone) {
-        // Migrate older installs that already finished the account modal.
-        try {
-          await api.settingsPatchV1({
-            setupWizardCompleted: true,
-            authSetupDeferred: !!settings.setupSkipped && !authOk,
-          });
-        } catch {
-          /* ignore */
+      if (wizardCompleted || legacyDone) {
+        if (!wizardCompleted && legacyDone) {
+          try {
+            await api.settingsPatchV1({
+              setupWizardCompleted: true,
+              authSetupDeferred: !!settings.setupSkipped && !authOk,
+              runtimeBackend: settings.runtimeBackend || "sunsetz",
+            });
+          } catch {
+            /* ignore */
+          }
         }
         setAppGate("ready");
-      } else if (!cli.found || !wizardCompleted) {
-        // No CLI → always wizard. First launch with CLI → account step.
-        setAppGate("setup");
       } else {
-        setAppGate("ready");
+        setAppGate("setup");
       }
 
       // Prefer first trusted project; keep selection if still present
@@ -2160,7 +2172,7 @@ export default function App() {
         sessionId: s.id,
         title: s.title || tr("session.untitled"),
         state: "idle",
-        backend: "grok_agent_stdio",
+        backend: "sunsetz",
         contextUsage: s.contextUsage ?? null,
       });
     }
@@ -2350,7 +2362,7 @@ export default function App() {
       sessionId: null,
       title: tr("session.new"),
       state: "idle",
-      backend: "grok_agent_stdio",
+      backend: "sunsetz",
     });
     setLocalError(null);
     await recoveryReset;
@@ -2533,7 +2545,7 @@ export default function App() {
           sessionId: null,
           title: auto.title || tr("session.new"),
           state: "idle",
-          backend: "grok_agent_stdio",
+          backend: "sunsetz",
         });
         {
           const idle = { ...IDLE_SNAPSHOT };
@@ -3437,6 +3449,8 @@ export default function App() {
     agentTextOverride?: string;
     /** Direct composer send already classified immediately before dispatch. */
     attachmentsClassified?: boolean;
+    /** Explicitly reviewed Memory for this immediate turn only. */
+    memoryContextPack?: api.MemoryContextPackV1;
     fromQueue?: boolean;
     targetSessionId?: string | null;
   }): Promise<boolean> => {
@@ -3453,6 +3467,59 @@ export default function App() {
       sendInFlightRef.current = false;
       return false;
     }
+    const boundSkills = new Map<
+      string,
+      { name: string; binding: api.SkillSelectionRequestV1 }
+    >();
+    const boundSkillIds = new Map<string, string>();
+    for (const segment of segments) {
+      if (segment.type !== "skill") continue;
+      const name = segment.name.toLowerCase();
+      if (!segment.binding) {
+        setLocalError(`SKILL_USE_STALE: ${segment.name}`);
+        sendInFlightRef.current = false;
+        return false;
+      }
+      const binding: api.SkillSelectionRequestV1 = {
+        id: segment.binding.id,
+        expectedTreeHash: segment.binding.expectedTreeHash,
+        selection: segment.binding.selection,
+      };
+      const existing = boundSkills.get(name);
+      if (
+        existing &&
+        (existing.binding.id !== binding.id ||
+          existing.binding.expectedTreeHash !== binding.expectedTreeHash ||
+          existing.binding.selection !== binding.selection)
+      ) {
+        setLocalError(`SKILL_USE_CONFLICT: ${segment.name}`);
+        sendInFlightRef.current = false;
+        return false;
+      }
+      const priorName = boundSkillIds.get(binding.id);
+      if (priorName && priorName !== name) {
+        setLocalError(`SKILL_USE_CONFLICT: ${segment.name}`);
+        sendInFlightRef.current = false;
+        return false;
+      }
+      const fresh = skillInfos.find(
+        (candidate) =>
+          candidate.id === binding.id &&
+          candidate.treeHash === binding.expectedTreeHash &&
+          candidate.name.toLowerCase() === name,
+      );
+      if (!fresh) {
+        setLocalError(`SKILL_USE_STALE: ${segment.name}`);
+        sendInFlightRef.current = false;
+        return false;
+      }
+      boundSkills.set(name, { name: segment.name, binding });
+      boundSkillIds.set(binding.id, name);
+    }
+    const skillSelections = Array.from(boundSkills.values(), (item) =>
+      item.binding,
+    );
+    const journalDisplay = serializeDisplayForJournal(segments);
     const classifiedAttachments = opts.attachmentsClassified
       ? requestedAttachments.map((attachment) => ({ ...attachment }))
       : await classifyAttachmentsForSend(requestedAttachments);
@@ -3511,7 +3578,7 @@ export default function App() {
         {
           id: userMessageId,
           role: "user",
-          content: storedDisplay,
+          content: journalDisplay,
           attachments: att.length ? att : undefined,
           createdAt: nowIso,
         },
@@ -3648,11 +3715,31 @@ export default function App() {
         failStrip();
         return false;
       }
-      await api.sessionSend(
-        agentText,
-        storedDisplay,
-        att.map(({ path, name, isDir }) => ({ path, name, isDir })),
-      );
+      const storedAttachments = att.map(({ path, name, isDir }) => ({
+        path,
+        name,
+        isDir,
+      }));
+      if (opts.memoryContextPack || skillSelections.length > 0) {
+        await api.sessionSendV2({
+          sessionId,
+          text: agentText,
+          displayText: journalDisplay,
+          attachments: storedAttachments,
+          memoryContextPack: opts.memoryContextPack
+            ? {
+                version: 1,
+                selections: opts.memoryContextPack.items.map((item) => ({
+                id: item.candidateId,
+                expectedContentHash: item.contentHash,
+                })),
+              }
+            : null,
+          skillSelections,
+        });
+      } else {
+        await api.sessionSend(agentText, journalDisplay, storedAttachments);
+      }
       if (shouldAutoTitle && api.isTauri()) {
         void api
           .sessionAutoTitle(sessionId, titleSeed)
@@ -3860,6 +3947,10 @@ export default function App() {
     sendQueue.releaseFlushHold();
 
     if (shouldEnqueueSend(session.state, connecting)) {
+      if (pendingMemoryContext) {
+        showToast(tr("composer.memory.queueBlocked"), 4200);
+        return;
+      }
       sendQueue.enqueue({
         storedDisplay,
         attachments: att,
@@ -3877,13 +3968,28 @@ export default function App() {
     sendInFlightRef.current = false;
     if (!classifiedAttachments) return;
     clearComposerAfterSubmit();
-    await executeSend({
+    const memoryContext = pendingMemoryContext;
+    const sent = await executeSend({
       storedDisplay,
       att: classifiedAttachments,
       goalMode,
       attachmentsClassified: true,
+      memoryContextPack: memoryContext ?? undefined,
       targetSessionId: session.sessionId,
     });
+    if (!sent) {
+      setDraft((current) => (current ? current : storedDisplay));
+      setAttachments((current) =>
+        current.length > 0
+          ? current
+          : classifiedAttachments.map((attachment) => ({ ...attachment })),
+      );
+    }
+    if (sent && memoryContext) {
+      setPendingMemoryContext((current) =>
+        current === memoryContext ? null : current,
+      );
+    }
   };
 
   executeSendFromQueueRef.current = (opts) => executeSend(opts);
@@ -4376,23 +4482,27 @@ export default function App() {
   /** Bumped when Extensions skill toggles change so slash palette refilters. */
   const [skillsReloadToken, setSkillsReloadToken] = useState(0);
 
-  // Load skills catalog for slash palette (Grok inspect).
+  // Load the Host-verified metadata inventory for slash selection and the
+  // later send-time tree-hash comparison. The Host re-runs inspect before use.
   useEffect(() => {
     if (!api.isTauri()) return;
     let cancelled = false;
     setSkillsLoading(true);
     void api
-      .skillsList(activeProject?.path ?? null)
+      .skillInventoryV1(activeProject?.path ?? null)
       .then((res) => {
         if (cancelled) return;
         setSkillInfos(
-          (res.skills ?? [])
-            // Extensions enable flag (default on); hide disabled from slash palette.
-            .filter((s) => s.enabled !== false)
+          (res.items ?? [])
+            .filter((s) => s.enabled && s.userInvocable)
             .map((s) => ({
+              id: s.id,
               name: s.name,
               description: s.description ?? "",
+              whenToUse: s.whenToUse,
               source: s.source,
+              treeHash: s.treeHash,
+              sourceCandidateId: s.sourceCandidateId,
               userInvocable: s.userInvocable,
             })),
         );
@@ -4408,9 +4518,22 @@ export default function App() {
     };
   }, [activeProject?.path, skillsReloadToken]);
 
+  const rankedSkillInfos = useMemo(() => {
+    const annotated = skillInfos.map((skill, index) => ({
+      ...skill,
+      suggested: Boolean(skill.id && rankedSkillIds.has(skill.id)),
+      originalIndex: index,
+    }));
+    annotated.sort(
+      (left, right) =>
+        Number(right.suggested) - Number(left.suggested) ||
+        left.originalIndex - right.originalIndex,
+    );
+    return annotated.map(({ originalIndex: _originalIndex, ...skill }) => skill);
+  }, [rankedSkillIds, skillInfos]);
   const slashCatalog = useMemo(
-    () => buildSlashCatalog(skillInfos),
-    [skillInfos],
+    () => buildSlashCatalog(rankedSkillInfos),
+    [rankedSkillInfos],
   );
   const resolveSlashTitle = useCallback(
     (item: SlashItem) => {
@@ -4441,6 +4564,36 @@ export default function App() {
   /** Filter query from live editor poll only. */
   const slashFilterQuery = liveSlash.present ? liveSlash.query : "";
   const plusMenuMode = showComposerPlus && !liveSlash.present;
+  useEffect(() => {
+    if (!plusMenuMode || !api.isTauri()) {
+      setRankedSkillIds(new Set());
+      return;
+    }
+    const query = plainTextOf(parseStoredContent(draft)).trim();
+    if (query.length < 3 || skillInfos.length === 0) {
+      setRankedSkillIds(new Set());
+      return;
+    }
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      void api
+        .skillMetadataRankV1(query, activeProject?.path ?? null, 4)
+        .then((result) => {
+          if (!cancelled) {
+            setRankedSkillIds(
+              new Set(result.items.map((item) => item.skill.id)),
+            );
+          }
+        })
+        .catch(() => {
+          if (!cancelled) setRankedSkillIds(new Set());
+        });
+    }, 250);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [activeProject?.path, draft, plusMenuMode, skillInfos.length]);
   const composerSettingsLocked = shouldLockComposerSettings({
     state: session.state,
     hasPermissionPrompt: !!perm,
@@ -5059,12 +5212,37 @@ export default function App() {
       setShowComposerPlus(false);
 
       if (item.kind === "skill") {
+        const selected = skillInfos.find(
+          (skill) => skill.name.toLowerCase() === item.name.toLowerCase(),
+        );
+        if (!selected?.id || !selected.treeHash) {
+          setLocalError(`SKILL_USE_STALE: ${item.name}`);
+          return;
+        }
+        const binding = {
+          version: 1 as const,
+          id: selected.id,
+          expectedTreeHash: selected.treeHash,
+          selection:
+            plusMenuMode && rankedSkillIds.has(selected.id)
+              ? ("accepted_suggestion" as const)
+              : ("explicit" as const),
+        };
         if (q) {
-          setDraft((d) => applySkillAtSlash(d, q.start, q.end, item.name));
+          setDraft((d) =>
+            applySkillAtSlash(d, q.start, q.end, item.name, binding),
+          );
         } else {
           setDraft((d) => {
             const needsSpace = d.length > 0 && !/\s$/.test(d);
-            return `${d}${needsSpace ? " " : ""}[[skill:${item.name}]] `;
+            const base = `${d}${needsSpace ? " " : ""}`;
+            return applySkillAtSlash(
+              base,
+              base.length,
+              base.length,
+              item.name,
+              binding,
+            );
           });
         }
         return;
@@ -5146,6 +5324,9 @@ export default function App() {
       applyPermissionPolicy,
       composerSettingsLocked,
       showToast,
+      plusMenuMode,
+      rankedSkillIds,
+      skillInfos,
     ],
   );
 
@@ -5360,7 +5541,7 @@ export default function App() {
                 sessionId: sid,
                 title: prev.title,
                 state: "idle",
-                backend: prev.backend || "grok_agent_stdio",
+                backend: prev.backend || "sunsetz",
               }
             : prev,
         );
@@ -6084,6 +6265,15 @@ export default function App() {
         return;
       }
       const segments = parseStoredContent(storedDisplay);
+      const unboundSkill = segments.find(
+        (segment) => segment.type === "skill" && !segment.binding,
+      );
+      if (unboundSkill?.type === "skill") {
+        setLocalError(
+          `SKILL_USE_STALE: reselect ${unboundSkill.name} in Composer before resending`,
+        );
+        return;
+      }
       // Live editable set is the source of truth (may have added/removed files).
       const att: Attachment[] = editAttachments.map((a) => ({
         path: a.path,
@@ -6951,10 +7141,16 @@ export default function App() {
             deleteSessionsConfirm(rows);
           }}
           projectPath={activeProject?.path ?? null}
+          activeSessionId={session.sessionId}
           onSkillsPrefsChanged={() =>
             setSkillsReloadToken((n) => n + 1)
           }
           memorySource={memoryCandidateSource}
+          onUseMemoryContext={(pack) => {
+            setPendingMemoryContext(pack);
+            setAppView("workbench");
+            pendingComposerFocus.current = true;
+          }}
           sandboxProfile={sandboxProfile}
           onSandboxProfile={(v) => {
             setSandboxProfile(v);
@@ -7506,39 +7702,45 @@ export default function App() {
             </div>
           ) : null}
 
-          <div
-            ref={composerWrapRef}
-            className={
-              "composer-wrap composer-wrap--float" +
-              (welcomeSession ? " composer-wrap--welcome" : "")
-            }
-          >
-            {taskProgressVisible ? (
-              <TaskProgressRail
-                entries={plan.entries}
-                changes={
-                  sessionChangesById[session.sessionId || ""] ?? []
-                }
-                goalSummary={taskGoalSummary}
-                elapsedMs={
-                  turnStartedAt == null
-                    ? null
-                    : Math.max(0, Date.now() - turnStartedAt)
-                }
-                streaming={session.state === "streaming"}
-                labels={{
-                  step: tr("taskProgress.step"),
-                  filesChanged: tr("taskProgress.filesChanged"),
-                  activeGoal: tr("taskProgress.activeGoal"),
-                  details: tr("taskProgress.details"),
-                  edit: tr("taskProgress.edit"),
-                  pause: tr("taskProgress.pause"),
-                  delete: tr("taskProgress.delete"),
-                }}
-                onOpenDetails={openPlanInResource}
-              />
-            ) : null}
-            {perm ? (
+          <ComposerDock
+            locale={locale}
+              welcomeSession={welcomeSession}
+              goalMode={goalMode}
+              settingsLocked={composerSettingsLocked}
+              sessionState={session.state}
+              connecting={connecting}
+              dropReady={dragZone === "main"}
+              draft={draft}
+              attachments={attachments}
+              attachmentLabels={attachLabels}
+              contextUsage={contextUsageDisplay}
+              progress={
+                taskProgressVisible
+                  ? {
+                      entries: plan.entries,
+                      changes:
+                        sessionChangesById[session.sessionId || ""] ?? [],
+                      goalSummary: taskGoalSummary,
+                      elapsedMs:
+                        turnStartedAt == null
+                          ? null
+                          : Math.max(0, Date.now() - turnStartedAt),
+                      streaming: session.state === "streaming",
+                      labels: {
+                        step: tr("taskProgress.step"),
+                        filesChanged: tr("taskProgress.filesChanged"),
+                        activeGoal: tr("taskProgress.activeGoal"),
+                        details: tr("taskProgress.details"),
+                        edit: tr("taskProgress.edit"),
+                        pause: tr("taskProgress.pause"),
+                        delete: tr("taskProgress.delete"),
+                      },
+                      onOpenDetails: openPlanInResource,
+                    }
+                  : null
+              }
+              permission={
+            perm ? (
               <div
                 ref={permBarRef}
                 className="perm-bar"
@@ -7610,7 +7812,8 @@ export default function App() {
                 </div>
               </div>
             ) : null}
-            {askUser ? (
+            takeover={
+            askUser ? (
               <AskUserDock
                 payload={askUser}
                 labels={{
@@ -7753,19 +7956,8 @@ export default function App() {
                   }));
                 }}
               />
-            ) : (
-            <ComposerDock
-              locale={locale}
-              taskProgressVisible={taskProgressVisible}
-              goalMode={goalMode}
-              settingsLocked={composerSettingsLocked}
-              sessionState={session.state}
-              connecting={connecting}
-              dropReady={dragZone === "main"}
-              draft={draft}
-              attachments={attachments}
-              attachmentLabels={attachLabels}
-              contextUsage={contextUsageDisplay}
+            ) : null
+              }
               project={{
                 active: activeProject,
                 options: projects,
@@ -7795,6 +7987,29 @@ export default function App() {
                 onClear: sendQueue.clearQueue,
                 onRemove: sendQueue.removeItem,
                 onRetry: sendQueue.resumeFlush,
+              }}
+              memory={{
+                pack: pendingMemoryContext,
+                labels: {
+                  regionLabel: tr("composer.memory.region"),
+                  title: tr("composer.memory.title"),
+                  reviewedContext: tr("composer.memory.reviewed"),
+                  notInstructions: tr("composer.memory.notInstructions"),
+                  noFtsSessionEvidence: tr("composer.memory.noFts"),
+                  itemCount: tr("composer.memory.count"),
+                  clear: tr("composer.memory.clear"),
+                  content: tr("composer.memory.content"),
+                  expandItem: tr("composer.memory.expand"),
+                  fullContent: tr("composer.memory.full"),
+                  emptyContent: tr("composer.memory.empty"),
+                  provenance: tr("composer.memory.provenance"),
+                  typeLabels: {
+                    user_preference: tr("settings.memory.type.preference"),
+                    project_fact: tr("settings.memory.type.projectFact"),
+                    workflow_hint: tr("settings.memory.type.workflowHint"),
+                  },
+                },
+                onClear: () => setPendingMemoryContext(null),
               }}
               menu={{
                 open: composerMenuOpen,
@@ -7958,6 +8173,7 @@ export default function App() {
                 },
               }}
               refs={{
+                wrap: composerWrapRef,
                 input: composerInputRef,
                 shell: composerShellRef,
                 plusTrigger: composerPlusTriggerRef,
@@ -7986,8 +8202,6 @@ export default function App() {
               onSend={send}
               onStop={stop}
             />
-            )}
-          </div>
           </div>
           </>
           )}

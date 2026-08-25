@@ -12,6 +12,8 @@ pub const PRODUCT_HOME_ENV: &str = "SUNSETZ_HOME";
 pub const LEGACY_PRODUCT_HOME_ENV: &str = "GROK_APP_HOME";
 pub const PRODUCT_ACP_ENV: &str = "SUNSETZ_ACP";
 pub const LEGACY_PRODUCT_ACP_ENV: &str = "GROK_APP_ACP";
+/// Explicit product kernel selector. `grok_acp` keeps the legacy ACP adapter.
+pub const PRODUCT_RUNTIME_BACKEND_ENV: &str = "SUNSETZ_RUNTIME_BACKEND";
 pub const ACP_PROTOCOL_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

@@ -56,7 +56,7 @@ pub struct ComposerPrefs {
 impl Default for ComposerPrefs {
     fn default() -> Self {
         Self {
-            model_id: "grok-4.5".into(),
+            model_id: crate::providers::OFFICIAL_DEFAULT_MODEL.into(),
             // Balanced default: faster than high, deeper than low.
             effort: "medium".into(),
             mode: "agent".into(),
@@ -186,6 +186,10 @@ pub struct AppSettings {
     /// trigger system password prompts. Official CLI login still uses `auth.json`.
     #[serde(default)]
     pub store_api_keys_in_keychain: bool,
+    /// Product kernel selector. Default `sunsetz` (in-process agent loop).
+    /// `grok_acp` keeps the legacy `grok agent stdio` ACP adapter.
+    #[serde(default = "default_runtime_backend")]
+    pub runtime_backend: String,
 }
 
 fn default_composer_prefs_scope() -> String {
@@ -212,6 +216,10 @@ fn default_sandbox_profile() -> String {
     "off".into()
 }
 
+fn default_runtime_backend() -> String {
+    "sunsetz".into()
+}
+
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
@@ -235,6 +243,7 @@ impl Default for AppSettings {
             stream_stall_seconds: default_stream_stall_seconds(),
             sandbox_profile: default_sandbox_profile(),
             store_api_keys_in_keychain: false,
+            runtime_backend: default_runtime_backend(),
         }
     }
 }
@@ -480,6 +489,7 @@ const SETTINGS_PATCH_KEYS_V1: &[&str] = &[
     "streamStallSeconds",
     "sandboxProfile",
     "storeApiKeysInKeychain",
+    "runtimeBackend",
 ];
 
 fn keychain_preference_transaction_target() -> PathBuf {
@@ -819,10 +829,7 @@ pub fn trust_project(id: &str) -> Result<Project, String> {
 ///
 /// `policy = None` / empty / `"inherit"` clears the override so the app default
 /// applies. Untrusted projects cannot store a relaxed tier.
-pub fn set_project_permission_policy(
-    id: &str,
-    policy: Option<String>,
-) -> Result<Project, String> {
+pub fn set_project_permission_policy(id: &str, policy: Option<String>) -> Result<Project, String> {
     use crate::permission::PermissionPolicy;
 
     let mut list = load_projects();
@@ -972,10 +979,7 @@ pub fn set_session_archived(id: &str, archived: bool) -> Result<SessionMeta, Str
 
 /// Bind (or clear) a session's project folder. Used to attach orphan / legacy
 /// chats to a project added later.
-pub fn set_session_project(
-    id: &str,
-    project_id: Option<String>,
-) -> Result<SessionMeta, String> {
+pub fn set_session_project(id: &str, project_id: Option<String>) -> Result<SessionMeta, String> {
     let pid = project_id
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
@@ -1424,9 +1428,7 @@ pub fn redact_text(input: &str) -> String {
     let mut cleaned = String::with_capacity(out.len());
     for word in out.split_whitespace() {
         if word.len() > 20
-            && (word.starts_with("sk-")
-                || word.starts_with("xai-")
-                || word.contains("Bearer"))
+            && (word.starts_with("sk-") || word.starts_with("xai-") || word.contains("Bearer"))
         {
             cleaned.push_str("[REDACTED]");
         } else {
@@ -1443,7 +1445,7 @@ fn global_prefs(settings: &AppSettings) -> (String, String, String, String) {
             .model_id
             .clone()
             .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| "grok-4.5".into()),
+            .unwrap_or_else(|| crate::providers::OFFICIAL_DEFAULT_MODEL.into()),
         settings
             .effort
             .clone()
@@ -1467,21 +1469,14 @@ fn global_prefs(settings: &AppSettings) -> (String, String, String, String) {
 /// Model / effort / mode follow `composer_prefs_scope`.
 /// Permission always cascades session → project → global (L10), and untrusted
 /// projects force Ask regardless of stored tiers.
-pub fn resolve_composer_prefs(
-    project_id: Option<&str>,
-    session_id: Option<&str>,
-) -> ComposerPrefs {
+pub fn resolve_composer_prefs(project_id: Option<&str>, session_id: Option<&str>) -> ComposerPrefs {
     use crate::permission::effective_permission_policy;
 
     let settings = load_settings();
     let scope = ComposerPrefsScope::parse(&settings.composer_prefs_scope);
     let (g_model, g_effort, g_mode, g_policy) = global_prefs(&settings);
 
-    let sess = session_id.and_then(|id| {
-        load_sessions_index()
-            .into_iter()
-            .find(|s| s.id == id)
-    });
+    let sess = session_id.and_then(|id| load_sessions_index().into_iter().find(|s| s.id == id));
     let proj = sess
         .as_ref()
         .and_then(|s| s.project_id.as_deref())
@@ -1492,10 +1487,8 @@ pub fn resolve_composer_prefs(
     let permission_policy = effective_permission_policy(
         &g_policy,
         proj.as_ref().map(|p| p.trusted),
-        proj.as_ref()
-            .and_then(|p| p.permission_policy.as_deref()),
-        sess.as_ref()
-            .and_then(|s| s.permission_policy.as_deref()),
+        proj.as_ref().and_then(|p| p.permission_policy.as_deref()),
+        sess.as_ref().and_then(|s| s.permission_policy.as_deref()),
     )
     .as_str()
     .to_string();
@@ -1672,7 +1665,11 @@ mod tests {
     fn redact_scrubs_long_tokenish() {
         let s = "header Bearer sk-abcdefghijklmnopqrstuvwxyz123456 tail";
         let r = redact_text(s);
-        assert!(!r.contains("sk-abcdefghijklmnopqrstuvwxyz123456") || r.contains("REDACTED") || r.contains("sk-"));
+        assert!(
+            !r.contains("sk-abcdefghijklmnopqrstuvwxyz123456")
+                || r.contains("REDACTED")
+                || r.contains("sk-")
+        );
         // at least function is callable
         assert!(!r.is_empty());
     }
@@ -1700,6 +1697,7 @@ mod tests {
         assert_eq!(s.max_concurrent_agents, 3);
         assert_eq!(s.agent_idle_minutes, 30);
         assert_eq!(s.stream_stall_seconds, 120);
+        assert_eq!(s.runtime_backend, "sunsetz");
     }
 
     #[test]

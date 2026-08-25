@@ -1,5 +1,6 @@
-//! Real ACP client: spawn `grok agent stdio`, JSON-RPC line framing.
-//! Default production transport. Mock only when GROK_APP_ACP=mock.
+//! Legacy ACP client: spawn `grok agent stdio`, JSON-RPC line framing.
+//! Used only when `runtimeBackend=grok_acp` (or `SUNSETZ_RUNTIME_BACKEND=grok_acp`).
+//! Product default is the in-process Sunsetz agent loop. Mock when SUNSETZ_ACP=mock.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -17,6 +18,14 @@ use tokio::sync::{mpsc, oneshot, Mutex as AsyncMutex};
 use tracing::{debug, error, info, warn};
 
 use crate::error::{AgentError, AgentErrorCode};
+
+#[derive(Debug)]
+pub enum TransportWriteAck {
+    Written,
+    Rejected(String),
+    /// The write may have reached the Runtime, so automatic retry is unsafe.
+    DeliveryUnknown(String),
+}
 
 fn loopback_socket_addr(addr: &str) -> Result<std::net::SocketAddr, String> {
     let addr = addr.trim();
@@ -159,6 +168,7 @@ struct Pending {
 const HANDSHAKE_TIMEOUT_SECS: u64 = 45;
 const AUTH_TIMEOUT_SECS: u64 = 12;
 const PROMPT_TIMEOUT_SECS: u64 = 600;
+const TRANSPORT_WRITE_TIMEOUT_SECS: u64 = 10;
 /// After `_x.ai/session/prompt_complete`, wait this long for the real JSON-RPC
 /// `session/prompt` result/error before treating the turn as successfully done.
 /// Official subscription failures often emit prompt_complete first, then error.
@@ -282,18 +292,15 @@ impl AcpClient {
             // Official → sync OIDC; custom → strip auth.json (api_key only).
             crate::providers::prepare_route_auth_for_agent();
             if let Some(ref pol) = opts.permission_policy {
-                let _ = crate::agent_prefs::sync_permission_to_agent_profile(
-                    session_data_mode,
-                    pol,
-                );
+                let _ =
+                    crate::agent_prefs::sync_permission_to_agent_profile(session_data_mode, pol);
             }
         }
 
         // Composer may hold a catalog id while the active channel is a custom
         // provider — resolve to the route id Grok Build actually understands.
-        let spawn_model = crate::providers::agent_spawn_model_id(
-            opts.model_id.as_deref().unwrap_or(""),
-        );
+        let spawn_model =
+            crate::providers::agent_spawn_model_id(opts.model_id.as_deref().unwrap_or(""));
 
         // Flag placement (CLI 0.2.x):
         //   top-level: `grok --no-auto-update agent …`
@@ -360,15 +367,18 @@ impl AcpClient {
             )
         })?;
 
-        let stdin = child.stdin.take().ok_or_else(|| {
-            AgentError::new(AgentErrorCode::AgentCrashed, "no stdin on child")
-        })?;
-        let stdout = child.stdout.take().ok_or_else(|| {
-            AgentError::new(AgentErrorCode::AgentCrashed, "no stdout on child")
-        })?;
-        let stderr = child.stderr.take().ok_or_else(|| {
-            AgentError::new(AgentErrorCode::AgentCrashed, "no stderr on child")
-        })?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| AgentError::new(AgentErrorCode::AgentCrashed, "no stdin on child"))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| AgentError::new(AgentErrorCode::AgentCrashed, "no stdout on child"))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| AgentError::new(AgentErrorCode::AgentCrashed, "no stderr on child"))?;
 
         let client = Arc::new(Self {
             child: AsyncMutex::new(Some(child)),
@@ -552,30 +562,27 @@ impl AcpClient {
                         warn!("acp ← {} id={id} error: {}", p.method, full);
                         let _ = p.tx.send(Err(full));
                     } else {
-                        let _ = p.tx.send(Ok(msg.get("result").cloned().unwrap_or(Value::Null)));
+                        let _ =
+                            p.tx.send(Ok(msg.get("result").cloned().unwrap_or(Value::Null)));
                     }
                 } else if let Some(err) = msg.get("error") {
                     // Race: prompt_complete fallback already resolved pending, but the
                     // real RPC error arrived later (official subscription / provider fails).
                     // Must still surface the error — do not drop as "unknown id".
                     let full = format_jsonrpc_error(err);
-                    warn!(
-                        "acp late error response id={id} (pending already resolved): {full}"
-                    );
+                    warn!("acp late error response id={id} (pending already resolved): {full}");
                     let _ = self.event_tx.send(AcpEvent::Error {
                         error: classify_rpc_error(&full),
                     });
                 } else {
                     debug!(
                         "acp late ok response id={id} (pending already resolved); keys={:?}",
-                        msg.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>())
+                        msg.as_object()
+                            .map(|o| o.keys().cloned().collect::<Vec<_>>())
                     );
                 }
                 // also surface prompt complete via result stopReason
-                if let Some(sr) = msg
-                    .pointer("/result/stopReason")
-                    .and_then(|v| v.as_str())
-                {
+                if let Some(sr) = msg.pointer("/result/stopReason").and_then(|v| v.as_str()) {
                     let _ = self.event_tx.send(AcpEvent::PromptComplete {
                         stop_reason: sr.to_string(),
                     });
@@ -620,10 +627,7 @@ impl AcpClient {
                             plan_content.as_ref().map(|s| s.len()).unwrap_or(0)
                         );
                         let _ = self.event_tx.send(AcpEvent::Plan {
-                            entries: params
-                                .get("entries")
-                                .cloned()
-                                .unwrap_or(json!([])),
+                            entries: params.get("entries").cloned().unwrap_or(json!([])),
                             body: plan_content,
                             rpc_id: Some(rpc_id),
                             tool_call_id,
@@ -832,8 +836,7 @@ fn parse_context_compact_update(
         .or_else(|| update.get("triggerType"))
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    let trigger = if trigger_raw.eq_ignore_ascii_case("manual") || kind.contains("manual")
-    {
+    let trigger = if trigger_raw.eq_ignore_ascii_case("manual") || kind.contains("manual") {
         "manual".to_string()
     } else if trigger_raw.eq_ignore_ascii_case("auto")
         || kind.contains("auto")
@@ -854,13 +857,7 @@ fn parse_context_compact_update(
         || kind == "tokens_used"
         || kind == "compaction_checkpoint"
     {
-        Some((
-            trigger,
-            tokens_before,
-            tokens_after,
-            summary_preview,
-            note,
-        ))
+        Some((trigger, tokens_before, tokens_after, summary_preview, note))
     } else {
         None
     }
@@ -878,11 +875,26 @@ impl AcpClient {
         params: Value,
         timeout_secs: u64,
     ) -> Result<Value, String> {
+        self.request_timeout_with_write_ack(method, params, timeout_secs, None)
+            .await
+    }
+
+    async fn request_timeout_with_write_ack(
+        &self,
+        method: &str,
+        params: Value,
+        timeout_secs: u64,
+        mut write_ack: Option<oneshot::Sender<TransportWriteAck>>,
+    ) -> Result<Value, String> {
         if !self.reader_alive.load(Ordering::SeqCst) {
-            return Err(format!(
+            let error = format!(
                 "agent stdout closed before {method}; {}",
                 self.format_exit_detail("process dead")
-            ));
+            );
+            if let Some(tx) = write_ack.take() {
+                let _ = tx.send(TransportWriteAck::Rejected(error.clone()));
+            }
+            return Err(error);
         }
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
@@ -900,9 +912,34 @@ impl AcpClient {
             "params": params,
         });
         info!("acp → {method} id={id}");
-        if let Err(e) = self.write_line(&msg).await {
-            self.pending.lock().remove(&id);
-            return Err(format!("write {method} failed: {e}"));
+        let write_result = tokio::time::timeout(
+            std::time::Duration::from_secs(TRANSPORT_WRITE_TIMEOUT_SECS),
+            self.write_line(&msg),
+        )
+        .await;
+        match write_result {
+            Ok(Ok(())) => {
+                if let Some(tx) = write_ack.take() {
+                    let _ = tx.send(TransportWriteAck::Written);
+                }
+            }
+            Ok(Err(error)) => {
+                self.pending.lock().remove(&id);
+                let error = format!("write {method} failed: {error}");
+                if let Some(tx) = write_ack.take() {
+                    let _ = tx.send(TransportWriteAck::DeliveryUnknown(error.clone()));
+                }
+                return Err(error);
+            }
+            Err(_) => {
+                self.pending.lock().remove(&id);
+                let error =
+                    format!("write {method} timed out after {TRANSPORT_WRITE_TIMEOUT_SECS}s");
+                if let Some(tx) = write_ack.take() {
+                    let _ = tx.send(TransportWriteAck::DeliveryUnknown(error.clone()));
+                }
+                return Err(error);
+            }
         }
         match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), rx).await {
             Ok(Ok(r)) => match r {
@@ -916,8 +953,7 @@ impl AcpClient {
                 }
             },
             Ok(Err(_)) => {
-                let head =
-                    format!("rpc channel closed while waiting for {method} (id={id})");
+                let head = format!("rpc channel closed while waiting for {method} (id={id})");
                 error!("{}", self.format_exit_detail(&head));
                 Err(head)
             }
@@ -1087,7 +1123,9 @@ impl AcpClient {
                     AgentErrorCode::AgentCrashed,
                     format!(
                         "session/new missing sessionId; keys={:?}",
-                        result.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>())
+                        result
+                            .as_object()
+                            .map(|o| o.keys().cloned().collect::<Vec<_>>())
                     ),
                 )
             })?
@@ -1211,7 +1249,11 @@ impl AcpClient {
         }
     }
 
-    pub async fn prompt(&self, text: &str) -> Result<(), AgentError> {
+    async fn prompt_inner(
+        &self,
+        text: &str,
+        write_ack: Option<oneshot::Sender<TransportWriteAck>>,
+    ) -> Result<(), AgentError> {
         let sid = self
             .agent_session_id
             .lock()
@@ -1224,7 +1266,12 @@ impl AcpClient {
         let this_params = wire_session_prompt_params(&sid, text);
 
         let result = self
-            .request_timeout("session/prompt", this_params, PROMPT_TIMEOUT_SECS)
+            .request_timeout_with_write_ack(
+                "session/prompt",
+                this_params,
+                PROMPT_TIMEOUT_SECS,
+                write_ack,
+            )
             .await
             .map_err(|e| classify_rpc_error(&e))?;
 
@@ -1240,10 +1287,25 @@ impl AcpClient {
             message_id: None,
             done: true,
         });
-        let _ = self.event_tx.send(AcpEvent::PromptComplete {
-            stop_reason: stop,
-        });
+        let _ = self
+            .event_tx
+            .send(AcpEvent::PromptComplete { stop_reason: stop });
         Ok(())
+    }
+
+    pub async fn prompt(&self, text: &str) -> Result<(), AgentError> {
+        self.prompt_inner(text, None).await
+    }
+
+    /// Send a prompt and acknowledge once the complete JSON-RPC request has
+    /// been written to the ACP transport. The prompt result continues to run
+    /// until the Runtime completes the turn.
+    pub async fn prompt_with_transport_ack(
+        &self,
+        text: &str,
+        write_ack: oneshot::Sender<TransportWriteAck>,
+    ) -> Result<(), AgentError> {
+        self.prompt_inner(text, Some(write_ack)).await
     }
 
     /// Cancel in-flight prompt (ACP notification — no id).
@@ -1265,11 +1327,8 @@ impl AcpClient {
             .lock()
             .clone()
             .ok_or_else(|| "no session".to_string())?;
-        self.request(
-            "x.ai/rewind/points",
-            json!({ "sessionId": sid }),
-        )
-        .await
+        self.request("x.ai/rewind/points", json!({ "sessionId": sid }))
+            .await
     }
 
     /// Truncate agent conversation to a user-prompt index (and optionally restore files).
@@ -1358,7 +1417,10 @@ impl AcpClient {
         let msg = wire_jsonrpc_result(rpc_id, result.clone());
         info!(
             "acp → ask_user_question reply id={rpc_id} outcome={}",
-            if matches!(result.get("outcome").and_then(|v| v.as_str()), Some("accepted")) {
+            if matches!(
+                result.get("outcome").and_then(|v| v.as_str()),
+                Some("accepted")
+            ) {
                 "accepted"
             } else {
                 "cancelled"
@@ -1389,7 +1451,9 @@ pub enum PermissionOutcome {
 #[derive(Debug, Clone)]
 pub enum AskUserOutcome {
     /// Map of question text → selected label(s) and/or free-text answer.
-    Accepted { answers: Value },
+    Accepted {
+        answers: Value,
+    },
     Cancelled,
 }
 
@@ -1615,10 +1679,7 @@ pub fn decode_session_update(params: &Value) -> Vec<AcpEvent> {
             });
         }
         "retry_state" => {
-            let attempt = update
-                .get("attempt")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as u32;
+            let attempt = update.get("attempt").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
             let max_retries = update
                 .get("max_retries")
                 .or_else(|| update.get("maxRetries"))
@@ -1678,8 +1739,7 @@ pub fn decode_session_update(params: &Value) -> Vec<AcpEvent> {
                         output_tokens,
                         cached_read_tokens: read("cachedReadTokens", "cached_read_tokens"),
                         reasoning_tokens: read("reasoningTokens", "reasoning_tokens"),
-                        model_calls: read("modelCalls", "model_calls").min(u32::MAX as u64)
-                            as u32,
+                        model_calls: read("modelCalls", "model_calls").min(u32::MAX as u64) as u32,
                         model_id,
                     });
                 }
@@ -2313,9 +2373,7 @@ pub async fn probe_acp_server(addr: &str) -> AcpProbeResult {
             let v: Value = serde_json::from_str(line.trim()).unwrap_or(Value::Null);
             let result = &v["result"];
             if !result.is_object() {
-                return AcpProbeResult::fail(
-                    "connected, but no ACP initialize result in response",
-                );
+                return AcpProbeResult::fail("connected, but no ACP initialize result in response");
             }
             let meta = &result["_meta"];
             AcpProbeResult {
@@ -2327,9 +2385,7 @@ pub async fn probe_acp_server(addr: &str) -> AcpProbeResult {
                 error: None,
             }
         }
-        Ok(Ok(_)) => {
-            AcpProbeResult::fail("server closed the connection (EOF) before responding")
-        }
+        Ok(Ok(_)) => AcpProbeResult::fail("server closed the connection (EOF) before responding"),
         Ok(Err(e)) => AcpProbeResult::fail(format!("read failed: {e}")),
         Err(_) => AcpProbeResult::fail("connected, but no ACP response within 20s"),
     }
@@ -2348,6 +2404,130 @@ mod loopback_address_tests {
         assert!(loopback_socket_addr("192.168.1.20:7000").is_err());
         assert!(loopback_socket_addr("example.com:7000").is_err());
         assert!(loopback_socket_addr("localhost:0").is_err());
+    }
+}
+
+#[cfg(test)]
+mod transport_write_ack_tests {
+    use super::*;
+    use std::io;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
+    struct RejectingWriter;
+
+    impl AsyncWrite for RejectingWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "test transport rejection",
+            )))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    fn client_with_writer(
+        writer: Box<dyn AsyncWrite + Unpin + Send>,
+        reader_alive: bool,
+    ) -> Arc<AcpClient> {
+        let (event_tx, _events) = mpsc::unbounded_channel();
+        Arc::new(AcpClient {
+            child: AsyncMutex::new(None),
+            stdin: AsyncMutex::new(Some(writer)),
+            next_id: AtomicU64::new(1),
+            pending: ParkingMutex::new(HashMap::new()),
+            event_tx,
+            agent_session_id: ParkingMutex::new(Some("test-agent-session".into())),
+            cli_path: PathBuf::from("test-runtime"),
+            cwd: PathBuf::from("."),
+            stopped: AtomicBool::new(false),
+            reader_alive: AtomicBool::new(reader_alive),
+            stderr_tail: ParkingMutex::new(Vec::new()),
+            sandbox_application: crate::runtime_compat::SandboxApplicationV1::off(),
+        })
+    }
+
+    #[tokio::test]
+    async fn preflight_rejection_is_distinct_from_unknown_delivery() {
+        let client = client_with_writer(Box::new(tokio::io::sink()), false);
+        let (ack_tx, ack_rx) = oneshot::channel();
+
+        let error = client
+            .request_timeout_with_write_ack(
+                "session/prompt",
+                json!({ "test": true }),
+                1,
+                Some(ack_tx),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.contains("stdout closed"));
+        match ack_rx.await.unwrap() {
+            TransportWriteAck::Rejected(detail) => assert!(detail.contains("stdout closed")),
+            other => panic!("expected rejected transport ack, got {other:?}"),
+        }
+        assert!(client.pending.lock().is_empty());
+    }
+
+    #[tokio::test]
+    async fn write_error_is_delivery_unknown_and_clears_pending_rpc() {
+        let client = client_with_writer(Box::new(RejectingWriter), true);
+        let (ack_tx, ack_rx) = oneshot::channel();
+
+        let error = client
+            .request_timeout_with_write_ack(
+                "session/prompt",
+                json!({ "test": true }),
+                1,
+                Some(ack_tx),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.contains("test transport rejection"));
+        match ack_rx.await.unwrap() {
+            TransportWriteAck::DeliveryUnknown(detail) => {
+                assert!(detail.contains("test transport rejection"));
+            }
+            other => panic!("expected delivery-unknown ack, got {other:?}"),
+        }
+        assert!(client.pending.lock().is_empty());
+    }
+
+    #[tokio::test]
+    async fn partial_write_timeout_is_delivery_unknown_and_clears_pending_rpc() {
+        let (writer, blocked_peer) = tokio::io::duplex(1);
+        let client = client_with_writer(Box::new(writer), true);
+        let (ack_tx, ack_rx) = oneshot::channel();
+
+        let error = client
+            .request_timeout_with_write_ack(
+                "session/prompt",
+                json!({ "payload": "larger than the one-byte test pipe" }),
+                1,
+                Some(ack_tx),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.contains("timed out"));
+        match ack_rx.await.unwrap() {
+            TransportWriteAck::DeliveryUnknown(detail) => {
+                assert!(detail.contains("timed out"));
+            }
+            other => panic!("expected delivery-unknown ack, got {other:?}"),
+        }
+        assert!(client.pending.lock().is_empty());
+        drop(blocked_peer);
     }
 }
 
@@ -2403,19 +2583,21 @@ mod live_handshake_tests {
             eprintln!("skip live ACP (set GROK_APP_LIVE_ACP=1)");
             return;
         }
-        let cli = which::which("grok").or_else(|_| {
-            let p = crate::process_util::user_home().join(".grok/bin/grok");
-            if p.exists() {
-                Ok(p)
-            } else {
-                let p2 = crate::process_util::user_home().join(r".grok\bin\grok.exe");
-                if p2.exists() {
-                    Ok(p2)
+        let cli = which::which("grok")
+            .or_else(|_| {
+                let p = crate::process_util::user_home().join(".grok/bin/grok");
+                if p.exists() {
+                    Ok(p)
                 } else {
-                    Err(which::Error::CannotFindBinaryPath)
+                    let p2 = crate::process_util::user_home().join(r".grok\bin\grok.exe");
+                    if p2.exists() {
+                        Ok(p2)
+                    } else {
+                        Err(which::Error::CannotFindBinaryPath)
+                    }
                 }
-            }
-        }).expect("grok cli");
+            })
+            .expect("grok cli");
         let cwd = std::env::current_dir().unwrap();
         let t0 = std::time::Instant::now();
         let (client, mut events) = AcpClient::spawn(cli, cwd).expect("spawn");
@@ -2425,10 +2607,11 @@ mod live_handshake_tests {
                 eprintln!("ev: {:?}", std::mem::discriminant(&ev));
             }
         });
-        let sid = tokio::time::timeout(Duration::from_secs(45), client.initialize_and_new_session())
-            .await
-            .expect("overall timeout")
-            .expect("handshake");
+        let sid =
+            tokio::time::timeout(Duration::from_secs(45), client.initialize_and_new_session())
+                .await
+                .expect("overall timeout")
+                .expect("handshake");
         eprintln!("OK session={} in {:?}", sid, t0.elapsed());
         client.kill().await;
         assert!(!sid.is_empty());

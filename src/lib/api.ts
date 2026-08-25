@@ -94,6 +94,117 @@ export interface CapabilityManifestValidationV1 {
   errors: string[];
 }
 
+export type EcosystemPackageKindV1 = "skill" | "plugin" | "mcp";
+export type EcosystemPublisherVerificationStateV1 = "unverified" | "verified";
+export type EcosystemSourceKindV1 =
+  | "built_in"
+  | "local"
+  | "git"
+  | "registry"
+  | "remote";
+export type EcosystemPackagePermissionV1 =
+  | "filesystem_read"
+  | "filesystem_write"
+  | "network"
+  | "process_spawn"
+  | "mcp_invoke"
+  | "secrets_use"
+  | "user_interaction";
+export type EcosystemCapabilityKindV1 =
+  | "skill"
+  | "tool"
+  | "resource"
+  | "mcp_server";
+
+export interface EcosystemPublisherIdentityV1 {
+  id: string;
+  displayName: string;
+  verificationState: EcosystemPublisherVerificationStateV1;
+  verificationAuthority: string | null;
+  verificationEvidenceHash: string | null;
+}
+
+export interface EcosystemSourceIdentityV1 {
+  kind: EcosystemSourceKindV1;
+  sourceId: string;
+}
+
+export interface EcosystemSourceProvenanceV1 {
+  identity: EcosystemSourceIdentityV1;
+  revision: string | null;
+}
+
+export interface EcosystemPackageDependencyV1 {
+  packageId: string;
+  source: EcosystemSourceIdentityV1;
+  versionRequirement: string;
+}
+
+export interface EcosystemCapabilityExportV1 {
+  capabilityId: string;
+  kind: EcosystemCapabilityKindV1;
+  version: string;
+  interfaceHash: string;
+}
+
+export interface EcosystemPackageManifestV1 {
+  schema: "sunsetz.ecosystem-package.v1" | string;
+  schemaVersion: 1;
+  kind: EcosystemPackageKindV1;
+  packageId: string;
+  displayName: string;
+  version: string;
+  publisher: EcosystemPublisherIdentityV1;
+  license: string;
+  source: EcosystemSourceProvenanceV1;
+  interfaceHash: string;
+  artifactHash: string;
+  dependencies: EcosystemPackageDependencyV1[];
+  permissions: EcosystemPackagePermissionV1[];
+  capabilityExports: EcosystemCapabilityExportV1[];
+  implementationOmitted: boolean;
+}
+
+export interface EcosystemPackageManifestValidationV1 {
+  version: 1;
+  valid: boolean;
+  canonicalManifestHash: string | null;
+  errors: string[];
+}
+
+export interface EcosystemPackageImportCandidateV1 {
+  manifest: EcosystemPackageManifestV1;
+  expectedManifestHash: string;
+}
+
+export interface EcosystemPackageImportPreviewRequestV1 {
+  version: 1;
+  candidates: EcosystemPackageImportCandidateV1[];
+}
+
+export interface EcosystemPackageImportPreviewItemV1 {
+  packageRef: string;
+  kind: EcosystemPackageKindV1;
+  packageId: string;
+  displayName: string;
+  version: string;
+  publisherId: string;
+  publisherVerificationState: EcosystemPublisherVerificationStateV1;
+  source: EcosystemSourceIdentityV1;
+  manifestHash: string;
+  artifactHash: string;
+  dependencies: string[];
+  permissions: EcosystemPackagePermissionV1[];
+  capabilityExports: EcosystemCapabilityExportV1[];
+  requiresExplicitReview: boolean;
+}
+
+export interface EcosystemPackageImportPreviewV1 {
+  version: 1;
+  previewHash: string;
+  packages: EcosystemPackageImportPreviewItemV1[];
+}
+
 const BROWSER_HOST_CAPABILITIES: HostCapabilities = {
   platform: "other",
   finderSelection: false,
@@ -219,6 +330,37 @@ export async function capabilityManifestValidateV1(
   return invoke<CapabilityManifestValidationV1>(
     "capability_manifest_validate_v1",
     { manifest },
+  );
+}
+
+/** Validate metadata only; this command never imports, installs, or executes. */
+export async function ecosystemPackageManifestValidateV1(
+  manifest: EcosystemPackageManifestV1,
+): Promise<EcosystemPackageManifestValidationV1> {
+  if (!isTauri()) {
+    return {
+      version: 1,
+      valid: false,
+      canonicalManifestHash: null,
+      errors: ["Desktop Host required"],
+    };
+  }
+  return invoke<EcosystemPackageManifestValidationV1>(
+    "ecosystem_package_manifest_validate_v1",
+    { manifest },
+  );
+}
+
+/** Build a dependency-ordered review preview; no artifact bytes are touched. */
+export async function ecosystemPackageImportPreviewV1(
+  request: EcosystemPackageImportPreviewRequestV1,
+): Promise<EcosystemPackageImportPreviewV1> {
+  if (!isTauri()) {
+    throw new Error("Ecosystem package preview requires the desktop Host");
+  }
+  return invoke<EcosystemPackageImportPreviewV1>(
+    "ecosystem_package_import_preview_v1",
+    { request },
   );
 }
 
@@ -416,6 +558,80 @@ export interface MemoryContextPackV1 {
   items: MemoryContextPackItemV1[];
 }
 
+export interface MemoryContextPackRequestV1 {
+  version: 1;
+  selections: MemoryCandidateMutationRequestV1[];
+}
+
+export type MemoryInjectionStatusV1 =
+  | "prepared"
+  | "dispatching"
+  | "applied"
+  | "failed"
+  | "removed";
+export type MemoryInjectionFailureCodeV1 =
+  | "runtime_write_failed"
+  | "interrupted"
+  | "context_unavailable";
+export type MemoryInjectionFeedbackV1 = "helpful" | "unhelpful";
+
+export interface MemoryInjectionRecordV1 {
+  version: 1;
+  injectionId: string;
+  sessionId: string;
+  contextHash: string;
+  selections: MemoryCandidateMutationRequestV1[];
+  status: MemoryInjectionStatusV1;
+  revision: number;
+  attempt: number;
+  failureCode?: MemoryInjectionFailureCodeV1 | null;
+  feedback?: MemoryInjectionFeedbackV1 | null;
+  createdAt: string;
+  preparedAt: string;
+  updatedAt: string;
+  appliedAt?: string | null;
+  removedAt?: string | null;
+}
+
+export interface MemoryInjectionDisclosureV1 {
+  version: 1;
+  injectionId: string;
+  contextHash: string;
+  reviewedMemory: true;
+  contextOnlyNotInstructions: true;
+  containsSessionEvidence: false;
+  items: Array<{
+    candidateId: string;
+    contentHash: string;
+    type: MemoryCandidateTypeV1;
+    content: string;
+    provenance: { sessionId: string; messageId: string };
+  }>;
+}
+
+export interface MemoryRecallPreviewV1 {
+  version: 1;
+  memoryCandidates: Array<{
+    candidateId: string;
+    contentHash: string;
+    type: MemoryCandidateTypeV1;
+    content: string;
+    provenance: { sessionId: string; messageId: string };
+    relevanceScore: number;
+  }>;
+  contextPackSelections: MemoryCandidateMutationRequestV1[];
+  sessionEvidence: Array<{
+    sessionId: string;
+    sessionTitle: string;
+    messageId: string;
+    role: string;
+    snippet: string;
+    rank: number;
+    evidenceOnly: true;
+    untrusted: true;
+  }>;
+}
+
 export async function memoryCandidatesListV1() {
   return invoke<MemoryCandidateV1[]>("memory_candidates_list_v1");
 }
@@ -425,6 +641,168 @@ export async function memoryContextPackBuildV1(
 ) {
   return invoke<MemoryContextPackV1>("memory_context_pack_build_v1", {
     request: { version: 1, selections },
+  });
+}
+
+export async function memoryRecallPreviewV1(
+  query: string,
+  currentSessionId?: string | null,
+) {
+  return invoke<MemoryRecallPreviewV1>("memory_recall_preview_v1", {
+    request: {
+      version: 1,
+      query,
+      currentSessionId: currentSessionId ?? null,
+    },
+  });
+}
+
+export async function memoryInjectionsListV1(sessionId: string) {
+  return invoke<MemoryInjectionRecordV1[]>("memory_injections_list_v1", {
+    sessionId,
+  });
+}
+
+export async function memoryInjectionFeedbackV1(
+  record: MemoryInjectionRecordV1,
+  feedback: MemoryInjectionFeedbackV1,
+) {
+  return invoke<MemoryInjectionRecordV1>("memory_injection_feedback_v1", {
+    request: {
+      version: 1,
+      sessionId: record.sessionId,
+      injectionId: record.injectionId,
+      expectedContextHash: record.contextHash,
+      expectedRevision: record.revision,
+      feedback,
+    },
+  });
+}
+
+export async function memoryInjectionRemoveV1(
+  record: MemoryInjectionRecordV1,
+) {
+  return invoke<MemoryInjectionRecordV1>("memory_injection_remove_v1", {
+    request: {
+      version: 1,
+      sessionId: record.sessionId,
+      injectionId: record.injectionId,
+      expectedContextHash: record.contextHash,
+      expectedRevision: record.revision,
+    },
+  });
+}
+
+export interface MemoryPortableExportV1 {
+  schema: string;
+  version: 1;
+  contentHash: string;
+  candidates: Array<{
+    candidateId: string;
+    contentHash: string;
+    category: MemoryCandidateTypeV1;
+    content: string;
+    provenance: {
+      kind: "persisted_user_message";
+      sessionId: string;
+      messageId: string;
+      live: true;
+    };
+    createdAt: string;
+    updatedAt: string;
+  }>;
+  injectionAudit: Array<{
+    sessionId: string;
+    injectionId: string;
+    contextHash: string;
+    status: MemoryInjectionStatusV1;
+    revision: number;
+    attempt: number;
+    failureCode?: MemoryInjectionFailureCodeV1 | null;
+    feedback?: MemoryInjectionFeedbackV1 | null;
+    selections: Array<{ candidateId: string; contentHash: string }>;
+    createdAt: string;
+    preparedAt: string;
+    updatedAt: string;
+    appliedAt?: string | null;
+    removedAt?: string | null;
+  }>;
+  excludesSessionSearchIndex: true;
+  excludesQueriesAndPromptFragments: true;
+}
+
+export interface MemoryClearScopeV1 {
+  candidateSelections: MemoryCandidateMutationRequestV1[];
+  sourceSessionIds: string[];
+}
+
+export interface MemoryClearPlanV1 {
+  schema: string;
+  version: 1;
+  dryRun: true;
+  requiresConfirmation: true;
+  candidateStoreHash: string;
+  sessionsIndexHash: string;
+  scope: MemoryClearScopeV1;
+  candidates: Array<{
+    candidateId: string;
+    expectedContentHash: string;
+    category: MemoryCandidateTypeV1;
+    provenance: {
+      kind: "persisted_user_message";
+      sessionId: string;
+      messageId: string;
+      live: boolean;
+    };
+  }>;
+  injections: Array<{
+    sessionId: string;
+    injectionId: string;
+    expectedContextHash: string;
+    expectedRevision: number;
+    matchedCandidateIds: string[];
+  }>;
+  skipped: Array<{
+    kind: "candidate" | "source_session";
+    id: string;
+    reason: "candidate_not_found" | "no_candidates_for_provenance";
+  }>;
+  sessionSearchIndexIsRebuildableCache: true;
+  planHash: string;
+}
+
+export interface MemoryClearResultV1 {
+  version: 1;
+  planHash: string;
+  beforeCandidateStoreHash: string;
+  afterCandidateStoreHash: string;
+  deletedCandidates: Array<{ candidateId: string; contentHash: string }>;
+  deletedInjections: Array<{
+    sessionId: string;
+    injectionId: string;
+    contextHash: string;
+    revision: number;
+  }>;
+  skipped: MemoryClearPlanV1["skipped"];
+  sessionSearchIndexMutated: false;
+  sessionSearchIndexIsRebuildableCache: true;
+}
+
+export async function memoryExportV1(includeInjectionAudit = true) {
+  return invoke<MemoryPortableExportV1>("memory_export_v1", {
+    request: { version: 1, includeInjectionAudit },
+  });
+}
+
+export async function memoryClearPreviewV1(scope: MemoryClearScopeV1) {
+  return invoke<MemoryClearPlanV1>("memory_clear_preview_v1", {
+    request: { version: 1, scope },
+  });
+}
+
+export async function memoryClearConfirmV1(plan: MemoryClearPlanV1) {
+  return invoke<MemoryClearResultV1>("memory_clear_confirm_v1", {
+    request: { version: 1, plan },
   });
 }
 
@@ -505,6 +883,91 @@ export async function sessionSend(
     text,
     displayText: displayText ?? null,
     attachments: attachments ?? null,
+  });
+}
+
+export interface SessionSendResultV2 {
+  version: 2;
+  snapshot: SessionSnapshot;
+  memoryInjection?: MemoryInjectionRecordV1 | null;
+  memoryDisclosure?: MemoryInjectionDisclosureV1 | null;
+  skillUses?: SkillUseRecordV1[];
+}
+
+export type SkillUseSelectionV1 = "explicit" | "accepted_suggestion";
+export type SkillUseStatusV1 =
+  | "prepared"
+  | "dispatching"
+  | "applied"
+  | "succeeded"
+  | "failed"
+  | "interrupted";
+export type SkillUseFeedbackRatingV1 = "helpful" | "unhelpful";
+
+export interface SkillIdentityV1 {
+  id: string;
+  name: string;
+  treeHash: string;
+  sourceCandidateId?: string | null;
+}
+
+export interface SkillSelectionRequestV1 {
+  id: string;
+  expectedTreeHash: string;
+  selection: SkillUseSelectionV1;
+}
+
+export interface SkillUseRecordV1 {
+  version: 1;
+  id: string;
+  revision: number;
+  selection: SkillUseSelectionV1;
+  sessionId: string;
+  turnId: string;
+  skill: SkillIdentityV1;
+  status: SkillUseStatusV1;
+  statusEvents: Array<{ status: SkillUseStatusV1; occurredAt: string }>;
+  feedback?: { rating: SkillUseFeedbackRatingV1; occurredAt: string } | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * Versioned Host send. When Memory selections are present, the Host rebuilds
+ * the reviewed pack, writes a disclosure audit first, and owns the exact ACP
+ * prompt fragment. JavaScript never receives or constructs that fragment.
+ */
+export async function sessionSendV2(request: {
+  sessionId: string;
+  text: string;
+  displayText?: string | null;
+  attachments?: Array<{
+    path: string;
+    name: string;
+    isDir: boolean;
+  }> | null;
+  memoryContextPack?: MemoryContextPackRequestV1 | null;
+  memoryRetry?: {
+    version: 1;
+    sessionId: string;
+    injectionId: string;
+    expectedContextHash: string;
+    expectedRevision: number;
+    contextPack: MemoryContextPackRequestV1;
+  } | null;
+  skillSelections?: SkillSelectionRequestV1[];
+}): Promise<SessionSendResultV2> {
+  return invoke("session_send_v2", {
+    request: {
+      version: 2,
+      sessionId: request.sessionId,
+      text: request.text,
+      displayText: request.displayText ?? null,
+      attachments: request.attachments ?? null,
+      memoryContextPack: request.memoryContextPack ?? null,
+      memoryRetry: request.memoryRetry ?? null,
+      skillSelections: request.skillSelections ?? [],
+    },
   });
 }
 
@@ -1303,6 +1766,8 @@ export interface AppSettings {
    * Default false: keys stay in secrets.json (0600). Official login uses auth.json.
    */
   storeApiKeysInKeychain?: boolean;
+  /** Product kernel: `sunsetz` (default) or legacy `grok_acp`. */
+  runtimeBackend?: string;
 }
 
 export interface AvailableModel {
@@ -1489,6 +1954,57 @@ export interface SkillsListResult {
   error?: string;
 }
 
+export interface SkillMetadataInventoryItemV1 {
+  id: string;
+  name: string;
+  description: string;
+  whenToUse: string;
+  source: "user" | "project" | "plugin";
+  treeHash: string;
+  sourceCandidateId?: string | null;
+  userInvocable: boolean;
+  enabled: boolean;
+}
+
+export interface SkillMetadataInventoryV1 {
+  version: 1;
+  items: SkillMetadataInventoryItemV1[];
+}
+
+export interface SkillMetadataRankingResultV1 {
+  version: 1;
+  disposition: "suggestion_only";
+  requiresExplicitAcceptance: true;
+  items: Array<{
+    skill: SkillIdentityV1;
+    score: number;
+    matchedTerms: string[];
+  }>;
+}
+
+export interface SkillImprovementProposalV1 {
+  version: 1;
+  id: string;
+  status: "pending_review";
+  owner: {
+    kind: "host_candidate";
+    namespace: string;
+    mayOverwriteExternal: false;
+  };
+  skillId: string;
+  skillName: string;
+  lineage: {
+    priorSkillTreeHash: string;
+    sourceCandidateId?: string | null;
+    evidenceUseIds: string[];
+  };
+  successfulUseCount: number;
+  helpfulUseCount: number;
+  repeatedEvidence: boolean;
+  requiresUserReview: true;
+  mayWriteSkill: false;
+}
+
 export interface InspectMcpResult {
   servers: McpDto[];
   error?: string;
@@ -1573,6 +2089,62 @@ export async function skillsList(projectPath?: string | null) {
   return invoke<SkillsListResult>("skills_list", {
     projectPath: projectPath ?? null,
   });
+}
+
+export async function skillInventoryV1(projectPath?: string | null) {
+  return invoke<SkillMetadataInventoryV1>("skill_inventory_v1", {
+    projectPath: projectPath ?? null,
+  });
+}
+
+export async function skillMetadataRankV1(
+  query: string,
+  projectPath?: string | null,
+  maxResults = 4,
+) {
+  return invoke<SkillMetadataRankingResultV1>("skill_metadata_rank_v1", {
+    projectPath: projectPath ?? null,
+    query,
+    maxResults,
+  });
+}
+
+export async function skillUsesListV1(sessionId?: string | null) {
+  return invoke<SkillUseRecordV1[]>("skill_uses_list_v1", {
+    sessionId: sessionId ?? null,
+  });
+}
+
+export async function skillUseFeedbackV1(
+  record: SkillUseRecordV1,
+  feedback: SkillUseFeedbackRatingV1,
+) {
+  return invoke<SkillUseRecordV1>("skill_use_feedback_v1", {
+    request: {
+      version: 1,
+      id: record.id,
+      expectedRevision: record.revision,
+      expectedSkillTreeHash: record.skill.treeHash,
+      feedback,
+    },
+  });
+}
+
+export async function skillImprovementProposalV1(
+  skill: SkillIdentityV1,
+  projectPath?: string | null,
+) {
+  return invoke<SkillImprovementProposalV1 | null>(
+    "skill_improvement_proposal_v1",
+    {
+      projectPath: projectPath ?? null,
+      request: {
+        version: 1,
+        skillId: skill.id,
+        expectedSkillTreeHash: skill.treeHash,
+      },
+    },
+  );
 }
 
 /** List MCP servers via `grok inspect --json` (optional project cwd). */

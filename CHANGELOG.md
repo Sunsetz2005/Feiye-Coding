@@ -1,7 +1,9 @@
 # Changelog
 
-## [UNRELEASED] — 2026-08-24
+## [UNRELEASED] — 2026-08-26
 
+- Sunsetz 默认使用内建 Agent 循环调用已配置的 OpenAI 兼容聊天接口，不再把 grok CLI 作为进入工作台或运行会话的硬门槛。
+- 将底部三层输入器抽离为 `ComposerDock`，工作台只保留会话协调以及提问/权限接管。
 - 统一 permission、ask-user、plan 的版本化交互生命周期，支持前后台会话与 WebView 重载恢复，并新增有界去敏审计边车。
 - 权限改为 fail-closed：未知编辑路径、目录穿越和下载不再自动批准；会话授权按完整规范化命令或资源匹配。
 - 隔离静态 HTML 预览，启用主 WebView CSP，禁用全局 asset protocol，并引入受 provenance 校验的 `ResourceHandleV1`。

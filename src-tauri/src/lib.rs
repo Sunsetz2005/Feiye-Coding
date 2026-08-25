@@ -1,64 +1,72 @@
-//! Sunsetz desktop host. Upstream CLI compatibility is isolated in runtime_compat.
+//! Sunsetz desktop host. The product agent kernel lives in `agent_loop`.
+//! The Grok ACP adapter is a legacy compatibility path isolated behind an
+//! explicit runtime-backend flag.
 
 mod account;
-mod runtime_compat;
 mod account_profiles;
 mod acp_client;
+#[cfg(test)]
+mod acp_golden_test;
+mod agent_loop;
 mod agent_prefs;
-mod extensions;
-mod supergrok_quota;
-mod cli_probe;
 mod cli_install;
+mod cli_probe;
+mod cli_sessions;
 mod commands;
-mod support_bundle;
+mod context_usage;
 mod editors;
 mod error;
+mod extensions;
 mod fs_browser;
 mod host_features;
+#[cfg(test)]
+mod integration_test;
+mod journal_throttle;
 mod media_protocol;
 mod mock_acp;
 mod models_catalog;
 mod paths;
-mod process_util;
-mod process_limits;
-mod journal_throttle;
-mod stream_stall;
-mod cli_sessions;
-mod context_usage;
-mod turn_complete;
-mod store_lock;
 mod permission;
-mod providers;
-mod secrets;
-mod session_import;
-mod session_title;
-mod skill_draft;
 #[cfg(test)]
 mod permission_host_test;
-#[cfg(test)]
-mod integration_test;
-#[cfg(test)]
-mod acp_golden_test;
+mod process_limits;
+mod process_util;
+mod providers;
+mod runtime_compat;
+mod secrets;
 mod session_fsm;
+mod session_import;
 mod session_manager;
+mod session_title;
+mod skill_draft;
 mod store;
+mod store_lock;
+mod stream_stall;
+mod supergrok_quota;
+mod support_bundle;
 mod tray;
 mod tray_i18n;
+mod turn_complete;
 
 // Incremental migration modules. Keep these isolated so each capability can be
-// reverted without replacing the ACP/Grok Runtime core.
+// reverted without replacing the Sunsetz agent kernel.
 mod automation_scheduler;
 mod capability_exchange;
 mod composer_recovery;
 mod ecosystem_packages;
 mod interactions;
 mod memory_candidates;
+mod memory_injection;
+mod memory_portability;
 mod memory_recall;
 mod plan_artifacts;
+mod project_git_summary;
 mod resource_handles;
 mod runtime_events;
 mod session_search;
 mod skill_candidates;
+mod skill_feedback;
+mod skill_inventory;
 
 use std::sync::Arc;
 
@@ -115,6 +123,17 @@ pub fn run() {
         )
         .init();
 
+    if let Err(error) = composer_recovery::prune_orphaned_rows_on_startup() {
+        tracing::warn!("prune orphaned Composer recovery rows failed: {error}");
+    }
+    // Configuration only says where ACP was reached; it does not prove that a
+    // previously dispatched Runtime process stopped. Recover Prepared rows,
+    // but keep Dispatching/Applied evidence non-terminal until genuine process
+    // termination or a future Runtime delivery-status protocol can prove it.
+    if let Err(error) = skill_feedback::recover_orphaned_uses_v1(false) {
+        tracing::warn!("recover orphaned Skill use evidence failed: {error}");
+    }
+
     let session_mgr = Arc::new(SessionManager::new());
 
     tauri::Builder::default()
@@ -167,12 +186,9 @@ pub fn run() {
                     let _ = window.set_background_color(Some(tauri::window::Color(0, 0, 0, 0)));
                     // Frosted glass under transparent regions (sidebar). Solid main CSS covers the rest.
                     use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial};
-                    if let Err(e) = apply_vibrancy(
-                        &window,
-                        NSVisualEffectMaterial::Sidebar,
-                        None,
-                        Some(16.0),
-                    ) {
+                    if let Err(e) =
+                        apply_vibrancy(&window, NSVisualEffectMaterial::Sidebar, None, Some(16.0))
+                    {
                         tracing::warn!("window vibrancy: {e}");
                     }
                 }
@@ -181,7 +197,8 @@ pub fn run() {
                 // Windows / others: solid base matching dark theme (avoids white flash / WebView2 glitches).
                 #[cfg(not(target_os = "macos"))]
                 {
-                    let _ = window.set_background_color(Some(tauri::window::Color(13, 13, 13, 255)));
+                    let _ =
+                        window.set_background_color(Some(tauri::window::Color(13, 13, 13, 255)));
                 }
             }
             // Menu-bar / system tray — logo.svg tray icon (not dock app icon)
@@ -203,6 +220,7 @@ pub fn run() {
             commands::session_get_state,
             commands::session_connect,
             commands::session_send,
+            commands::session_send_v2,
             commands::session_stop,
             commands::session_disconnect,
             commands::session_reattach,
@@ -235,6 +253,12 @@ pub fn run() {
             commands::memory_candidates_list_v1,
             commands::memory_recall_preview_v1,
             commands::memory_context_pack_build_v1,
+            commands::memory_injections_list_v1,
+            commands::memory_injection_feedback_v1,
+            commands::memory_injection_remove_v1,
+            commands::memory_export_v1,
+            commands::memory_clear_preview_v1,
+            commands::memory_clear_confirm_v1,
             commands::memory_candidate_create_v1,
             commands::memory_candidate_approve_v1,
             commands::memory_candidate_reject_v1,
@@ -247,6 +271,7 @@ pub fn run() {
             commands::pick_cli_binary,
             commands::open_external_url,
             commands::projects_list,
+            commands::project_git_summary_v1,
             commands::project_add,
             commands::project_add_dialog,
             commands::project_remove,
@@ -295,6 +320,11 @@ pub fn run() {
             commands::export_session_bundle,
             commands::reset_app_data,
             commands::skills_list,
+            commands::skill_inventory_v1,
+            commands::skill_metadata_rank_v1,
+            commands::skill_uses_list_v1,
+            commands::skill_use_feedback_v1,
+            commands::skill_improvement_proposal_v1,
             commands::inspect_mcp,
             commands::extensions_get,
             commands::extensions_set_mcp,

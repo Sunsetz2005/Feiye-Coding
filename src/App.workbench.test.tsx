@@ -37,10 +37,11 @@ const apiListenerCapture = vi.hoisted(() => ({
     state: "idle",
     lastError: null,
     streamingMessageId: null,
-    backend: "grok_agent_stdio",
+    backend: "sunsetz",
     title: "",
   },
   sessions: [] as Array<Record<string, unknown>>,
+  projects: [] as Array<Record<string, unknown>>,
   interactionRows: [] as Array<Record<string, unknown>>,
   candidateResponses: [] as Array<Array<Record<string, unknown>>>,
   searchHits: [] as Array<Record<string, unknown>>,
@@ -52,10 +53,32 @@ const apiListenerCapture = vi.hoisted(() => ({
     state: "ready",
     lastError: null,
     streamingMessageId: null,
-    backend: "grok_agent_stdio",
+    backend: "sunsetz",
     title: "Scheduled",
   })),
   sessionSend: vi.fn(async () => undefined),
+  sessionSendV2: vi.fn(async () => ({
+    version: 2,
+    snapshot: {
+      sessionId: "memory-session",
+      agentSessionId: "agent",
+      state: "streaming",
+      lastError: null,
+      streamingMessageId: "memory-stream",
+      backend: "sunsetz",
+      title: "Memory",
+    },
+  })),
+  skillInventory: vi.fn(async () => ({
+    version: 1,
+    items: [] as Array<Record<string, unknown>>,
+  })),
+  skillRank: vi.fn(async () => ({
+    version: 1,
+    disposition: "suggestion_only",
+    requiresExplicitAcceptance: true,
+    items: [],
+  })),
   sessionAutoTitle: vi.fn(async () => null),
   pathsClassify: vi.fn(async (paths: string[]) =>
     paths.map((path) => ({
@@ -144,7 +167,7 @@ vi.mock("@/lib/api", async (importOriginal) => {
       };
     }),
     sessionResolvePlan: apiListenerCapture.resolvePlan,
-    projectsList: vi.fn(async () => []),
+    projectsList: vi.fn(async () => apiListenerCapture.projects),
     sessionsList: vi.fn(async () => apiListenerCapture.sessions),
     settingsGet: apiListenerCapture.settingsGet,
     probeCli: vi.fn(async () => ({
@@ -176,6 +199,9 @@ vi.mock("@/lib/api", async (importOriginal) => {
     sessionDisconnect: apiListenerCapture.sessionDisconnect,
     sessionConnect: apiListenerCapture.sessionConnect,
     sessionSend: apiListenerCapture.sessionSend,
+    sessionSendV2: apiListenerCapture.sessionSendV2,
+    skillInventoryV1: apiListenerCapture.skillInventory,
+    skillMetadataRankV1: apiListenerCapture.skillRank,
     sessionAutoTitle: apiListenerCapture.sessionAutoTitle,
     pathsClassify: apiListenerCapture.pathsClassify,
     automationClaimBindV1: apiListenerCapture.automationBind,
@@ -311,16 +337,26 @@ beforeEach(() => {
     state: "idle",
     lastError: null,
     streamingMessageId: null,
-    backend: "grok_agent_stdio",
+    backend: "sunsetz",
     title: "",
   };
   apiListenerCapture.sessions = [];
+  apiListenerCapture.projects = [];
   apiListenerCapture.interactionRows = [];
   apiListenerCapture.candidateResponses = [];
   apiListenerCapture.searchHits = [];
   apiListenerCapture.sessionSearch.mockImplementation(async () =>
     apiListenerCapture.searchHits,
   );
+  apiListenerCapture.skillInventory
+    .mockReset()
+    .mockResolvedValue({ version: 1, items: [] });
+  apiListenerCapture.skillRank.mockReset().mockResolvedValue({
+    version: 1,
+    disposition: "suggestion_only",
+    requiresExplicitAcceptance: true,
+    items: [],
+  });
   recoveryCapture.get.mockReset().mockResolvedValue(null);
   recoveryCapture.put.mockReset().mockImplementation(
     async (key: string, _state: unknown, revision: number) => ({
@@ -361,12 +397,15 @@ afterEach(() => {
   apiListenerCapture.sessionDisconnect.mockClear();
   apiListenerCapture.sessionConnect.mockClear();
   apiListenerCapture.sessionSend.mockClear();
+  apiListenerCapture.sessionSendV2.mockClear();
   apiListenerCapture.sessionAutoTitle.mockClear();
   apiListenerCapture.pathsClassify.mockClear();
   apiListenerCapture.automationBind.mockClear();
   apiListenerCapture.automationComplete.mockClear();
   apiListenerCapture.sessionSearch.mockClear();
   apiListenerCapture.sessionMessages.mockClear();
+  apiListenerCapture.skillInventory.mockClear();
+  apiListenerCapture.skillRank.mockClear();
   apiListenerCapture.skillApprove.mockClear();
   apiListenerCapture.settingsSet.mockClear();
   apiListenerCapture.settingsGet.mockClear();
@@ -662,6 +701,357 @@ describe("App workbench integration", () => {
   );
 
   it(
+    "sends an explicitly reviewed Memory pack through the Host-owned v2 path once",
+    async () => {
+      apiListenerCapture.tauri = true;
+      apiListenerCapture.sessionState = {
+        ...apiListenerCapture.sessionState,
+        sessionId: "memory-session",
+        agentSessionId: "agent-memory",
+        state: "ready",
+        title: "Memory",
+      };
+      apiListenerCapture.sessions = [
+        {
+          id: "memory-session",
+          title: "Memory",
+          projectId: null,
+          updatedAt: "2026-08-24T00:00:00Z",
+        },
+      ];
+      const pack = {
+        version: 1 as const,
+        items: [
+          {
+            candidateId: "memory-candidate",
+            contentHash: "a".repeat(64),
+            type: "user_preference" as const,
+            content: "Prefer concise, verified answers.",
+            source: {
+              sessionId: "source-session",
+              messageId: "source-message",
+            },
+          },
+        ],
+      };
+
+      const { default: App } = await import("./App");
+      render(<App />);
+      await screen.findByTestId("workbench-shell");
+
+      act(() => sidebarCapture.current?.account.onSettings());
+      await waitFor(() => expect(settingsCapture.current).not.toBeNull());
+      act(() => settingsCapture.current?.onUseMemoryContext?.(pack));
+      await waitFor(() => {
+        expect(composerCapture.current?.memory?.pack).toEqual(pack);
+      });
+
+      act(() => composerCapture.current?.onDraftChange("Use my reviewed preference"));
+      await waitFor(() => {
+        expect(composerCapture.current?.draft).toBe(
+          "Use my reviewed preference",
+        );
+      });
+      await act(async () => {
+        await composerCapture.current?.onSend();
+      });
+
+      await waitFor(() => {
+        expect(apiListenerCapture.sessionSendV2).toHaveBeenCalledTimes(1);
+      });
+      expect(apiListenerCapture.sessionSendV2).toHaveBeenCalledWith({
+        sessionId: "memory-session",
+        text: expect.any(String),
+        displayText: "Use my reviewed preference",
+        attachments: [],
+        memoryContextPack: {
+          version: 1,
+          selections: [
+            {
+              id: "memory-candidate",
+              expectedContentHash: "a".repeat(64),
+            },
+          ],
+        },
+        skillSelections: [],
+      });
+      expect(apiListenerCapture.sessionSend).not.toHaveBeenCalled();
+      await waitFor(() => {
+        expect(composerCapture.current?.memory?.pack).toBeNull();
+      });
+    },
+    20_000,
+  );
+
+  it(
+    "sends a selected Skill only through the fresh identity and tree-hash v2 path",
+    async () => {
+      apiListenerCapture.tauri = true;
+      apiListenerCapture.sessionState = {
+        ...apiListenerCapture.sessionState,
+        sessionId: "skill-session",
+        agentSessionId: "agent-skill",
+        state: "ready",
+        title: "Skill",
+      };
+      apiListenerCapture.sessions = [
+        {
+          id: "skill-session",
+          title: "Skill",
+          projectId: null,
+          updatedAt: "2026-08-24T00:00:00Z",
+        },
+      ];
+      apiListenerCapture.skillInventory.mockResolvedValue({
+        version: 1,
+        items: [
+          {
+            version: 1,
+            id: "a".repeat(64),
+            name: "review",
+            description: "Review the current change",
+            whenToUse: "Before merging a change",
+            source: "user",
+            path: "/runtime/skills/review",
+            enabled: true,
+            userInvocable: true,
+            treeHash: "b".repeat(64),
+            sourceCandidateId: null,
+          },
+        ],
+      });
+
+      const { default: App } = await import("./App");
+      render(<App />);
+      await screen.findByTestId("workbench-shell");
+      await waitFor(() => {
+        expect(
+          composerCapture.current?.menu.entries.some(
+            (entry) =>
+              entry.kind === "slash" &&
+              entry.item.kind === "skill" &&
+              entry.item.name === "review",
+          ),
+        ).toBe(true);
+      });
+      const skillEntry = composerCapture.current?.menu.entries.find(
+        (entry) =>
+          entry.kind === "slash" &&
+          entry.item.kind === "skill" &&
+          entry.item.name === "review",
+      );
+      if (!skillEntry || skillEntry.kind !== "slash") {
+        throw new Error("review Skill missing from composer");
+      }
+
+      act(() => composerCapture.current?.menu.onSelectSlash(skillEntry.item));
+      await waitFor(() => {
+        expect(composerCapture.current?.draft).toContain("[[skill-v1:review|");
+      });
+      await act(async () => {
+        await composerCapture.current?.onSend();
+      });
+
+      await waitFor(() => {
+        expect(apiListenerCapture.sessionSendV2).toHaveBeenCalledTimes(1);
+      });
+      expect(apiListenerCapture.sessionSendV2).toHaveBeenCalledWith({
+        sessionId: "skill-session",
+        text: expect.stringMatching(/^\/review(?:\n|$)/),
+        displayText: expect.stringContaining("[[skill:review]]"),
+        attachments: [],
+        memoryContextPack: null,
+        skillSelections: [
+          {
+            id: "a".repeat(64),
+            expectedTreeHash: "b".repeat(64),
+            selection: "explicit",
+          },
+        ],
+      });
+      expect(apiListenerCapture.sessionSend).not.toHaveBeenCalled();
+    },
+    20_000,
+  );
+
+  it(
+    "pins an explicitly accepted ranked suggestion into the v1 Skill chip",
+    async () => {
+      apiListenerCapture.tauri = true;
+      apiListenerCapture.sessionState = {
+        ...apiListenerCapture.sessionState,
+        sessionId: "ranked-skill-session",
+        agentSessionId: "agent-ranked-skill",
+        state: "ready",
+        title: "Ranked Skill",
+      };
+      apiListenerCapture.sessions = [
+        {
+          id: "ranked-skill-session",
+          title: "Ranked Skill",
+          projectId: null,
+          updatedAt: "2026-08-24T00:00:00Z",
+        },
+      ];
+      const skillId = "d".repeat(64);
+      const treeHash = "e".repeat(64);
+      const skill = {
+        id: skillId,
+        name: "review",
+        description: "Review the current change",
+        whenToUse: "Before merging a change",
+        source: "user" as const,
+        enabled: true,
+        userInvocable: true,
+        treeHash,
+        sourceCandidateId: null,
+      };
+      apiListenerCapture.skillInventory.mockResolvedValue({
+        version: 1,
+        items: [skill],
+      });
+      apiListenerCapture.skillRank.mockResolvedValue({
+        version: 1,
+        disposition: "suggestion_only",
+        requiresExplicitAcceptance: true,
+        items: [
+          {
+            skill: {
+              id: skillId,
+              name: "review",
+              treeHash,
+              sourceCandidateId: null,
+            },
+            score: 10,
+            matchedTerms: ["review"],
+          },
+        ],
+      });
+
+      const { default: App } = await import("./App");
+      render(<App />);
+      await screen.findByTestId("workbench-shell");
+      await waitFor(() => {
+        expect(
+          composerCapture.current?.menu.entries.some(
+            (entry) =>
+              entry.kind === "slash" &&
+              entry.item.kind === "skill" &&
+              entry.item.name === "review",
+          ),
+        ).toBe(true);
+      });
+
+      act(() =>
+        composerCapture.current?.onDraftChange("Please review this change"),
+      );
+      await waitFor(() => {
+        expect(composerCapture.current?.draft).toBe("Please review this change");
+      });
+      act(() => composerCapture.current?.menu.onTogglePlus());
+      await waitFor(() => {
+        expect(apiListenerCapture.skillRank).toHaveBeenCalledWith(
+          "Please review this change",
+          null,
+          4,
+        );
+      });
+      await waitFor(() => {
+        expect(
+          composerCapture.current?.menu.entries.some(
+            (entry) =>
+              entry.kind === "slash" &&
+              entry.item.kind === "skill" &&
+              entry.item.name === "review" &&
+              entry.item.suggested === true,
+          ),
+        ).toBe(true);
+      });
+      const suggestedEntry = composerCapture.current?.menu.entries.find(
+        (entry) =>
+          entry.kind === "slash" &&
+          entry.item.kind === "skill" &&
+          entry.item.name === "review" &&
+          entry.item.suggested === true,
+      );
+      if (!suggestedEntry || suggestedEntry.kind !== "slash") {
+        throw new Error("ranked review Skill missing from composer");
+      }
+
+      act(() =>
+        composerCapture.current?.menu.onSelectSlash(suggestedEntry.item),
+      );
+      const expectedToken = `[[skill-v1:review|${skillId}|${treeHash}|accepted_suggestion]]`;
+      await waitFor(() => {
+        expect(composerCapture.current?.draft).toBe(
+          `Please review this change ${expectedToken} `,
+        );
+      });
+    },
+    20_000,
+  );
+
+  it(
+    "refuses to rebind a recovered Skill chip when the same name has a new tree",
+    async () => {
+      apiListenerCapture.tauri = true;
+      apiListenerCapture.sessionState = {
+        ...apiListenerCapture.sessionState,
+        sessionId: "skill-session",
+        agentSessionId: "agent-skill",
+        state: "ready",
+        title: "Skill",
+      };
+      apiListenerCapture.sessions = [
+        {
+          id: "skill-session",
+          title: "Skill",
+          projectId: null,
+          updatedAt: "2026-08-24T00:00:00Z",
+        },
+      ];
+      const oldToken = `[[skill-v1:review|${"a".repeat(64)}|${"b".repeat(64)}|accepted_suggestion]]`;
+      recoveryCapture.get.mockImplementation(async (key: string) => ({
+        version: 1,
+        key,
+        revision: 4,
+        state: { draft: oldToken, attachments: [], queue: [] },
+        filteredAttachmentCount: 0,
+        filteredQueueItemCount: 0,
+      }));
+      apiListenerCapture.skillInventory.mockResolvedValue({
+        version: 1,
+        items: [
+          {
+            id: "a".repeat(64),
+            name: "review",
+            description: "Review the current change",
+            whenToUse: "Before merging a change",
+            source: "user",
+            enabled: true,
+            userInvocable: true,
+            treeHash: "c".repeat(64),
+            sourceCandidateId: null,
+          },
+        ],
+      });
+
+      const { default: App } = await import("./App");
+      render(<App />);
+      await screen.findByTestId("workbench-shell");
+      await waitFor(() => expect(composerCapture.current?.draft).toBe(oldToken));
+      await act(async () => {
+        await composerCapture.current?.onSend();
+      });
+
+      expect(apiListenerCapture.sessionSendV2).not.toHaveBeenCalled();
+      expect(apiListenerCapture.sessionSend).not.toHaveBeenCalled();
+      expect(composerCapture.current?.draft).toBe(oldToken);
+    },
+    20_000,
+  );
+
+  it(
     "persists plan mode beside access and can disable it in place",
     async () => {
       const user = userEvent.setup();
@@ -769,6 +1159,8 @@ describe("App workbench integration", () => {
 
       const dock = composerCapture.current;
       if (!dock) throw new Error("composer missing");
+      expect(document.querySelector(".composer-wrap")).toBe(dock.refs.wrap.current);
+      expect(document.querySelector(".composer-dock")).toBeTruthy();
       const modelId = dock.preferences.models[0]?.id ?? "sunsetz-4.5";
       const attachment = {
         path: "/tmp/coverage.png",

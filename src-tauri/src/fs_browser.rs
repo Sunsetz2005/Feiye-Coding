@@ -4,7 +4,6 @@
 use std::fs;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
-use std::time::UNIX_EPOCH;
 
 use base64::Engine;
 use serde::Serialize;
@@ -13,6 +12,8 @@ const MAX_TEXT_BYTES: u64 = 2 * 1024 * 1024; // 2 MiB text preview
 const MAX_BINARY_BYTES: u64 = 8 * 1024 * 1024; // 8 MiB image / pdf
 /// Office packages streamed to the UI for rich render (docx-preview / xlsx / pdf).
 const MAX_OFFICE_STREAM_BYTES: u64 = 40 * 1024 * 1024;
+const MAX_OFFICE_XML_BYTES: usize = MAX_TEXT_BYTES as usize;
+const MAX_OFFICE_XML_ENTRIES: usize = 256;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -117,7 +118,7 @@ fn join_rel(parent: &str, name: &str) -> String {
     }
 }
 
-fn lexical_join(root: &Path, relative: &str) -> Result<PathBuf, String> {
+pub(crate) fn lexical_join(root: &Path, relative: &str) -> Result<PathBuf, String> {
     let rel = normalize_rel(relative);
     let mut out = root.to_path_buf();
     if rel.is_empty() || rel == "." {
@@ -210,9 +211,7 @@ fn mime_of(ext: &str, kind: &str) -> String {
         ("docx", _) => {
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document".into()
         }
-        ("xlsx", _) => {
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet".into()
-        }
+        ("xlsx", _) => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet".into(),
         ("pptx", _) => {
             "application/vnd.openxmlformats-officedocument.presentationml.presentation".into()
         }
@@ -310,20 +309,45 @@ fn decode_entity(s: &str) -> Option<(&'static str, usize)> {
     }
 }
 
+fn read_bounded_utf8(reader: impl Read, max_bytes: usize) -> Result<String, String> {
+    let limit = max_bytes
+        .checked_add(1)
+        .ok_or_else(|| "office preview limit overflow".to_string())?;
+    let mut bytes = Vec::with_capacity(limit.min(64 * 1024));
+    reader
+        .take(limit as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("read office XML: {error}"))?;
+    let truncated = bytes.len() > max_bytes;
+    bytes.truncate(max_bytes);
+    let mut text = String::from_utf8_lossy(&bytes).into_owned();
+    if text.len() > max_bytes {
+        let mut boundary = max_bytes;
+        while !text.is_char_boundary(boundary) {
+            boundary = boundary.saturating_sub(1);
+        }
+        text.truncate(boundary);
+    }
+    if truncated {
+        text.push_str("\n[Preview truncated]");
+    }
+    Ok(text)
+}
+
 fn read_zip_entry_text(path: &Path, entry_name: &str) -> Result<String, String> {
     let file = fs::File::open(path).map_err(|e| format!("open zip: {e}"))?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("zip: {e}"))?;
     let mut entry = archive
         .by_name(entry_name)
         .map_err(|e| format!("zip entry {entry_name}: {e}"))?;
-    let mut buf = String::new();
-    entry
-        .read_to_string(&mut buf)
-        .map_err(|e| format!("read zip entry: {e}"))?;
-    Ok(buf)
+    read_bounded_utf8(&mut entry, MAX_OFFICE_XML_BYTES)
 }
 
-fn read_zip_entries_matching(path: &Path, prefix: &str, suffix: &str) -> Result<Vec<String>, String> {
+fn read_zip_entries_matching(
+    path: &Path,
+    prefix: &str,
+    suffix: &str,
+) -> Result<Vec<String>, String> {
     let file = fs::File::open(path).map_err(|e| format!("open zip: {e}"))?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("zip: {e}"))?;
     let mut names: Vec<String> = Vec::new();
@@ -332,17 +356,24 @@ fn read_zip_entries_matching(path: &Path, prefix: &str, suffix: &str) -> Result<
         let name = entry.name().to_string();
         if name.starts_with(prefix) && name.ends_with(suffix) {
             names.push(name);
+            if names.len() >= MAX_OFFICE_XML_ENTRIES {
+                break;
+            }
         }
     }
     names.sort();
     let mut texts = Vec::new();
+    let mut remaining = MAX_OFFICE_XML_BYTES;
     for name in names {
+        if remaining == 0 {
+            break;
+        }
         let mut entry = archive
             .by_name(&name)
             .map_err(|e| format!("zip entry {name}: {e}"))?;
-        let mut buf = String::new();
-        if entry.read_to_string(&mut buf).is_ok() {
-            texts.push(buf);
+        if let Ok(text) = read_bounded_utf8(&mut entry, remaining) {
+            remaining = remaining.saturating_sub(text.len().min(remaining));
+            texts.push(text);
         }
     }
     Ok(texts)
@@ -547,9 +578,7 @@ fn write_text_at_path(
         .ok_or_else(|| "invalid parent directory".to_string())?;
     let tmp_name = format!(
         ".{}.grok-save-{}",
-        path.file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("file"),
+        path.file_name().and_then(|s| s.to_str()).unwrap_or("file"),
         std::process::id()
     );
     let tmp = parent.join(tmp_name);
@@ -773,7 +802,9 @@ pub fn open_path_smart(project_root: Option<&str>, path: &str) -> Result<FsReadR
                     let segs: Vec<_> = Path::new(rel)
                         .components()
                         .filter_map(|c| match c {
-                            std::path::Component::Normal(s) => Some(s.to_string_lossy().into_owned()),
+                            std::path::Component::Normal(s) => {
+                                Some(s.to_string_lossy().into_owned())
+                            }
                             _ => None,
                         })
                         .collect();
@@ -990,10 +1021,7 @@ fn find_one_suffix(root: &Path, suffix: &str) -> Option<PathBuf> {
 
 /// Build suffix search keys from a path: full rel, then shorter tails.
 fn suffix_candidates(path: &str) -> Vec<String> {
-    let t = path
-        .trim()
-        .trim_start_matches("./")
-        .replace('\\', "/");
+    let t = path.trim().trim_start_matches("./").replace('\\', "/");
     let t = t.trim_start_matches('/');
     if t.is_empty() {
         return Vec::new();
@@ -1094,17 +1122,7 @@ fn read_path(path: PathBuf, rel_in: String) -> Result<FsReadResult, String> {
     // Video / audio — always stream via absolute path (no base64; supports multi‑GB files)
     if matches!(kind.as_str(), "video" | "audio") {
         return Ok(ok_result(
-            &path,
-            rel_in,
-            name,
-            size,
-            kind,
-            mime,
-            None,
-            None,
-            true,
-            false,
-            None,
+            &path, rel_in, name, size, kind, mime, None, None, true, false, None,
         ));
     }
 
@@ -1129,17 +1147,7 @@ fn read_path(path: PathBuf, rel_in: String) -> Result<FsReadResult, String> {
         // Prefer stream for anything over 2 MiB (webview loads via asset protocol)
         if size > 2 * 1024 * 1024 {
             return Ok(ok_result(
-                &path,
-                rel_in,
-                name,
-                size,
-                kind,
-                mime,
-                None,
-                None,
-                true,
-                false,
-                None,
+                &path, rel_in, name, size, kind, mime, None, None, true, false, None,
             ));
         }
         let bytes = fs::read(&path).map_err(|e| format!("read: {e}"))?;
@@ -1320,10 +1328,7 @@ mod tests {
     fn open_path_smart_bare_filename_under_projects() {
         // Agent often writes just `continuation-handoff.md` after citing the full path.
         let dir = tempfile_dir();
-        let nested = dir
-            .join("projects")
-            .join("2026-07-demo")
-            .join("05-handoff");
+        let nested = dir.join("projects").join("2026-07-demo").join("05-handoff");
         fs::create_dir_all(&nested).unwrap();
         // noise that would exhaust a shallow/unprioritized walk
         for i in 0..40 {
@@ -1399,7 +1404,10 @@ mod tests {
         fs::write(b.join(name), b"b\n").unwrap();
         // Two same basenames → must not pick either arbitrarily.
         let r = open_path_smart(Some(dir.to_str().unwrap()), name);
-        assert!(r.is_err(), "expected ambiguous bare name to fail, got {r:?}");
+        assert!(
+            r.is_err(),
+            "expected ambiguous bare name to fail, got {r:?}"
+        );
         // Multi-segment still works.
         let r2 = open_path_smart(
             Some(dir.to_str().unwrap()),
@@ -1434,6 +1442,26 @@ mod tests {
     }
 
     #[test]
+    fn office_xml_reader_never_expands_beyond_preview_budget() {
+        let oversized = vec![b'x'; MAX_OFFICE_XML_BYTES + 4096];
+        let text =
+            read_bounded_utf8(std::io::Cursor::new(oversized), MAX_OFFICE_XML_BYTES).unwrap();
+        assert!(text.starts_with('x'));
+        assert!(text.contains("[Preview truncated]"));
+        assert!(text.len() <= MAX_OFFICE_XML_BYTES + "\n[Preview truncated]".len());
+    }
+
+    #[test]
+    fn office_xml_reader_bounds_invalid_utf8_replacement_expansion() {
+        let invalid = vec![0xff; MAX_OFFICE_XML_BYTES + 1];
+        let text = read_bounded_utf8(std::io::Cursor::new(invalid), MAX_OFFICE_XML_BYTES)
+            .expect("bounded invalid UTF-8 read");
+
+        assert!(text.len() <= MAX_OFFICE_XML_BYTES + "\n[Preview truncated]".len());
+        assert!(text.ends_with("\n[Preview truncated]"));
+    }
+
+    #[test]
     fn write_text_roundtrip_and_mtime() {
         let dir = tempfile_dir();
         let rel = "notes/hello.md";
@@ -1441,13 +1469,7 @@ mod tests {
         fs::write(dir.join(rel), b"v1\n").unwrap();
         let r = read_file(dir.to_str().unwrap(), rel).unwrap();
         assert!(r.mtime_ms > 0 || cfg!(target_os = "windows"));
-        let w = write_text_file(
-            dir.to_str().unwrap(),
-            rel,
-            "v2\n",
-            Some(r.mtime_ms),
-        )
-        .unwrap();
+        let w = write_text_file(dir.to_str().unwrap(), rel, "v2\n", Some(r.mtime_ms)).unwrap();
         assert_eq!(fs::read_to_string(dir.join(rel)).unwrap(), "v2\n");
         assert_eq!(w.size, 3);
         let _ = fs::remove_dir_all(&dir);
@@ -1465,12 +1487,8 @@ mod tests {
         } else {
             r.mtime_ms.wrapping_add(1_000_000)
         };
-        let err = write_text_file(dir.to_str().unwrap(), rel, "mine\n", Some(stale))
-            .unwrap_err();
-        assert!(
-            err.starts_with("CONFLICT:"),
-            "expected conflict, got {err}"
-        );
+        let err = write_text_file(dir.to_str().unwrap(), rel, "mine\n", Some(stale)).unwrap_err();
+        assert!(err.starts_with("CONFLICT:"), "expected conflict, got {err}");
         assert_eq!(fs::read_to_string(dir.join(rel)).unwrap(), "disk\n");
         // Force overwrite without expected mtime.
         write_text_file(dir.to_str().unwrap(), rel, "mine\n", None).unwrap();
@@ -1515,4 +1533,3 @@ mod tests {
         p
     }
 }
-

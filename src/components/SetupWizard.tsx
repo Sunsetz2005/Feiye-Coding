@@ -1,5 +1,6 @@
 /**
- * Full-screen first-run gate: install Sunsetz Runtime (required) → account (skippable) → enter home.
+ * Full-screen first-run gate: account (skippable) → enter home.
+ * Grok CLI is optional legacy and never blocks the workbench.
  * No page scrollbars; content is centered and compact.
  */
 
@@ -49,7 +50,7 @@ export function SetupWizard({
   onComplete,
   onAccountLoginOauth,
 }: Props) {
-  const [step, setStep] = useState<Step>(initialCli.found ? "account" : "runtime");
+  const [step, setStep] = useState<Step>("account");
   const [cli, setCli] = useState<SetupCliInfo>(initialCli);
   const [probing, setProbing] = useState(false);
   const [installing, setInstalling] = useState(false);
@@ -220,6 +221,7 @@ export function SetupWizard({
           authSetupDeferred: opts.authDeferred && !opts.authOk,
           onboardingDone: true,
           setupSkipped: opts.authDeferred && !opts.authOk,
+          runtimeBackend: "sunsetz",
         });
       } catch {
         /* still enter if probe ok */
@@ -230,9 +232,8 @@ export function SetupWizard({
   );
 
   const goAccountContinue = useCallback(() => {
-    if (!cli.found) return;
     setStep("ready");
-  }, [cli.found]);
+  }, []);
 
   const skipAccount = useCallback(() => {
     setAuthDeferred(true);
@@ -424,7 +425,7 @@ export function SetupWizard({
               className={
                 "setup-steps__item" +
                 (i === stepIndex ? " is-active" : "") +
-                (i < stepIndex ? " is-done" : "")
+                (i === 0 || i < stepIndex ? " is-done" : "")
               }
             >
               <span className="setup-steps__dot" />
@@ -440,14 +441,14 @@ export function SetupWizard({
                 <h2>
                   {cli.found
                     ? tr("setup.cli.found")
-                    : tr("setup.cli.required")}
+                    : tr("setup.cli.optional")}
                 </h2>
                 <p>
                   {cli.found
                     ? tr("setup.cli.foundHint", {
                         version: cli.version || "—",
                       })
-                    : tr("setup.cli.requiredHint")}
+                    : tr("setup.cli.optionalHint")}
                 </p>
                 {cli.path && (
                   <p className="setup-mono">
@@ -488,18 +489,18 @@ export function SetupWizard({
               )}
 
               <div className="setup-actions">
-                {cli.found ? (
+                <button
+                  type="button"
+                  className="btn btn--primary setup-btn-primary"
+                  disabled={installing}
+                  onClick={() => setStep("account")}
+                >
+                  {cli.found ? tr("setup.continue") : tr("setup.cli.skip")}
+                </button>
+                {!cli.found && (
                   <button
                     type="button"
-                    className="btn btn--primary setup-btn-primary"
-                    onClick={() => setStep("account")}
-                  >
-                    {tr("setup.continue")}
-                  </button>
-                ) : (
-                  <button
-                    type="button"
-                    className="btn btn--primary setup-btn-primary"
+                    className="btn btn--ghost"
                     disabled={installing || probing}
                     onClick={() => void runInstall()}
                   >
@@ -611,6 +612,15 @@ export function SetupWizard({
                   >
                     <strong>{tr("setup.account.importGo")}</strong>
                     <span>{tr("onboarding.importGoHint")}</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="setup-entry"
+                    disabled={accountBusy}
+                    onClick={() => setStep("runtime")}
+                  >
+                    <strong>{tr("setup.cli.legacy")}</strong>
+                    <span>{tr("setup.cli.optionalHint")}</span>
                   </button>
                 </div>
               )}
@@ -757,7 +767,6 @@ export function SetupWizard({
                 <button
                   type="button"
                   className="btn btn--primary setup-btn-primary"
-                  disabled={!cli.found}
                   onClick={() =>
                     void finishWizard({
                       authDeferred: authDeferred || !authOk,

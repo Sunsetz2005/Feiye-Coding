@@ -231,7 +231,11 @@ pub fn repair_custom_base_urls() -> Result<bool, String> {
                 .get("model")
                 .cloned()
                 .unwrap_or_else(|| s.id.clone());
-            let name = s.fields.get("name").cloned().unwrap_or_else(|| s.id.clone());
+            let name = s
+                .fields
+                .get("name")
+                .cloned()
+                .unwrap_or_else(|| s.id.clone());
             let key = s.fields.get("api_key").cloned().unwrap_or_default();
             out = remove_section(&out, &s.id);
             out = append_section(
@@ -265,7 +269,10 @@ pub fn repair_custom_base_urls() -> Result<bool, String> {
 }
 
 fn model_header(id: &str) -> String {
-    if id.chars().any(|c| !(c.is_ascii_alphanumeric() || c == '_' || c == '-')) {
+    if id
+        .chars()
+        .any(|c| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+    {
         format!("[model.{}]", quote(id))
     } else {
         format!("[model.{id}]")
@@ -551,7 +558,11 @@ fn build_list_result(home: PathBuf, path: PathBuf, text: &str) -> ProvidersListR
             .cloned()
             .unwrap_or_else(|| s.id.clone());
         let base_url = s.fields.get("base_url").cloned().unwrap_or_default();
-        let name = s.fields.get("name").cloned().unwrap_or_else(|| s.id.clone());
+        let name = s
+            .fields
+            .get("name")
+            .cloned()
+            .unwrap_or_else(|| s.id.clone());
         let has_api_key = s
             .fields
             .get("api_key")
@@ -569,8 +580,7 @@ fn build_list_result(home: PathBuf, path: PathBuf, text: &str) -> ProvidersListR
             is_default,
         });
     }
-    let (active_source, active_provider_id) =
-        route_from_default(def.as_deref(), &providers);
+    let (active_source, active_provider_id) = route_from_default(def.as_deref(), &providers);
     ProvidersListResult {
         providers,
         default_model: def,
@@ -592,10 +602,7 @@ pub fn list_custom_providers() -> Result<ProvidersListResult, String> {
 pub fn active_route() -> ActiveRoute {
     match list_custom_providers() {
         Ok(list) if list.active_source == "custom" => {
-            if let Some(id) = list
-                .active_provider_id
-                .filter(|s| !s.trim().is_empty())
-            {
+            if let Some(id) = list.active_provider_id.filter(|s| !s.trim().is_empty()) {
                 return ActiveRoute::Custom { id };
             }
             ActiveRoute::Official
@@ -801,7 +808,7 @@ pub fn set_default_model_id(model_id: &str) -> Result<ProvidersListResult, Strin
     list_custom_providers()
 }
 
-fn resolve_stored_key(provider_id: Option<&str>) -> String {
+pub(crate) fn resolve_stored_key(provider_id: Option<&str>) -> String {
     let Some(pid) = provider_id.map(str::trim).filter(|s| !s.is_empty()) else {
         return String::new();
     };
@@ -999,11 +1006,7 @@ mod tests {
         )
         .is_err());
         assert_eq!(
-            validate_and_normalize_base_url(
-                "https://api.example.com",
-                "responses"
-            )
-            .unwrap(),
+            validate_and_normalize_base_url("https://api.example.com", "responses").unwrap(),
             "https://api.example.com/v1"
         );
     }

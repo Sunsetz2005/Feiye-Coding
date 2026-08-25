@@ -1,4 +1,6 @@
-# SPIKE · Grok Build ACP (`grok agent stdio`)
+# SPIKE · Grok Build ACP (`grok agent stdio`) — legacy adapter
+
+The product runtime is the in-process Sunsetz agent loop. This note documents the retained Grok ACP adapter, enabled only with `runtimeBackend=grok_acp` or `SUNSETZ_RUNTIME_BACKEND=grok_acp`.
 
 **Date:** 2026-07-21  
 **CLI used for the original protocol capture:** `grok 0.2.106` (`~/.grok/bin/grok`)

@@ -1,10 +1,10 @@
 # Runtime 成熟能力增量迁移 v1
 
-本文是 2026-08 增量迁移的权威边界说明。架构保持单内核：
+本文是 2026-08 增量迁移的权威边界说明。产品内核归 Sunsetz 所有：
 
-`Tauri Host → ACP → Sunsetz Runtime`
+`Tauri 工作台 → Host 会话层 → Sunsetz agent loop（默认）`
 
-不得在应用内引入第二套 Agent Loop、工具执行器或 Provider 调用栈。第三方项目只作为设计与契约研究材料；本轮没有复制 OpenWork `/ee` 或其他受限源码。
+默认不再 spawn `grok agent stdio`。Grok ACP 适配器保留在显式 legacy 开关后（`runtimeBackend=grok_acp` / `SUNSETZ_RUNTIME_BACKEND=grok_acp`），本切片不删除。第一切片工具只有可信项目根内的 `read_file` 与 `list_directory`。第三方项目只作为设计与契约研究材料；本轮没有复制 OpenWork `/ee` 或其他受限源码。
 
 ## 交互生命周期
 

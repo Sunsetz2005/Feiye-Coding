@@ -61,7 +61,424 @@ pub async fn session_send(
     display_text: Option<String>,
     attachments: Option<Vec<store::MessageAttachmentStored>>,
 ) -> Result<SessionSnapshot, String> {
-    mgr.send_message(app, text, display_text, attachments).await
+    if !agent_skill_names_requiring_verification(&text).is_empty() {
+        return Err(
+            "SKILL_USE_UNVERIFIED: non-builtin slash invocations require session_send_v2 verification"
+                .into(),
+        );
+    }
+    let expected_session_id = mgr
+        .snapshot()
+        .session_id
+        .ok_or_else(|| "no active session".to_string())?;
+    mgr.send_message_for_session(app, expected_session_id, text, display_text, attachments)
+        .await
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SessionSendRequestV2 {
+    pub version: u8,
+    pub session_id: String,
+    pub text: String,
+    pub display_text: Option<String>,
+    pub attachments: Option<Vec<store::MessageAttachmentStored>>,
+    pub memory_context_pack: Option<crate::memory_candidates::MemoryContextPackRequestV1>,
+    pub memory_retry: Option<crate::memory_injection::MemoryInjectionRetryRequestV1>,
+    #[serde(default)]
+    pub skill_selections: Vec<crate::skill_feedback::SkillSelectionRequestV1>,
+}
+
+fn skill_names_from_display_text(display_text: Option<&str>) -> Result<Vec<String>, String> {
+    let value = display_text.unwrap_or_default();
+    if value.len() > 256 * 1024 {
+        return Err("SKILL_USE_LIMIT: display text is too large to verify".into());
+    }
+    let mut remaining = value;
+    let mut names = Vec::new();
+    while let Some(start) = remaining.find("[[skill:") {
+        remaining = &remaining[start + "[[skill:".len()..];
+        let end = remaining
+            .find("]]")
+            .ok_or_else(|| "SKILL_USE_INVALID: unterminated Skill marker".to_string())?;
+        let name = remaining[..end].trim();
+        if name.is_empty() || name.chars().any(char::is_control) {
+            return Err("SKILL_USE_INVALID: invalid Skill marker".into());
+        }
+        names.push(name.to_lowercase());
+        remaining = &remaining[end + 2..];
+    }
+    names.sort();
+    names.dedup();
+    Ok(names)
+}
+
+fn leading_agent_slash_names(text: &str) -> Vec<String> {
+    let mut lines = text.trim_start().lines();
+    let mut first = lines.next().unwrap_or_default().trim();
+    if first.eq_ignore_ascii_case("/goal") {
+        first = lines.next().unwrap_or_default().trim();
+    }
+    if first.is_empty() {
+        return Vec::new();
+    }
+    let tokens = first.split_whitespace().collect::<Vec<_>>();
+    if tokens.is_empty()
+        || tokens.iter().any(|token| {
+            !token.starts_with('/')
+                || token.len() == 1
+                || !token[1..].bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b':' | b'-')
+                })
+        })
+    {
+        return Vec::new();
+    }
+    let mut names = tokens
+        .into_iter()
+        .map(|token| token[1..].to_lowercase())
+        .filter(|name| name != "goal")
+        .collect::<Vec<_>>();
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn agent_form_slash_names(text: &str) -> Vec<String> {
+    let mut names = leading_agent_slash_names(text);
+    // Automation setup wraps the canonical user body in a Host-defined prefix.
+    // Verify the body as well so a Skill invocation cannot disappear behind the
+    // scheduling instructions. Any user-authored marker still has to match the
+    // display marker, fresh inventory identity, and explicit selection exactly.
+    if let Some((_, user_body)) = text.rsplit_once("\nUser request:\n") {
+        names.extend(leading_agent_slash_names(user_body));
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
+const HOST_AGENT_BUILTIN_SLASHES_V1: &[&str] = &[
+    "goal",
+    "plan",
+    "compact",
+    "status",
+    "mcp",
+    "doctor",
+    "new",
+    "newchat",
+    "automations",
+    "settings",
+    "yolo",
+    "always-approve",
+    "loop",
+    "model",
+    "effort",
+    "help",
+    "clear",
+    "resume",
+    "export",
+    "copy",
+    "feedback",
+];
+
+fn agent_skill_names_requiring_verification(text: &str) -> Vec<String> {
+    agent_form_slash_names(text)
+        .into_iter()
+        .filter(|name| !HOST_AGENT_BUILTIN_SLASHES_V1.contains(&name.as_str()))
+        .collect()
+}
+
+fn verify_skill_selections(
+    inventory: &crate::skill_inventory::SkillMetadataInventoryV1,
+    selections: &[crate::skill_feedback::SkillSelectionRequestV1],
+    display_text: Option<&str>,
+    agent_text: &str,
+) -> Result<
+    Vec<(
+        crate::skill_feedback::SkillIdentityV1,
+        crate::skill_feedback::SkillUseSelectionV1,
+    )>,
+    String,
+> {
+    if selections.len() > crate::skill_feedback::MAX_SKILLS_PER_TURN {
+        return Err(format!(
+            "SKILL_USE_LIMIT: at most {} Skills per turn",
+            crate::skill_feedback::MAX_SKILLS_PER_TURN
+        ));
+    }
+    let marker_names = skill_names_from_display_text(display_text)?;
+    let agent_skill_names = agent_skill_names_requiring_verification(agent_text);
+    if selections.is_empty() {
+        if marker_names.is_empty() && agent_skill_names.is_empty() {
+            return Ok(Vec::new());
+        }
+        return Err("SKILL_USE_UNVERIFIED: Skill markers require verified selections".into());
+    }
+    let mut ids = std::collections::HashSet::new();
+    let mut selected_names = std::collections::HashSet::new();
+    let mut names = Vec::with_capacity(selections.len());
+    let mut verified = Vec::with_capacity(selections.len());
+    for selection in selections {
+        if !ids.insert(selection.id.as_str()) {
+            return Err("SKILL_USE_INVALID: duplicate Skill selection".into());
+        }
+        let item = crate::skill_inventory::verify_selection_v1(
+            &selection.id,
+            &selection.expected_tree_hash,
+            inventory,
+        )?;
+        if !item.enabled || !item.user_invocable {
+            return Err("SKILL_USE_UNAVAILABLE: Skill is disabled or not user-invocable".into());
+        }
+        let normalized_name = item.name.to_lowercase();
+        if !selected_names.insert(normalized_name.clone()) {
+            return Err("SKILL_USE_INVALID: duplicate Skill name selection".into());
+        }
+        names.push(normalized_name);
+        verified.push((
+            crate::skill_feedback::SkillIdentityV1 {
+                id: item.id,
+                name: item.name,
+                tree_hash: item.tree_hash,
+                source_candidate_id: item.source_candidate_id,
+            },
+            selection.selection,
+        ));
+    }
+    names.sort();
+    names.dedup();
+    if names != marker_names || names != agent_skill_names {
+        return Err("SKILL_USE_UNVERIFIED: Skill markers and verified selections differ".into());
+    }
+    Ok(verified)
+}
+
+fn transition_skill_use_records(
+    records: &[crate::skill_feedback::SkillUseRecordV1],
+    next_status: crate::skill_feedback::SkillUseStatusV1,
+) -> Result<Vec<crate::skill_feedback::SkillUseRecordV1>, String> {
+    if records.is_empty() {
+        return Ok(Vec::new());
+    }
+    crate::skill_feedback::transition_uses_v1(
+        records
+            .iter()
+            .map(
+                |record| crate::skill_feedback::SkillUseTransitionRequestV1 {
+                    version: crate::skill_feedback::SKILL_FEEDBACK_VERSION,
+                    id: record.id.clone(),
+                    expected_revision: record.revision,
+                    expected_skill_tree_hash: record.skill.tree_hash.clone(),
+                    next_status,
+                },
+            )
+            .collect(),
+    )
+}
+
+/// Versioned send path. Reviewed Memory is prepared by the Host, never by the
+/// WebView, and the generated prompt fragment is not returned to JavaScript.
+#[tauri::command]
+pub async fn session_send_v2(
+    app: tauri::AppHandle,
+    mgr: State<'_, Arc<SessionManager>>,
+    request: SessionSendRequestV2,
+) -> Result<crate::session_manager::SessionSendResultV2, String> {
+    if request.version != 2 {
+        return Err(format!(
+            "unsupported session send version: {}",
+            request.version
+        ));
+    }
+    if request.session_id.trim() != request.session_id || request.session_id.is_empty() {
+        return Err("sessionId is required".into());
+    }
+    if request.text.trim().is_empty() {
+        return Err("empty message".into());
+    }
+    if request.memory_context_pack.is_some() && request.memory_retry.is_some() {
+        return Err("memoryContextPack and memoryRetry are mutually exclusive".into());
+    }
+    let snapshot = mgr.snapshot();
+    if snapshot.session_id.as_deref() != Some(request.session_id.as_str()) {
+        return Err("SESSION_SEND_STALE: active session changed".into());
+    }
+    if snapshot.state != crate::session_fsm::SessionState::Ready {
+        return Err("SESSION_SEND_BUSY: active session is not ready".into());
+    }
+
+    let needs_skill_inventory = !request.skill_selections.is_empty()
+        || !agent_skill_names_requiring_verification(&request.text).is_empty();
+    let skill_selections = if !needs_skill_inventory {
+        verify_skill_selections(
+            &crate::skill_inventory::SkillMetadataInventoryV1 {
+                version: crate::skill_inventory::SKILL_INVENTORY_VERSION,
+                items: Vec::new(),
+            },
+            &[],
+            request.display_text.as_deref(),
+            &request.text,
+        )?
+    } else {
+        let project_path = snapshot.project_path.clone();
+        let requested = request.skill_selections.clone();
+        let display_text = request.display_text.clone();
+        let agent_text = request.text.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            let inventory = fresh_skill_inventory(project_path.as_deref())?;
+            verify_skill_selections(&inventory, &requested, display_text.as_deref(), &agent_text)
+        })
+        .await
+        .map_err(|error| error.to_string())??
+    };
+    let turn_id = uuid::Uuid::new_v4().to_string();
+    let session_id_for_skills = request.session_id.clone();
+    let turn_id_for_skills = turn_id.clone();
+    let prepared_skill_uses = if skill_selections.is_empty() {
+        Vec::new()
+    } else {
+        tauri::async_runtime::spawn_blocking(move || {
+            crate::skill_feedback::prepare_uses_v1(
+                skill_selections
+                    .into_iter()
+                    .map(
+                        |(skill, selection)| crate::skill_feedback::SkillUsePrepareRequestV1 {
+                            version: crate::skill_feedback::SKILL_FEEDBACK_VERSION,
+                            selection,
+                            session_id: session_id_for_skills.clone(),
+                            turn_id: turn_id_for_skills.clone(),
+                            skill,
+                        },
+                    )
+                    .collect(),
+            )
+        })
+        .await
+        .map_err(|error| error.to_string())??
+    };
+
+    let session_id = request.session_id.clone();
+    let memory_result: Result<Option<crate::memory_injection::MemoryInjectionPreparedV1>, String> =
+        match (request.memory_context_pack, request.memory_retry) {
+            (Some(context_pack), None) => match tauri::async_runtime::spawn_blocking(move || {
+                crate::memory_injection::prepare_memory_injection_v1(
+                    crate::memory_injection::MemoryInjectionPrepareRequestV1 {
+                        version: crate::memory_injection::MEMORY_INJECTION_VERSION,
+                        session_id,
+                        context_pack,
+                    },
+                )
+            })
+            .await
+            {
+                Ok(result) => result.map(Some),
+                Err(error) => Err(error.to_string()),
+            },
+            (None, Some(retry)) => {
+                if retry.session_id != request.session_id {
+                    Err("MEMORY_INJECTION_SESSION_MISMATCH".into())
+                } else {
+                    match tauri::async_runtime::spawn_blocking(move || {
+                        crate::memory_injection::retry_memory_injection_v1(retry)
+                    })
+                    .await
+                    {
+                        Ok(result) => result.map(Some),
+                        Err(error) => Err(error.to_string()),
+                    }
+                }
+            }
+            (None, None) => Ok(None),
+            (Some(_), Some(_)) => unreachable!(),
+        };
+    let memory = match memory_result {
+        Ok(memory) => memory,
+        Err(error) => {
+            let prepared = prepared_skill_uses.clone();
+            let _ = tauri::async_runtime::spawn_blocking(move || {
+                transition_skill_use_records(
+                    &prepared,
+                    crate::skill_feedback::SkillUseStatusV1::Interrupted,
+                )
+            })
+            .await;
+            return Err(error);
+        }
+    };
+
+    if !prepared_skill_uses.is_empty() {
+        let project_path = snapshot.project_path.clone();
+        let expected = prepared_skill_uses
+            .iter()
+            .map(|record| crate::skill_feedback::SkillSelectionRequestV1 {
+                id: record.skill.id.clone(),
+                expected_tree_hash: record.skill.tree_hash.clone(),
+                selection: record.selection,
+            })
+            .collect::<Vec<_>>();
+        let display_text = request.display_text.clone();
+        let agent_text = request.text.clone();
+        let final_verification = match tauri::async_runtime::spawn_blocking(move || {
+            let inventory = fresh_skill_inventory(project_path.as_deref())?;
+            verify_skill_selections(&inventory, &expected, display_text.as_deref(), &agent_text)?;
+            Ok::<(), String>(())
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(error) => Err(format!("final Runtime verification task failed: {error}")),
+        };
+        if let Err(error) = final_verification {
+            let prepared = prepared_skill_uses.clone();
+            let _ = tauri::async_runtime::spawn_blocking(move || {
+                transition_skill_use_records(
+                    &prepared,
+                    crate::skill_feedback::SkillUseStatusV1::Interrupted,
+                )
+            })
+            .await;
+            if let Some(prepared_memory) = memory.as_ref() {
+                let _ = crate::memory_injection::mark_memory_injection_failed_v1(
+                    crate::memory_injection::MemoryInjectionFailedRequestV1 {
+                        version: crate::memory_injection::MEMORY_INJECTION_VERSION,
+                        session_id: prepared_memory.record.session_id.clone(),
+                        injection_id: prepared_memory.record.injection_id.clone(),
+                        expected_context_hash: prepared_memory.record.context_hash.clone(),
+                        expected_revision: prepared_memory.record.revision,
+                        failure_code: crate::memory_injection::MemoryInjectionFailureCodeV1::ContextUnavailable,
+                    },
+                );
+            }
+            return Err(format!(
+                "SKILL_USE_STALE: final Runtime verification failed: {error}"
+            ));
+        }
+    }
+
+    let result = mgr
+        .send_message_v2(
+            app,
+            request.session_id,
+            turn_id,
+            request.text,
+            request.display_text,
+            request.attachments,
+            memory,
+            prepared_skill_uses.clone(),
+        )
+        .await;
+    if result.is_err() && !prepared_skill_uses.is_empty() {
+        let prepared = prepared_skill_uses;
+        let _ = tauri::async_runtime::spawn_blocking(move || {
+            transition_skill_use_records(
+                &prepared,
+                crate::skill_feedback::SkillUseStatusV1::Interrupted,
+            )
+        })
+        .await;
+    }
+    result
 }
 
 /// Drop last user turn on agent + local journal (edit & resend).
@@ -199,16 +616,19 @@ fn normalize_composer_recovery_attachment(
 
 fn normalize_composer_recovery_attachments(
     state: &mut crate::composer_recovery::ComposerRecoveryStateV1,
-) -> Result<(), String> {
+) -> Result<std::collections::HashSet<(String, bool)>, String> {
+    let mut authorized = std::collections::HashSet::new();
     for attachment in &mut state.attachments {
         normalize_composer_recovery_attachment(attachment)?;
+        authorized.insert((attachment.path.clone(), attachment.is_dir));
     }
     for item in &mut state.queue {
         for attachment in &mut item.attachments {
             normalize_composer_recovery_attachment(attachment)?;
+            authorized.insert((attachment.path.clone(), attachment.is_dir));
         }
     }
-    Ok(())
+    Ok(authorized)
 }
 
 #[tauri::command]
@@ -234,13 +654,9 @@ pub async fn composer_recovery_put_v1(
 ) -> Result<crate::composer_recovery::ComposerRecoveryRevisionV1, String> {
     tauri::async_runtime::spawn_blocking(move || {
         require_live_composer_recovery_key(&request.key)?;
-        normalize_composer_recovery_attachments(&mut request.state)?;
+        let authorized = normalize_composer_recovery_attachments(&mut request.state)?;
         crate::composer_recovery::put(request, |attachment| {
-            crate::resource_handles::authorize_composer_attachment(
-                std::path::Path::new(&attachment.path),
-                attachment.is_dir,
-            )
-            .is_ok_and(|canonical| canonical == std::path::PathBuf::from(&attachment.path))
+            authorized.contains(&(attachment.path.clone(), attachment.is_dir))
         })
     })
     .await
@@ -453,6 +869,72 @@ pub async fn memory_context_pack_build_v1(
 }
 
 #[tauri::command]
+pub async fn memory_injections_list_v1(
+    session_id: String,
+) -> Result<Vec<crate::memory_injection::MemoryInjectionRecordV1>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::memory_injection::list_memory_injections_v1(&session_id)
+    })
+    .await
+    .map_err(|error| format!("Memory injection list task failed: {error}"))?
+}
+
+#[tauri::command]
+pub async fn memory_injection_feedback_v1(
+    request: crate::memory_injection::MemoryInjectionFeedbackRequestV1,
+) -> Result<crate::memory_injection::MemoryInjectionRecordV1, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::memory_injection::record_memory_injection_feedback_v1(request)
+    })
+    .await
+    .map_err(|error| format!("Memory injection feedback task failed: {error}"))?
+}
+
+#[tauri::command]
+pub async fn memory_injection_remove_v1(
+    request: crate::memory_injection::MemoryInjectionMutationRequestV1,
+) -> Result<crate::memory_injection::MemoryInjectionRecordV1, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::memory_injection::remove_memory_injection_v1(request)
+    })
+    .await
+    .map_err(|error| format!("Memory injection removal task failed: {error}"))?
+}
+
+#[tauri::command]
+pub async fn memory_export_v1(
+    request: crate::memory_portability::MemoryExportRequestV1,
+) -> Result<crate::memory_portability::MemoryPortableExportV1, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::memory_portability::export_memory_v1(request)
+    })
+    .await
+    .map_err(|error| format!("Memory export task failed: {error}"))?
+}
+
+#[tauri::command]
+pub async fn memory_clear_preview_v1(
+    request: crate::memory_portability::MemoryClearPreviewRequestV1,
+) -> Result<crate::memory_portability::MemoryClearPlanV1, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::memory_portability::preview_memory_clear_v1(request)
+    })
+    .await
+    .map_err(|error| format!("Memory clear preview task failed: {error}"))?
+}
+
+#[tauri::command]
+pub async fn memory_clear_confirm_v1(
+    request: crate::memory_portability::MemoryClearConfirmRequestV1,
+) -> Result<crate::memory_portability::MemoryClearResultV1, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::memory_portability::confirm_memory_clear_v1(request)
+    })
+    .await
+    .map_err(|error| format!("Memory clear confirmation task failed: {error}"))?
+}
+
+#[tauri::command]
 pub async fn memory_candidate_create_v1(
     request: crate::memory_candidates::MemoryCandidateCreateRequestV1,
 ) -> Result<crate::memory_candidates::MemoryCandidateV1, String> {
@@ -555,7 +1037,9 @@ pub async fn acp_test_connection(
 
 /// Download + install latest Grok Build (multi-mirror, progress via `setup://cli-install-progress`).
 #[tauri::command]
-pub async fn cli_install_latest(app: tauri::AppHandle) -> Result<crate::cli_install::CliInstallResult, String> {
+pub async fn cli_install_latest(
+    app: tauri::AppHandle,
+) -> Result<crate::cli_install::CliInstallResult, String> {
     crate::cli_install::install_cli_latest(app).await
 }
 
@@ -569,11 +1053,10 @@ pub async fn cli_install_commands() -> Result<serde_json::Value, String> {
 #[tauri::command]
 pub async fn pick_cli_binary() -> Result<Option<String>, String> {
     let file = tauri::async_runtime::spawn_blocking(|| {
-        let mut dlg = rfd::FileDialog::new().set_title("Select Sunsetz Runtime binary / 选择 Sunsetz Runtime 可执行文件");
+        let dlg = rfd::FileDialog::new()
+            .set_title("Select Sunsetz Runtime binary / 选择 Sunsetz Runtime 可执行文件");
         #[cfg(target_os = "windows")]
-        {
-            dlg = dlg.add_filter("Executable", &["exe", "cmd", "bat"]);
-        }
+        let dlg = dlg.add_filter("Executable", &["exe", "cmd", "bat"]);
         dlg.pick_file()
     })
     .await
@@ -620,6 +1103,18 @@ pub async fn open_external_url(url: String) -> Result<(), String> {
 #[tauri::command]
 pub async fn projects_list() -> Result<Vec<Project>, String> {
     Ok(store::load_projects())
+}
+
+/// Bounded, lazy Git metadata for one exact indexed project root.
+#[tauri::command]
+pub async fn project_git_summary_v1(
+    request: crate::project_git_summary::ProjectGitSummaryRequestV1,
+) -> Result<crate::project_git_summary::ProjectGitSummaryV1, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::project_git_summary::project_git_summary_v1(request)
+    })
+    .await
+    .map_err(|error| format!("Project Git summary task failed: {error}"))?
 }
 
 #[tauri::command]
@@ -736,12 +1231,7 @@ pub async fn cli_session_import(
     project_id: Option<String>,
 ) -> Result<SessionMeta, String> {
     let mode = store::load_settings().session_data_mode;
-    crate::cli_sessions::import_cli_session(
-        &agent_session_id,
-        dir.as_deref(),
-        project_id,
-        &mode,
-    )
+    crate::cli_sessions::import_cli_session(&agent_session_id, dir.as_deref(), project_id, &mode)
 }
 
 /// Import up to `limit` not-yet-linked CLI sessions (default 50).
@@ -762,10 +1252,7 @@ pub async fn session_create(
 }
 
 #[tauri::command]
-pub async fn session_set_scheduled(
-    id: String,
-    scheduled: bool,
-) -> Result<SessionMeta, String> {
+pub async fn session_set_scheduled(id: String, scheduled: bool) -> Result<SessionMeta, String> {
     store::set_session_scheduled(&id, scheduled)
 }
 
@@ -810,9 +1297,7 @@ pub async fn session_set_project(
 }
 
 #[tauri::command]
-pub async fn session_messages(
-    id: String,
-) -> Result<Vec<store::ChatMessageStored>, String> {
+pub async fn session_messages(id: String) -> Result<Vec<store::ChatMessageStored>, String> {
     Ok(store::load_messages(&id))
 }
 
@@ -935,9 +1420,7 @@ pub async fn automations_list() -> Result<Vec<store::Automation>, String> {
 }
 
 #[tauri::command]
-pub async fn automation_create(
-    input: store::AutomationInput,
-) -> Result<store::Automation, String> {
+pub async fn automation_create(input: store::AutomationInput) -> Result<store::Automation, String> {
     store::create_automation(input)
 }
 
@@ -1074,6 +1557,15 @@ pub async fn settings_patch_v1(
                 .into(),
         );
     }
+    if let Some(backend) = patch
+        .as_object_mut()
+        .and_then(|object| object.get_mut("runtimeBackend"))
+    {
+        let requested = backend
+            .as_str()
+            .ok_or_else(|| "SETTINGS_PATCH_INVALID:runtimeBackend must be a string".to_string())?;
+        *backend = serde_json::Value::String(crate::agent_loop::parse_runtime_backend(requested));
+    }
 
     let keychain_requested = patch
         .as_object()
@@ -1090,7 +1582,8 @@ pub async fn settings_patch_v1(
 }
 
 #[tauri::command]
-pub async fn models_list_available() -> Result<crate::models_catalog::AvailableModelsResult, String> {
+pub async fn models_list_available() -> Result<crate::models_catalog::AvailableModelsResult, String>
+{
     Ok(crate::models_catalog::list_available_models())
 }
 
@@ -1440,14 +1933,21 @@ pub async fn provider_ping() -> Result<serde_json::Value, String> {
     }
 
     // CLI auth present?
-    let auth = crate::process_util::user_home().join(".grok").join("auth.json");
+    let auth = crate::process_util::user_home()
+        .join(".grok")
+        .join("auth.json");
     if auth.is_file() {
         Ok(serde_json::json!({
             "ok": true,
             "class": "OK",
             "message": "CLI auth.json present (cached_token). Use Doctor + real chat to verify."
         }))
-    } else if secrets.official_api_key.as_ref().map(|k| !k.is_empty()).unwrap_or(false) {
+    } else if secrets
+        .official_api_key
+        .as_ref()
+        .map(|k| !k.is_empty())
+        .unwrap_or(false)
+    {
         Ok(serde_json::json!({
             "ok": true,
             "class": "OK",
@@ -1501,8 +2001,7 @@ pub async fn import_grok_go_config() -> Result<serde_json::Value, String> {
         let p = std::path::PathBuf::from(&c);
         if p.is_file() {
             let raw = std::fs::read_to_string(&p).map_err(|e| e.to_string())?;
-            let v: serde_json::Value =
-                serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+            let v: serde_json::Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
             // Try common keys without logging secrets
             let mut secrets = store::load_secrets();
             if let Some(key) = v
@@ -1577,11 +2076,7 @@ pub async fn doctor_report() -> Result<serde_json::Value, String> {
     let log_dir_path = data_root_path.join("logs");
     let log_dir = log_dir_path.display().to_string();
     let log_dir_exists = log_dir_path.is_dir();
-    let backend_default = if crate::acp_client::AcpClient::use_mock() {
-        "mock_acp"
-    } else {
-        "grok_agent_stdio"
-    };
+    let backend_default = crate::agent_loop::current_backend();
     let has_official_key = secrets.official_api_key.is_some();
     let has_relay = secrets.relay_base_url.is_some() && secrets.relay_api_key.is_some();
     // Never include secret values — only which backend holds them.
@@ -1625,8 +2120,30 @@ pub async fn doctor_report() -> Result<serde_json::Value, String> {
 
     let mut checks: Vec<DoctorCheck> = Vec::with_capacity(5);
 
-    // 1) CLI
-    if probe.found {
+    // 1) Runtime kernel / optional legacy CLI
+    if crate::agent_loop::is_sunsetz_backend(&backend_default) {
+        checks.push(doctor_check(
+            "cli",
+            "ok",
+            "Sunsetz Runtime",
+            if probe.found {
+                format!(
+                    "Built-in agent kernel. Optional Grok CLI {} at {}.",
+                    probe.version.as_deref().unwrap_or("unknown"),
+                    probe.path.as_deref().unwrap_or("—")
+                )
+            } else {
+                "Built-in agent kernel. Grok CLI is optional (legacy adapter).".into()
+            },
+            serde_json::json!({
+                "found": probe.found,
+                "path": probe.path,
+                "version": probe.version,
+                "source": probe.source,
+                "kernel": "sunsetz",
+            }),
+        ));
+    } else if probe.found {
         let ver = probe.version.as_deref().unwrap_or("unknown");
         let path = probe.path.as_deref().unwrap_or("—");
         checks.push(doctor_check(
@@ -1646,8 +2163,7 @@ pub async fn doctor_report() -> Result<serde_json::Value, String> {
             "cli",
             "fail",
             "Sunsetz Runtime",
-            "Sunsetz Runtime not found. Install from Settings → Runtime or the setup wizard."
-                .into(),
+            "Legacy Grok ACP is enabled but Grok CLI was not found.".into(),
             serde_json::json!({
                 "found": false,
                 "path": probe.path,
@@ -1729,10 +2245,7 @@ pub async fn doctor_report() -> Result<serde_json::Value, String> {
             "Using mock ACP backend (dev). Production uses grok_agent_stdio.".to_string(),
         )
     } else {
-        (
-            "ok",
-            format!("Agent backend: {backend_default}"),
-        )
+        ("ok", format!("Agent backend: {backend_default}"))
     };
     checks.push(doctor_check(
         "backend",
@@ -1749,10 +2262,7 @@ pub async fn doctor_report() -> Result<serde_json::Value, String> {
     let (logs_level, logs_detail) = if log_dir_exists {
         ("ok", format!("Logs directory: {log_dir}"))
     } else {
-        (
-            "warn",
-            format!("Logs directory not created yet: {log_dir}"),
-        )
+        ("warn", format!("Logs directory not created yet: {log_dir}"))
     };
     checks.push(doctor_check(
         "logs",
@@ -1972,13 +2482,19 @@ fn run_grok_inspect(project_path: Option<&str>) -> (Option<serde_json::Value>, O
             let stdout = String::from_utf8_lossy(&output.stdout);
             match serde_json::from_str::<serde_json::Value>(stdout.trim()) {
                 Ok(v) => (Some(v), None),
-                Err(e) => (None, Some(format!("Failed to parse grok inspect JSON: {e}"))),
+                Err(e) => (
+                    None,
+                    Some(format!("Failed to parse grok inspect JSON: {e}")),
+                ),
             }
         }
         Ok(Err(e)) => (None, Some(format!("Failed to run grok inspect: {e}"))),
-        Err(_) => (None, Some(format!(
-            "grok inspect timed out after {INSPECT_TIMEOUT_SECS}s"
-        ))),
+        Err(_) => (
+            None,
+            Some(format!(
+                "grok inspect timed out after {INSPECT_TIMEOUT_SECS}s"
+            )),
+        ),
     }
 }
 
@@ -2044,6 +2560,72 @@ fn parse_skills(v: &serde_json::Value) -> Vec<SkillDto> {
     out
 }
 
+fn trusted_inventory_project_root_with(
+    project_path: Option<&str>,
+    require_trusted: impl FnOnce(&str) -> Result<std::path::PathBuf, String>,
+) -> Result<Option<String>, String> {
+    let Some(project_path) = project_path.map(str::trim).filter(|path| !path.is_empty()) else {
+        return Ok(None);
+    };
+    require_trusted(project_path)?
+        .into_os_string()
+        .into_string()
+        .map(Some)
+        .map_err(|_| "trusted project path is not valid UTF-8".to_string())
+}
+
+fn fresh_skill_inventory(
+    project_path: Option<&str>,
+) -> Result<crate::skill_inventory::SkillMetadataInventoryV1, String> {
+    // Validate before using projectPath as a Runtime working directory. The
+    // inventory builder validates it again so a concurrent trust revocation
+    // fails closed.
+    let project_root = trusted_inventory_project_root_with(project_path, |path| {
+        crate::resource_handles::require_trusted_project_root(path)
+    })?;
+    let (parsed, error) = run_grok_inspect(project_root.as_deref());
+    if let Some(error) = error {
+        return Err(error);
+    }
+    let parsed = parsed.ok_or_else(|| "Sunsetz Runtime inspect returned no data".to_string())?;
+    let candidates = attach_skill_enabled_candidates(parse_skills(&parsed));
+    crate::skill_inventory::build_inventory_v1(
+        crate::skill_inventory::SkillInventoryBuildRequestV1 {
+            version: crate::skill_inventory::SKILL_INVENTORY_VERSION,
+            candidates,
+            project_root,
+        },
+    )
+}
+
+fn rank_skill_inventory_metadata(
+    inventory: crate::skill_inventory::SkillMetadataInventoryV1,
+    query: String,
+    max_results: usize,
+) -> Result<crate::skill_feedback::SkillMetadataRankingResultV1, String> {
+    let skills = inventory
+        .items
+        .into_iter()
+        .filter(|item| item.enabled && item.user_invocable)
+        .map(|item| crate::skill_feedback::SkillMetadataV1 {
+            identity: crate::skill_feedback::SkillIdentityV1 {
+                id: item.id,
+                name: item.name,
+                tree_hash: item.tree_hash,
+                source_candidate_id: item.source_candidate_id,
+            },
+            description: item.description,
+            when_to_use: item.when_to_use,
+        })
+        .collect();
+    crate::skill_feedback::rank_metadata_v1(crate::skill_feedback::SkillMetadataRankingRequestV1 {
+        version: crate::skill_feedback::SKILL_FEEDBACK_VERSION,
+        query,
+        skills,
+        max_results,
+    })
+}
+
 fn parse_mcp_servers(v: &serde_json::Value) -> Vec<McpDto> {
     let Some(arr) = v
         .get("mcpServers")
@@ -2096,12 +2678,13 @@ fn parse_mcp_servers(v: &serde_json::Value) -> Vec<McpDto> {
 /// Each skill includes `enabled` from App Extensions prefs (default true).
 #[tauri::command]
 pub async fn skills_list(project_path: Option<String>) -> Result<serde_json::Value, String> {
-    let path = project_path.clone();
-    let (parsed, error) = tauri::async_runtime::spawn_blocking(move || {
-        run_grok_inspect(path.as_deref())
-    })
-    .await
-    .map_err(|e| e.to_string())?;
+    let path = trusted_inventory_project_root_with(project_path.as_deref(), |path| {
+        crate::resource_handles::require_trusted_project_root(path)
+    })?;
+    let (parsed, error) =
+        tauri::async_runtime::spawn_blocking(move || run_grok_inspect(path.as_deref()))
+            .await
+            .map_err(|e| e.to_string())?;
 
     let skills = parsed.as_ref().map(parse_skills).unwrap_or_default();
     let skills = attach_skill_enabled(skills);
@@ -2112,17 +2695,97 @@ pub async fn skills_list(project_path: Option<String>) -> Result<serde_json::Val
     Ok(out)
 }
 
+/// Build a fresh Host-verified Skill inventory from the live Runtime.
+#[tauri::command]
+pub async fn skill_inventory_v1(
+    project_path: Option<String>,
+) -> Result<crate::skill_inventory::SkillMetadataInventoryV1, String> {
+    tauri::async_runtime::spawn_blocking(move || fresh_skill_inventory(project_path.as_deref()))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+/// Rank fresh enabled, user-invocable Skill metadata as suggestions only.
+#[tauri::command]
+pub async fn skill_metadata_rank_v1(
+    project_path: Option<String>,
+    query: String,
+    max_results: usize,
+) -> Result<crate::skill_feedback::SkillMetadataRankingResultV1, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let inventory = fresh_skill_inventory(project_path.as_deref())?;
+        rank_skill_inventory_metadata(inventory, query, max_results)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// List bounded, metadata-only Skill use evidence. Prompt and tool payloads are
+/// never stored by the ledger.
+#[tauri::command]
+pub async fn skill_uses_list_v1(
+    session_id: Option<String>,
+) -> Result<Vec<crate::skill_feedback::SkillUseRecordV1>, String> {
+    let session_id = session_id
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut records = crate::skill_feedback::list_uses_v1()?;
+        if let Some(session_id) = session_id {
+            records.retain(|record| record.session_id == session_id);
+        }
+        Ok(records)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn skill_use_feedback_v1(
+    request: crate::skill_feedback::SkillUseFeedbackRequestV1,
+) -> Result<crate::skill_feedback::SkillUseRecordV1, String> {
+    tauri::async_runtime::spawn_blocking(move || crate::skill_feedback::record_feedback_v1(request))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+/// Build a review-only improvement proposal after re-proving the Skill tree
+/// against the live Runtime. External/plugin/user-owned Skills remain immutable.
+#[tauri::command]
+pub async fn skill_improvement_proposal_v1(
+    project_path: Option<String>,
+    request: crate::skill_feedback::SkillImprovementProposalRequestV1,
+) -> Result<Option<crate::skill_feedback::SkillImprovementProposalV1>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let inventory = fresh_skill_inventory(project_path.as_deref())?;
+        let item = crate::skill_inventory::verify_selection_v1(
+            &request.skill_id,
+            &request.expected_skill_tree_hash,
+            &inventory,
+        )?;
+        if item.source_candidate_id.is_none() {
+            return Err(
+                "EXTERNAL_SKILL_IMMUTABLE: only reviewed Host-owned Skills can be improved".into(),
+            );
+        }
+        crate::skill_feedback::build_improvement_proposal_v1(request)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 /// List MCP servers from `grok inspect --json`.
 /// Always returns Ok; on CLI missing / timeout, `servers` is empty and `error` is set.
 /// Each server includes `enabled` from App Extensions prefs (default true).
 #[tauri::command]
 pub async fn inspect_mcp(project_path: Option<String>) -> Result<serde_json::Value, String> {
-    let path = project_path.clone();
-    let (parsed, error) = tauri::async_runtime::spawn_blocking(move || {
-        run_grok_inspect(path.as_deref())
-    })
-    .await
-    .map_err(|e| e.to_string())?;
+    let path = trusted_inventory_project_root_with(project_path.as_deref(), |path| {
+        crate::resource_handles::require_trusted_project_root(path)
+    })?;
+    let (parsed, error) =
+        tauri::async_runtime::spawn_blocking(move || run_grok_inspect(path.as_deref()))
+            .await
+            .map_err(|e| e.to_string())?;
 
     let mut servers = parsed.as_ref().map(parse_mcp_servers).unwrap_or_default();
     let prefs = crate::extensions::load_prefs();
@@ -2149,21 +2812,277 @@ pub async fn inspect_mcp(project_path: Option<String>) -> Result<serde_json::Val
 /// List skills from `grok inspect --json`, each with App `enabled` (default true).
 /// (skills_list already exists; this keeps enable flags on the existing shape.)
 fn attach_skill_enabled(skills: Vec<SkillDto>) -> Vec<serde_json::Value> {
+    attach_skill_enabled_candidates(skills)
+        .into_iter()
+        .map(|skill| {
+            serde_json::json!({
+                "name": skill.name,
+                "description": skill.description,
+                "source": skill.source,
+                "path": skill.path,
+                "userInvocable": skill.user_invocable,
+                "enabled": skill.enabled,
+            })
+        })
+        .collect()
+}
+
+fn attach_skill_enabled_candidates(
+    skills: Vec<SkillDto>,
+) -> Vec<crate::skill_inventory::RuntimeSkillCandidateV1> {
     let prefs = crate::extensions::load_prefs();
+    attach_skill_enabled_candidates_with_prefs(skills, &prefs)
+}
+
+fn attach_skill_enabled_candidates_with_prefs(
+    skills: Vec<SkillDto>,
+    prefs: &crate::extensions::ExtensionsPrefs,
+) -> Vec<crate::skill_inventory::RuntimeSkillCandidateV1> {
     skills
         .into_iter()
         .map(|s| {
             let enabled = crate::extensions::is_enabled(&prefs.skills, &s.name);
-            serde_json::json!({
-                "name": s.name,
-                "description": s.description,
-                "source": s.source,
-                "path": s.path,
-                "userInvocable": s.user_invocable,
-                "enabled": enabled,
-            })
+            crate::skill_inventory::RuntimeSkillCandidateV1 {
+                name: s.name,
+                description: s.description,
+                source: s.source,
+                path: s.path,
+                user_invocable: s.user_invocable,
+                enabled,
+            }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod skill_inventory_command_tests {
+    use super::*;
+
+    fn inventory_item(
+        name: &str,
+        id_byte: char,
+        enabled: bool,
+        user_invocable: bool,
+    ) -> crate::skill_inventory::SkillMetadataInventoryItemV1 {
+        crate::skill_inventory::SkillMetadataInventoryItemV1 {
+            id: id_byte.to_string().repeat(64),
+            name: name.to_string(),
+            description: "Review documents safely".into(),
+            when_to_use: "Use for document review".into(),
+            source: crate::skill_inventory::SkillInventorySourceV1::User,
+            tree_hash: "f".repeat(64),
+            source_candidate_id: None,
+            user_invocable,
+            enabled,
+        }
+    }
+
+    #[test]
+    fn project_path_is_trusted_before_becoming_runtime_cwd() {
+        let mut observed = None;
+        let resolved = trusted_inventory_project_root_with(Some("  /input/project  "), |path| {
+            observed = Some(path.to_string());
+            Ok(std::path::PathBuf::from("/canonical/project"))
+        })
+        .unwrap();
+        assert_eq!(observed.as_deref(), Some("/input/project"));
+        assert_eq!(resolved.as_deref(), Some("/canonical/project"));
+
+        let error = trusted_inventory_project_root_with(Some("/untrusted"), |_| {
+            Err("RESOURCE_DENIED".into())
+        })
+        .unwrap_err();
+        assert_eq!(error, "RESOURCE_DENIED");
+    }
+
+    #[test]
+    fn inspect_skills_convert_to_fresh_typed_candidates_with_enable_state() {
+        let inspect = serde_json::json!({
+            "skills": [
+                {
+                    "name": "enabled-skill",
+                    "description": "enabled",
+                    "source": { "type": "user", "path": "/runtime/enabled" },
+                    "userInvocable": true
+                },
+                {
+                    "name": "disabled-skill",
+                    "description": "disabled",
+                    "source": "project",
+                    "path": "/runtime/disabled",
+                    "user_invocable": false
+                }
+            ]
+        });
+        let mut prefs = crate::extensions::ExtensionsPrefs::default();
+        prefs.skills.insert("disabled-skill".into(), false);
+        let candidates = attach_skill_enabled_candidates_with_prefs(parse_skills(&inspect), &prefs);
+
+        assert_eq!(candidates.len(), 2);
+        assert!(candidates[0].enabled);
+        assert!(candidates[0].user_invocable);
+        assert_eq!(candidates[0].source, "user");
+        assert_eq!(candidates[0].path.as_deref(), Some("/runtime/enabled"));
+        assert!(!candidates[1].enabled);
+        assert!(!candidates[1].user_invocable);
+    }
+
+    #[test]
+    fn ranking_excludes_disabled_and_non_invocable_inventory_items() {
+        let inventory = crate::skill_inventory::SkillMetadataInventoryV1 {
+            version: crate::skill_inventory::SKILL_INVENTORY_VERSION,
+            items: vec![
+                inventory_item("eligible-review", 'a', true, true),
+                inventory_item("disabled-review", 'b', false, true),
+                inventory_item("internal-review", 'c', true, false),
+            ],
+        };
+        let result = rank_skill_inventory_metadata(inventory, "review".into(), 8).unwrap();
+
+        assert_eq!(
+            result.disposition,
+            crate::skill_feedback::SkillRankingDispositionV1::SuggestionOnly
+        );
+        assert!(result.requires_explicit_acceptance);
+        assert_eq!(result.items.len(), 1);
+        assert_eq!(result.items[0].skill.name, "eligible-review");
+    }
+
+    #[test]
+    fn send_skill_markers_require_exact_fresh_inventory_selections() {
+        let inventory = crate::skill_inventory::SkillMetadataInventoryV1 {
+            version: crate::skill_inventory::SKILL_INVENTORY_VERSION,
+            items: vec![inventory_item("eligible-review", 'a', true, true)],
+        };
+        let selections = vec![crate::skill_feedback::SkillSelectionRequestV1 {
+            id: "a".repeat(64),
+            expected_tree_hash: "f".repeat(64),
+            selection: crate::skill_feedback::SkillUseSelectionV1::Explicit,
+        }];
+
+        let verified = verify_skill_selections(
+            &inventory,
+            &selections,
+            Some("[[skill:eligible-review]] check this"),
+            "/eligible-review\ncheck this",
+        )
+        .unwrap();
+        assert_eq!(verified.len(), 1);
+        assert_eq!(verified[0].0.name, "eligible-review");
+
+        assert!(verify_skill_selections(
+            &inventory,
+            &[],
+            Some("[[skill:eligible-review]] check this"),
+            "/eligible-review\ncheck this",
+        )
+        .unwrap_err()
+        .contains("UNVERIFIED"));
+        assert!(verify_skill_selections(
+            &inventory,
+            &selections,
+            Some("[[skill:another-skill]] check this"),
+            "/eligible-review\ncheck this",
+        )
+        .unwrap_err()
+        .contains("differ"));
+    }
+
+    #[test]
+    fn disabled_skill_selection_is_rejected_even_with_matching_hash() {
+        let inventory = crate::skill_inventory::SkillMetadataInventoryV1 {
+            version: crate::skill_inventory::SKILL_INVENTORY_VERSION,
+            items: vec![inventory_item("disabled-review", 'b', false, true)],
+        };
+        let error = verify_skill_selections(
+            &inventory,
+            &[crate::skill_feedback::SkillSelectionRequestV1 {
+                id: "b".repeat(64),
+                expected_tree_hash: "f".repeat(64),
+                selection: crate::skill_feedback::SkillUseSelectionV1::Explicit,
+            }],
+            Some("[[skill:disabled-review]]"),
+            "/disabled-review",
+        )
+        .unwrap_err();
+        assert!(error.contains("UNAVAILABLE"));
+    }
+
+    #[test]
+    fn duplicate_runtime_skill_names_are_rejected_even_with_distinct_ids() {
+        let inventory = crate::skill_inventory::SkillMetadataInventoryV1 {
+            version: crate::skill_inventory::SKILL_INVENTORY_VERSION,
+            items: vec![
+                inventory_item("review", 'a', true, true),
+                inventory_item("review", 'b', true, true),
+            ],
+        };
+        let selections = ['a', 'b']
+            .into_iter()
+            .map(|id_byte| crate::skill_feedback::SkillSelectionRequestV1 {
+                id: id_byte.to_string().repeat(64),
+                expected_tree_hash: "f".repeat(64),
+                selection: crate::skill_feedback::SkillUseSelectionV1::Explicit,
+            })
+            .collect::<Vec<_>>();
+
+        let error =
+            verify_skill_selections(&inventory, &selections, Some("[[skill:review]]"), "/review")
+                .unwrap_err();
+        assert!(error.contains("duplicate Skill inventory identity"));
+    }
+
+    #[test]
+    fn verified_display_skill_cannot_mask_a_different_runtime_invocation() {
+        let inventory = crate::skill_inventory::SkillMetadataInventoryV1 {
+            version: crate::skill_inventory::SKILL_INVENTORY_VERSION,
+            items: vec![
+                inventory_item("skill-a", 'a', true, true),
+                inventory_item("skill-b", 'b', true, true),
+            ],
+        };
+        let selection = crate::skill_feedback::SkillSelectionRequestV1 {
+            id: "a".repeat(64),
+            expected_tree_hash: "f".repeat(64),
+            selection: crate::skill_feedback::SkillUseSelectionV1::Explicit,
+        };
+        let error = verify_skill_selections(
+            &inventory,
+            &[selection],
+            Some("[[skill:skill-a]] run"),
+            "/goal\n/skill-b\nrun",
+        )
+        .unwrap_err();
+        assert!(error.contains("UNVERIFIED"));
+        assert_eq!(
+            agent_form_slash_names("/goal\n/skill-a /skill-b\nrun"),
+            vec!["skill-a", "skill-b"]
+        );
+        assert!(agent_skill_names_requiring_verification("/goal\nrun").is_empty());
+        assert!(agent_skill_names_requiring_verification("/plan").is_empty());
+        assert_eq!(
+            agent_skill_names_requiring_verification("/review\nrun"),
+            vec!["review"]
+        );
+        assert_eq!(
+            agent_form_slash_names(
+                "Set up this automation safely.\n\nUser request:\n/skill-a\nrun later"
+            ),
+            vec!["skill-a"]
+        );
+        let wrapped_error = verify_skill_selections(
+            &inventory,
+            &[crate::skill_feedback::SkillSelectionRequestV1 {
+                id: "a".repeat(64),
+                expected_tree_hash: "f".repeat(64),
+                selection: crate::skill_feedback::SkillUseSelectionV1::Explicit,
+            }],
+            Some("[[skill:skill-a]] run later"),
+            "Set up this automation safely.\n\nUser request:\n/skill-b\nrun later",
+        )
+        .unwrap_err();
+        assert!(wrapped_error.contains("UNVERIFIED"));
+    }
 }
 
 #[cfg(test)]
@@ -2237,11 +3156,10 @@ pub async fn extensions_enable_all_mcp(
     mgr: State<'_, Arc<SessionManager>>,
     names: Vec<String>,
 ) -> Result<crate::extensions::ExtensionsPrefs, String> {
-    let prefs = tauri::async_runtime::spawn_blocking(move || {
-        crate::extensions::enable_all_mcp(&names)
-    })
-    .await
-    .map_err(|e| e.to_string())??;
+    let prefs =
+        tauri::async_runtime::spawn_blocking(move || crate::extensions::enable_all_mcp(&names))
+            .await
+            .map_err(|e| e.to_string())??;
     mgr.apply_extensions_mcp_change(&app).await;
     Ok(prefs)
 }
@@ -2251,11 +3169,9 @@ pub async fn extensions_enable_all_mcp(
 pub async fn extensions_enable_all_skills(
     names: Vec<String>,
 ) -> Result<crate::extensions::ExtensionsPrefs, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        crate::extensions::enable_all_skills(&names)
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || crate::extensions::enable_all_skills(&names))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 // ── Plugins via Sunsetz Runtime (`grok plugin …` + `inspect` + config.toml) ──
@@ -2363,11 +3279,16 @@ fn run_grok_cli_args(args: &[&str], timeout_secs: u64) -> Result<(String, String
 /// Path to the user-level Grok config that tracks plugin enable/disable.
 /// Same file Grok Build reads for `[plugins].enabled` / `[plugins].disabled`.
 fn user_grok_config_toml() -> std::path::PathBuf {
-    crate::process_util::user_home().join(".grok").join("config.toml")
+    crate::process_util::user_home()
+        .join(".grok")
+        .join("config.toml")
 }
 
 /// Parse a string-array key under `[plugins]` (single- or multi-line).
-pub fn parse_plugins_toml_string_array(toml_text: &str, key: &str) -> std::collections::HashSet<String> {
+pub fn parse_plugins_toml_string_array(
+    toml_text: &str,
+    key: &str,
+) -> std::collections::HashSet<String> {
     let mut out = std::collections::HashSet::new();
     let mut in_plugins = false;
     let mut collecting = false;
@@ -2480,7 +3401,9 @@ pub fn plugin_matches_disabled(
             if tail == name {
                 // Optional: also match hash against repo_key suffix
                 if let Some(rk) = repo_key {
-                    if head.ends_with(rk) || rk.ends_with(head.rsplit_once('/').map(|(_, h)| h).unwrap_or(head)) {
+                    if head.ends_with(rk)
+                        || rk.ends_with(head.rsplit_once('/').map(|(_, h)| h).unwrap_or(head))
+                    {
                         return true;
                     }
                 }
@@ -2530,14 +3453,8 @@ fn parse_inspect_plugins_map(
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
         let provides = item.get("provides").map(|p| PluginProvidesDto {
-            skills: p
-                .get("skills")
-                .and_then(|x| x.as_u64())
-                .unwrap_or(0) as u32,
-            agents: p
-                .get("agents")
-                .and_then(|x| x.as_u64())
-                .unwrap_or(0) as u32,
+            skills: p.get("skills").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
+            agents: p.get("agents").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
             hooks: p.get("hooks").and_then(|x| x.as_bool()).unwrap_or(false),
             mcp_servers: p
                 .get("mcpServers")
@@ -2588,13 +3505,7 @@ fn parse_plugin_list_json(
             .filter(|s| !s.is_empty());
         let marketplace = item
             .get("marketplace")
-            .and_then(|x| {
-                if x.is_null() {
-                    None
-                } else {
-                    x.as_str()
-                }
-            })
+            .and_then(|x| if x.is_null() { None } else { x.as_str() })
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
         let path = item
@@ -2757,8 +3668,8 @@ pub async fn runtime_plugins_catalog_v1(
                 source: "runtime_cli".into(),
                 install_action_available: false,
                 uninstall_action_available: false,
-                action_unavailable_reason:
-                    "runtime_plugin_mutations_are_not_machine_verifiable".into(),
+                action_unavailable_reason: "runtime_plugin_mutations_are_not_machine_verifiable"
+                    .into(),
                 plugins,
                 error: None,
             })
@@ -2768,8 +3679,7 @@ pub async fn runtime_plugins_catalog_v1(
             source: "runtime_cli".into(),
             install_action_available: false,
             uninstall_action_available: false,
-            action_unavailable_reason:
-                "runtime_plugin_mutations_are_not_machine_verifiable".into(),
+            action_unavailable_reason: "runtime_plugin_mutations_are_not_machine_verifiable".into(),
             plugins: Vec::new(),
             error: Some(error),
         }),
@@ -3104,11 +4014,7 @@ pub async fn save_temp_attachment(
     use base64::Engine;
     let raw = bytes_base64.trim();
     // Accept data-URL prefix if present
-    let b64 = raw
-        .split(',')
-        .last()
-        .unwrap_or(raw)
-        .trim();
+    let b64 = raw.split(',').last().unwrap_or(raw).trim();
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(b64)
         .map_err(|e| format!("invalid base64: {e}"))?;
@@ -3133,10 +4039,7 @@ pub async fn save_temp_attachment(
             .unwrap_or_else(|| "bin".into())
     });
 
-    let safe_name = sanitize_attachment_name(
-        suggested_name.as_deref(),
-        &ext,
-    );
+    let safe_name = sanitize_attachment_name(suggested_name.as_deref(), &ext);
     let dir = crate::paths::attachments_paste_dir();
     let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S-%3f");
     let file_name = format!("{stamp}-{safe_name}");
@@ -3609,14 +4512,7 @@ pub async fn git_file_diff(
     if text.trim().is_empty() {
         // Maybe untracked
         let untracked = std::process::Command::new("git")
-            .args([
-                "-C",
-                &project,
-                "ls-files",
-                "--error-unmatch",
-                "--",
-                &rel,
-            ])
+            .args(["-C", &project, "ls-files", "--error-unmatch", "--", &rel])
             .status();
         let tracked = untracked.map(|s| s.success()).unwrap_or(false);
         if !tracked {
@@ -4361,10 +5257,7 @@ pub async fn path_reveal(path: String) -> Result<(), String> {
     #[cfg(all(unix, not(target_os = "macos")))]
     {
         // Open parent directory
-        let parent = pb
-            .parent()
-            .map(|x| x.to_path_buf())
-            .unwrap_or(pb.clone());
+        let parent = pb.parent().map(|x| x.to_path_buf()).unwrap_or(pb.clone());
         std::process::Command::new("xdg-open")
             .arg(parent)
             .spawn()
@@ -4453,7 +5346,9 @@ pub fn accounts_list() -> crate::account_profiles::AccountsListResult {
 }
 
 #[tauri::command]
-pub fn account_save_current(label: Option<String>) -> Result<crate::account_profiles::SavedAccount, String> {
+pub fn account_save_current(
+    label: Option<String>,
+) -> Result<crate::account_profiles::SavedAccount, String> {
     crate::account_profiles::save_current_account(label)
 }
 
@@ -4544,8 +5439,7 @@ pub async fn providers_activate(
     source: String,
     provider_id: Option<String>,
 ) -> Result<crate::providers::ProvidersListResult, String> {
-    let result =
-        crate::providers::activate_provider(&source, provider_id.as_deref())?;
+    let result = crate::providers::activate_provider(&source, provider_id.as_deref())?;
     // Composer model stays a catalog id (UI). Channel is `[models].default`.
     // When leaving a custom route, drop stale provider ids from settings.
     let cur = store::load_settings().model_id.unwrap_or_default();
@@ -4609,7 +5503,11 @@ pub async fn providers_upsert(
         create_only,
     })?;
     // Keep legacy secrets in sync for Doctor / account channel display.
-    if let Some(p) = result.providers.iter().find(|p| p.is_default).or(result.providers.first())
+    if let Some(p) = result
+        .providers
+        .iter()
+        .find(|p| p.is_default)
+        .or(result.providers.first())
     {
         let mut secrets = store::load_secrets();
         secrets.relay_base_url = Some(p.base_url.clone());
