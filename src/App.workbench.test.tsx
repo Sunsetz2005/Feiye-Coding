@@ -24,6 +24,7 @@ import type { SidebarNavigatorProps } from "@/components/SidebarNavigator";
 import type { SettingsPageProps } from "@/components/SettingsPage";
 import type { ComposerDockProps } from "@/components/ComposerDock";
 import type { ResourceViewerProps } from "@/components/ResourceViewer";
+import type { SkillMetadataRankingResultV1 } from "@/lib/api";
 
 type EventHandler = (payload: unknown) => void;
 
@@ -75,9 +76,9 @@ const apiListenerCapture = vi.hoisted(() => ({
   })),
   skillRank: vi.fn(async () => ({
     version: 1,
-    disposition: "suggestion_only",
-    requiresExplicitAcceptance: true,
-    items: [],
+    disposition: "suggestion_only" as const,
+    requiresExplicitAcceptance: true as const,
+    items: [] as SkillMetadataRankingResultV1["items"],
   })),
   sessionAutoTitle: vi.fn(async () => null),
   pathsClassify: vi.fn(async (paths: string[]) =>
@@ -355,7 +356,7 @@ beforeEach(() => {
     version: 1,
     disposition: "suggestion_only",
     requiresExplicitAcceptance: true,
-    items: [],
+    items: [] as SkillMetadataRankingResultV1["items"],
   });
   recoveryCapture.get.mockReset().mockResolvedValue(null);
   recoveryCapture.put.mockReset().mockImplementation(

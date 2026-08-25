@@ -12,11 +12,12 @@
 - 宽屏资源面板与中栏并列；隐藏后不应保留可聚焦控件。窄屏使用覆盖式面板。
 - 新任务的引导内容可位于视觉中心，输入器仍保持在底部工作区。
 
-当前会话协调与输入器组合仍位于 `src/App.tsx`；已独立的关键界面包括：
+当前会话协调仍位于 `src/App.tsx`；已独立的关键界面包括：
 
 - `src/components/WorkbenchShell.tsx`
 - `src/components/WorkbenchTopbar.tsx`
 - `src/components/SidebarNavigator.tsx`
+- `src/components/ComposerDock.tsx`
 - `src/components/lobe-chat/ConversationThread.tsx`
 - `src/components/lobe-chat/ActivityTimeline.tsx`
 - `src/components/lobe-chat/AskUserDock.tsx`
@@ -29,7 +30,9 @@
 
 `SidebarNavigator` 拥有侧栏渲染、项目/任务披露语义、当前项语义、虚拟任务行、只读悬停预览和账户入口；数据加载、菜单动作与 Host 协调仍由 `App.tsx` 提供。任务预览停留 450ms 后调用 `session_preview`，以 30 秒短缓存合并同一 session 的并发请求，并丢弃移出、滚动、折叠、菜单打开或虚拟行卸载后的过期响应。键盘聚焦跳过停留延迟，但预览自身不可交互、不夺取焦点。Host 只返回最近 `user` 与 `assistant` 的可见正文摘要；思考、附件、工具输出和完整 journal 不进入 DTO。项目预览使用已加载的项目与 session 元数据，Git 摘要完成惰性能力前不显示。
 
-`WorkbenchShell` 拥有三栏布局根节点，并在侧栏或资源面板关闭后把焦点恢复到对应顶部栏按钮。会话中栏在面板切换时保持挂载，因此原生滚动位置不被重建。不要把尚不存在的 `ConversationSurface` 或 `ComposerDock` 当成当前模块边界。
+`WorkbenchShell` 拥有三栏布局根节点，并在侧栏或资源面板关闭后把焦点恢复到对应顶部栏按钮。会话中栏在面板切换时保持挂载，因此原生滚动位置不被重建。
+
+`ComposerDock` 拥有底部浮层、三层输入器和运行中的 `TaskProgressRail`；草稿、附件、队列、模型/权限偏好、发送停止和 Host 调用仍由 `App.tsx` 提供。权限条与 `AskUserDock` 作为并列或接管槽位传入，提问和权限决策不搬进输入器。不要把尚不存在的 `ConversationSurface` 当成当前模块边界。
 
 顶部任务菜单与侧栏任务菜单共用 `ContextMenu` 和同一组真实 session 动作。按钮打开时必须暴露 `aria-haspopup="menu"` 与展开状态；菜单按重命名、导出、分叉/回退/复制、归档/删除分组，危险删除保持末项。左下账户菜单只从 `AccountStatus`、当前 Provider 和 billing 快照派生账户、额度、重置时间、主题、设置与登录动作；未实现的宠物、支持、更新检查或云入口不得作为占位项出现。
 
@@ -121,6 +124,7 @@
 
 Host 按会话保存所有 pending interaction：
 
+- 内建 Sunsetz kernel 的 `write_file` / `run_command` 复用同一条 `ComposerDock` 权限条和 `InteractionSnapshotV1` kind `permission`；Host 会话没有 ACP 客户端，回复走 oneshot，不发 JSON-RPC。`AcceptEdits` 只自动放行根内写入，命令仍要问。
 - `InteractionSnapshotV1` 以判别 payload 表示 permission、ask_user 和 plan；三者共享 pending/resolving/resolved/failed/interrupted 生命周期但不混淆业务语义。
 - `session_interactions_list` 返回前台和后台任务的 live interaction；旧 `session_pending_interactions` 继续作为 ask-user 兼容接口。
 - 切换任务或 WebView 重载时可在 Agent 进程仍存活的前提下恢复。
@@ -196,7 +200,7 @@ Runtime sandbox 默认 `off`。Linux 在 bubblewrap 可用时可验证应用 `wo
 2. `WorkbenchShell` 的面板焦点恢复与会话滚动保持测试。
 3. `HostCapabilities v2` 的显式状态、旧版兼容和未知能力隐藏测试。
 4. `FloatingSurfaceProvider` 的单一浮层测试。
-5. `ComposerModelMenu`、上下文用量和加号菜单测试。
+5. `ComposerDock` 的浮层壳、进度轨、权限槽、AskUser 接管，以及 `ComposerModelMenu`、上下文用量和加号菜单测试。
 6. `ActivityTimeline` 的顺序、归并及旧历史降级测试。
 7. `AskUserDock` 的逐题、跳过、取消和失败恢复测试。
 8. Rust 的 ask_user、附件、Finder、技能保存、能力表和 compact phase golden 测试。

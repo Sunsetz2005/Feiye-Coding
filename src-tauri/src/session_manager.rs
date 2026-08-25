@@ -212,9 +212,9 @@ impl PendingAskUser {
     }
 }
 
-#[derive(Debug, Clone)]
 struct PendingPermission {
     interaction: InteractionSnapshotV1,
+    host_reply: Option<tokio::sync::oneshot::Sender<PermissionOutcome>>,
 }
 
 impl PendingPermission {
@@ -400,6 +400,8 @@ struct LiveSession {
     pending_plan: Option<PendingPlan>,
     /// Pending `session/request_permission` awaiting a Host/UI response.
     pending_permission: Option<PendingPermission>,
+    /// Synthetic JSON-RPC ids for in-process Host kernel permission waits.
+    host_rpc_seq: u64,
     /// Pending `_x.ai/ask_user_question` payload awaiting user answers.
     pending_ask_user: Option<PendingAskUser>,
     /// Last user/agent activity (send, stream, permission, connect).
@@ -1440,12 +1442,17 @@ struct AskUserResolveTarget {
     snapshot: InteractionSnapshotV1,
 }
 
+enum PermissionReplyChannel {
+    Acp(Arc<AcpClient>),
+    Host(tokio::sync::oneshot::Sender<PermissionOutcome>),
+}
+
 struct PermissionResolveTarget {
     session_id: String,
     process_id: ProcessId,
     interaction_id: String,
     rpc_id: u64,
-    acp: Arc<AcpClient>,
+    reply: Option<PermissionReplyChannel>,
 }
 
 struct PlanResolveTarget {
@@ -2130,6 +2137,7 @@ impl SessionManager {
             needs_history_bootstrap: parked.needs_history_bootstrap,
             pending_plan: None,
             pending_permission: None,
+            host_rpc_seq: 0,
             pending_ask_user: None,
             last_activity: now,
             last_stream_progress: now,
@@ -2700,6 +2708,7 @@ impl SessionManager {
                 needs_history_bootstrap: false,
                 pending_plan: None,
                 pending_permission: None,
+                host_rpc_seq: 0,
                 pending_ask_user: None,
                 last_activity: now,
                 last_stream_progress: now,
@@ -3224,6 +3233,7 @@ impl SessionManager {
                         );
                         let pending = PendingPermission {
                             interaction: snapshot.clone(),
+                            host_reply: None,
                         };
                         let request = pending.ui_payload();
                         s.pending_permission = Some(pending);
@@ -4035,6 +4045,7 @@ impl SessionManager {
                         );
                         let pending = PendingPermission {
                             interaction: snapshot.clone(),
+                            host_reply: None,
                         };
                         let request = pending.ui_payload();
                         s.pending_permission = Some(pending);
@@ -5595,6 +5606,17 @@ impl SessionManager {
             }
         }
 
+        let permission_gate: agent_loop::HostToolPermissionGate = {
+            let mgr = Arc::clone(self);
+            let app_gate = app.clone();
+            let sid = app_sid.clone();
+            Arc::new(move |req| {
+                let mgr = Arc::clone(&mgr);
+                let app_gate = app_gate.clone();
+                let sid = sid.clone();
+                Box::pin(async move { mgr.request_host_tool_permission(app_gate, sid, req).await })
+            })
+        };
         let cfg = agent_loop::AgentTurnConfig {
             endpoint,
             project_root: root,
@@ -5604,6 +5626,7 @@ impl SessionManager {
             stop: Arc::clone(&stop),
             client,
             max_tool_rounds: 8,
+            permission_gate: Some(permission_gate),
         };
         let mgr = Arc::clone(self);
         let app_ev = app.clone();
@@ -5961,6 +5984,193 @@ impl SessionManager {
         }
     }
 
+    fn host_permission_options() -> serde_json::Value {
+        serde_json::json!([
+            { "optionId": "allow_once", "kind": "allow_once", "name": "Allow once" },
+            { "optionId": "allow_always", "kind": "allow_always", "name": "Allow for session" },
+            { "optionId": "reject_once", "kind": "reject_once", "name": "Reject" }
+        ])
+    }
+
+    fn host_decision_from_outcome(
+        outcome: PermissionOutcome,
+    ) -> agent_loop::HostToolPermissionDecision {
+        match outcome {
+            PermissionOutcome::Cancelled => agent_loop::HostToolPermissionDecision::Cancelled,
+            PermissionOutcome::Selected { option_id } => {
+                let id = option_id.to_ascii_lowercase();
+                if id.contains("reject") || id.contains("deny") {
+                    agent_loop::HostToolPermissionDecision::Deny
+                } else {
+                    agent_loop::HostToolPermissionDecision::Allow
+                }
+            }
+        }
+    }
+
+    fn install_host_permission(
+        &self,
+        app_sid: &str,
+        req: &agent_loop::HostToolPermission,
+    ) -> Result<
+        (
+            tokio::sync::oneshot::Receiver<PermissionOutcome>,
+            UiPermissionRequest,
+            InteractionSnapshotV1,
+            bool,
+            bool,
+            bool,
+        ),
+        String,
+    > {
+        fn install(
+            session: &mut LiveSession,
+            req: &agent_loop::HostToolPermission,
+        ) -> Result<
+            (
+                tokio::sync::oneshot::Receiver<PermissionOutcome>,
+                UiPermissionRequest,
+                InteractionSnapshotV1,
+                bool,
+                bool,
+            ),
+            String,
+        > {
+            if session.pending_permission.is_some() {
+                return Err("permission already pending".into());
+            }
+            session.host_rpc_seq = session.host_rpc_seq.saturating_add(1);
+            let rpc_id = session.host_rpc_seq;
+            let root = session.project_path.as_ref().map(std::path::PathBuf::from);
+            let sk = permission_scope_key(
+                &req.tool_name,
+                &req.path_target,
+                &req.command,
+                root.as_deref(),
+                &req.title,
+            );
+            let auto = may_auto_allow(
+                session.policy,
+                &session.allow_cache,
+                &sk,
+                root.as_deref(),
+                &req.path_target,
+                &req.tool_name,
+                &req.command,
+            );
+            let auto_deny = !auto && may_auto_deny(session.policy);
+            let options = SessionManager::host_permission_options();
+            let snapshot = InteractionSnapshotV1::new(
+                &session.app_session_id,
+                &session.process_id,
+                rpc_id,
+                Some(req.tool_call_id.clone()),
+                InteractionPayloadV1::Permission {
+                    tool_name: req.tool_name.clone(),
+                    title: req.title.clone(),
+                    preview: req.preview.clone(),
+                    scope_key: sk,
+                    options,
+                },
+            );
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let pending = PendingPermission {
+                interaction: snapshot.clone(),
+                host_reply: Some(tx),
+            };
+            let request = pending.ui_payload();
+            session.pending_permission = Some(pending);
+            let _ = session.fsm.await_permission();
+            SessionManager::touch_activity_locked(session);
+            Ok((rx, request, snapshot, auto, auto_deny))
+        }
+
+        {
+            let mut live = self.inner.lock();
+            if let Some(session) = live
+                .as_mut()
+                .filter(|session| session.app_session_id == app_sid)
+            {
+                let (rx, request, snapshot, auto, auto_deny) = install(session, req)?;
+                return Ok((rx, request, snapshot, auto, auto_deny, false));
+            }
+        }
+        let mut background = self.background.lock();
+        let session = background
+            .get_mut(app_sid)
+            .ok_or_else(|| format!("session not active: {app_sid}"))?;
+        let (rx, request, snapshot, auto, auto_deny) = install(session, req)?;
+        Ok((rx, request, snapshot, auto, auto_deny, true))
+    }
+
+    async fn request_host_tool_permission(
+        self: &Arc<Self>,
+        app: AppHandle,
+        app_sid: String,
+        req: agent_loop::HostToolPermission,
+    ) -> agent_loop::HostToolPermissionDecision {
+        let (rx, request, snapshot, auto, auto_deny, background) =
+            match self.install_host_permission(&app_sid, &req) {
+                Ok(installed) => installed,
+                Err(error) => {
+                    tracing::warn!("host permission install failed: {error}");
+                    return agent_loop::HostToolPermissionDecision::Cancelled;
+                }
+            };
+        Self::publish_interaction(&app, &snapshot);
+        let automatic_option = if auto {
+            pick_option_id(&request.options, "allow_once")
+                .or_else(|| pick_option_id(&request.options, "allow_always"))
+                .map(|option_id| ("allow", option_id))
+        } else if auto_deny {
+            Some((
+                "deny",
+                pick_option_id(&request.options, "reject_once")
+                    .or_else(|| pick_option_id(&request.options, "reject"))
+                    .unwrap_or_else(|| "reject_once".into()),
+            ))
+        } else {
+            None
+        };
+        if let Some((decision, option_id)) = automatic_option {
+            if let Err(error) = self
+                .resolve_permission(
+                    app.clone(),
+                    request.rpc_id,
+                    decision.to_string(),
+                    Some(option_id),
+                    None,
+                    Some(request.session_id.clone()),
+                    Some(request.interaction_id.clone()),
+                )
+                .await
+            {
+                tracing::warn!("automatic host permission response failed: {error}");
+                let _ = app.emit("session://permission", &request);
+                if background {
+                    let _ = app.emit(
+                        "session://background_permission",
+                        serde_json::json!({ "sessionId": request.session_id }),
+                    );
+                }
+                Self::emit_state(&app, &self.snapshot());
+            }
+        } else {
+            let _ = app.emit("session://permission", &request);
+            if background {
+                let _ = app.emit(
+                    "session://background_permission",
+                    serde_json::json!({ "sessionId": request.session_id }),
+                );
+            }
+            Self::emit_state(&app, &self.snapshot());
+        }
+        match rx.await {
+            Ok(outcome) => Self::host_decision_from_outcome(outcome),
+            Err(_) => agent_loop::HostToolPermissionDecision::Cancelled,
+        }
+    }
+
     fn prepare_permission_resolution(
         &self,
         session_id: Option<&str>,
@@ -5972,16 +6182,22 @@ impl SessionManager {
             rpc_id: Option<u64>,
             interaction_id: Option<&str>,
         ) -> Result<(PermissionResolveTarget, InteractionSnapshotV1), String> {
-            let acp = session
-                .acp
-                .clone()
-                .ok_or_else(|| "ACP client missing".to_string())?;
             let pending = session
                 .pending_permission
                 .as_mut()
                 .ok_or_else(|| "no pending permission request".to_string())?;
             pending.interaction.claim(interaction_id, rpc_id)?;
             let snapshot = pending.interaction.clone();
+            let reply = match pending.host_reply.take() {
+                Some(tx) => PermissionReplyChannel::Host(tx),
+                None => match session.acp.clone() {
+                    Some(acp) => PermissionReplyChannel::Acp(acp),
+                    None => {
+                        pending.interaction.restore_pending();
+                        return Err("ACP client missing".into());
+                    }
+                },
+            };
             SessionManager::touch_activity_locked(session);
             Ok((
                 PermissionResolveTarget {
@@ -5989,7 +6205,7 @@ impl SessionManager {
                     process_id: session.process_id.clone(),
                     interaction_id: snapshot.interaction_id.clone(),
                     rpc_id: snapshot.rpc_id,
-                    acp,
+                    reply: Some(reply),
                 },
                 snapshot,
             ))
@@ -6121,7 +6337,7 @@ impl SessionManager {
         session_id: Option<String>,
         interaction_id: Option<String>,
     ) -> Result<SessionSnapshot, String> {
-        let (target, resolving) = self.prepare_permission_resolution(
+        let (mut target, resolving) = self.prepare_permission_resolution(
             session_id.as_deref(),
             Some(rpc_id),
             interaction_id.as_deref(),
@@ -6136,11 +6352,21 @@ impl SessionManager {
                 option_id: option_id.unwrap_or_else(|| "allow_once".into()),
             },
         };
-        if let Err(error) = target.acp.respond_permission(target.rpc_id, outcome).await {
-            if let Some(restored) = self.restore_permission_after_write_failure(&target) {
-                Self::publish_interaction(&app, &restored);
+        match target.reply.take() {
+            Some(PermissionReplyChannel::Acp(acp)) => {
+                if let Err(error) = acp.respond_permission(target.rpc_id, outcome).await {
+                    if let Some(restored) = self.restore_permission_after_write_failure(&target) {
+                        Self::publish_interaction(&app, &restored);
+                    }
+                    return Err(error);
+                }
             }
-            return Err(error);
+            Some(PermissionReplyChannel::Host(tx)) => {
+                if tx.send(outcome).is_err() {
+                    // Turn already cancelled; still clear the pending snapshot below.
+                }
+            }
+            None => return Err("permission reply already consumed".into()),
         }
         let cache_scope = matches!(decision.as_str(), "allow_session" | "allow_for_session")
             .then_some(scope.as_deref())
@@ -6890,6 +7116,7 @@ mod tests {
             needs_history_bootstrap: false,
             pending_plan: None,
             pending_permission: None,
+            host_rpc_seq: 0,
             pending_ask_user: None,
             last_activity: now,
             last_stream_progress: now,
@@ -7513,5 +7740,156 @@ mod tests {
         assert_eq!(origin.fsm.state(), SessionState::Ready);
         assert!(origin.streaming_message_id.is_none());
         assert!(origin.stream_buf.is_empty());
+    }
+
+    #[test]
+    fn host_permission_resolve_does_not_require_acp() {
+        let manager = SessionManager::new();
+        let mut session = test_live_session("host-perm");
+        let _ = session.fsm.await_permission();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let snapshot = InteractionSnapshotV1::new(
+            "host-perm",
+            "process-host-perm",
+            7,
+            Some("tool-1".into()),
+            InteractionPayloadV1::Permission {
+                tool_name: "write_file".into(),
+                title: "Write a.txt".into(),
+                preview: "a.txt (4 bytes)".into(),
+                scope_key: "write_file:/tmp/a.txt".into(),
+                options: SessionManager::host_permission_options(),
+            },
+        );
+        session.pending_permission = Some(PendingPermission {
+            interaction: snapshot,
+            host_reply: Some(tx),
+        });
+        *manager.inner.lock() = Some(session);
+
+        let (mut target, resolving) = manager
+            .prepare_permission_resolution(Some("host-perm"), Some(7), None)
+            .unwrap();
+        assert_eq!(resolving.status, InteractionStatusV1::Resolving);
+        match target.reply.take() {
+            Some(PermissionReplyChannel::Host(tx)) => {
+                tx.send(PermissionOutcome::Selected {
+                    option_id: "allow_once".into(),
+                })
+                .unwrap();
+            }
+            _ => panic!("expected Host reply channel"),
+        }
+        let (cleared, finished, _, _) = manager.clear_resolved_permission(&target, None);
+        assert!(cleared.is_some());
+        assert!(!finished);
+        let outcome = rx.blocking_recv().unwrap();
+        match outcome {
+            PermissionOutcome::Selected { option_id } => assert_eq!(option_id, "allow_once"),
+            PermissionOutcome::Cancelled => panic!("host resolve cancelled"),
+        }
+        assert!(manager
+            .inner
+            .lock()
+            .as_ref()
+            .unwrap()
+            .pending_permission
+            .is_none());
+        assert_eq!(
+            manager.inner.lock().as_ref().unwrap().fsm.state(),
+            SessionState::Streaming
+        );
+    }
+
+    #[test]
+    fn interrupt_host_permission_drops_oneshot_without_execute() {
+        let mut session = test_live_session("host-stop");
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        session.pending_permission = Some(PendingPermission {
+            interaction: InteractionSnapshotV1::new(
+                "host-stop",
+                "process-host-stop",
+                1,
+                Some("tool-stop".into()),
+                InteractionPayloadV1::Permission {
+                    tool_name: "run_command".into(),
+                    title: "Run echo".into(),
+                    preview: "echo (cwd: .)".into(),
+                    scope_key: "run_command:echo".into(),
+                    options: SessionManager::host_permission_options(),
+                },
+            ),
+            host_reply: Some(tx),
+        });
+        let interrupted = interrupt_pending_interactions(&mut session);
+        assert_eq!(interrupted.len(), 1);
+        assert_eq!(interrupted[0].status, InteractionStatusV1::Interrupted);
+        assert!(session.pending_permission.is_none());
+        assert!(rx.blocking_recv().is_err());
+    }
+
+    #[test]
+    fn install_host_permission_auto_allow_write_under_accept_edits() {
+        let manager = SessionManager::new();
+        let mut session = test_live_session("host-auto");
+        session.policy = PermissionPolicy::AcceptEdits;
+        let root = std::env::temp_dir().join("sunsetz-host-auto-write");
+        let _ = std::fs::create_dir_all(&root);
+        let inside = root.join("a.rs");
+        let _ = std::fs::write(&inside, "fn main() {}");
+        session.project_path = Some(root.to_string_lossy().into_owned());
+        *manager.inner.lock() = Some(session);
+
+        let (_rx, request, _snapshot, auto, auto_deny, _) = manager
+            .install_host_permission(
+                "host-auto",
+                &agent_loop::HostToolPermission {
+                    tool_name: "write_file".into(),
+                    title: "Write a.rs".into(),
+                    preview: "a.rs (12 bytes)".into(),
+                    path_target: inside.to_string_lossy().into_owned(),
+                    command: String::new(),
+                    tool_call_id: "t1".into(),
+                },
+            )
+            .unwrap();
+        assert!(auto);
+        assert!(!auto_deny);
+        assert_eq!(request.tool_name, "write_file");
+        assert_eq!(request.preview, "a.rs (12 bytes)");
+        assert!(!request.preview.contains("fn main"));
+
+        let already = manager
+            .install_host_permission(
+                "host-auto",
+                &agent_loop::HostToolPermission {
+                    tool_name: "run_command".into(),
+                    title: "Run echo".into(),
+                    preview: "echo hi (cwd: .)".into(),
+                    path_target: String::new(),
+                    command: "echo hi".into(),
+                    tool_call_id: "t2".into(),
+                },
+            )
+            .unwrap_err();
+        assert!(already.contains("already pending"), "{already}");
+
+        manager.inner.lock().as_mut().unwrap().pending_permission = None;
+        let (_rx, _request, _snapshot, auto_cmd, auto_deny_cmd, _) = manager
+            .install_host_permission(
+                "host-auto",
+                &agent_loop::HostToolPermission {
+                    tool_name: "run_command".into(),
+                    title: "Run echo".into(),
+                    preview: "echo hi (cwd: .)".into(),
+                    path_target: String::new(),
+                    command: "echo hi".into(),
+                    tool_call_id: "t3".into(),
+                },
+            )
+            .unwrap();
+        assert!(!auto_cmd, "AcceptEdits must not auto-allow run_command");
+        assert!(!auto_deny_cmd);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

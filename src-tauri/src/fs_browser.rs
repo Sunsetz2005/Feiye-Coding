@@ -8,7 +8,7 @@ use std::path::{Component, Path, PathBuf};
 use base64::Engine;
 use serde::Serialize;
 
-const MAX_TEXT_BYTES: u64 = 2 * 1024 * 1024; // 2 MiB text preview
+pub(crate) const MAX_TEXT_BYTES: u64 = 2 * 1024 * 1024; // 2 MiB text preview
 const MAX_BINARY_BYTES: u64 = 8 * 1024 * 1024; // 8 MiB image / pdf
 /// Office packages streamed to the UI for rich render (docx-preview / xlsx / pdf).
 const MAX_OFFICE_STREAM_BYTES: u64 = 40 * 1024 * 1024;

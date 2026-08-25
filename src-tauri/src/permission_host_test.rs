@@ -95,10 +95,57 @@ mod host_permission_e2e {
                 }
             }
         });
+        assert_eq!(extract_path_target(&raw), "/Users/me/proj/SPIKE_PERM.txt");
+    }
+
+    #[test]
+    fn host_write_file_and_run_command_options_map() {
+        let options = serde_json::json!([
+            {"optionId": "allow_once", "kind": "allow_once", "name": "Allow once"},
+            {"optionId": "allow_always", "kind": "allow_always", "name": "Allow for session"},
+            {"optionId": "reject_once", "kind": "reject_once", "name": "Reject"}
+        ]);
         assert_eq!(
-            extract_path_target(&raw),
-            "/Users/me/proj/SPIKE_PERM.txt"
+            pick_option_id(&options, "allow_once").as_deref(),
+            Some("allow_once")
         );
+        assert_eq!(
+            pick_option_id(&options, "allow_always").as_deref(),
+            Some("allow_always")
+        );
+        assert_eq!(
+            pick_option_id(&options, "reject_once").as_deref(),
+            Some("reject_once")
+        );
+    }
+
+    #[test]
+    fn host_accept_edits_write_file_in_root_not_run_command() {
+        let root = std::env::temp_dir().join("sunsetz-host-write-file");
+        let _ = std::fs::create_dir_all(&root);
+        let inside = root.join("notes.txt");
+        let _ = std::fs::write(&inside, "ok");
+        let cache = SessionAllowCache::default();
+        assert!(may_auto_allow(
+            PermissionPolicy::AcceptEdits,
+            &cache,
+            &scope_key("write_file", &inside.to_string_lossy()),
+            Some(&root),
+            &inside.to_string_lossy(),
+            "write_file",
+            "",
+        ));
+        assert!(!may_auto_allow(
+            PermissionPolicy::AcceptEdits,
+            &cache,
+            "run_command:echo hi",
+            Some(&root),
+            "",
+            "run_command",
+            "echo hi",
+        ));
+        assert!(is_outside_project(&root, "../.ssh/id_rsa"));
+        assert!(is_outside_project(&root, "/etc/passwd"));
     }
 
     #[test]

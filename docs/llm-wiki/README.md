@@ -31,6 +31,8 @@ Agent 与贡献者的**可执行知识库**。改产品行为或 UI 文案前，
 - i18n：`src/i18n/`
 - Build 目录：`src/lib/grokCatalog.ts`
 - UI 入口：`src/App.tsx`
+- 输入器：`src/components/ComposerDock.tsx`
 - 会话渲染：`src/components/lobe-chat/ConversationThread.tsx`
 - 活动时间线：`src/components/lobe-chat/activityTimelineModel.ts`
 - Host 会话协调：`src-tauri/src/session_manager.rs`
+- 内建 Agent 循环：`src-tauri/src/agent_loop.rs`

@@ -24,6 +24,23 @@ describe("mapPermissionButtons (shipped)", () => {
     ]);
   });
 
+  it("maps Host write_file/run_command option array", () => {
+    const buttons = mapPermissionButtons([
+      { optionId: "allow_once", name: "Allow once", kind: "allow_once" },
+      { optionId: "allow_always", name: "Allow for session", kind: "allow_always" },
+      { optionId: "reject_once", name: "Reject", kind: "reject_once" },
+    ]);
+    expect(buttons).toEqual([
+      { decision: "allow_once", optionId: "allow_once", label: "Allow once" },
+      {
+        decision: "allow_session",
+        optionId: "allow_always",
+        label: "Allow for session",
+      },
+      { decision: "deny", optionId: "reject_once", label: "Deny" },
+    ]);
+  });
+
   it("falls back when options empty", () => {
     const buttons = mapPermissionButtons([]);
     expect(buttons).toHaveLength(3);

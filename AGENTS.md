@@ -13,7 +13,7 @@
 ## Product rules
 
 - Preserve the Tauri command/event interfaces, session state machine, permission semantics, and persisted data shapes.
-- The setup wizard and home route must not require a Grok CLI binary. First-slice Host tools are `read_file` and `list_directory` inside a trusted project root only.
+- The setup wizard and home route must not require a Grok CLI binary. Host tools are `read_file`, `list_directory`, `write_file`, and `run_command` inside a trusted project root. Writes and commands go through the existing permission dock; `AcceptEdits` auto-allows in-root writes only and never commands. This slice does not add sandbox.
 - The application has light, dark, and high-contrast themes. New surfaces must use tokens from `src/styles/tokens.css`.
 - Keep Sunsetz coral as the single product accent. Editor, media, and code surfaces stay opaque; glass is limited to navigation, composer, menus, and dialogs.
 - Workbench and conversation changes must preserve the invariants in [`docs/llm-wiki/workbench-conversation.md`](docs/llm-wiki/workbench-conversation.md).

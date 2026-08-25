@@ -1,16 +1,24 @@
-//! Sunsetz-owned agent kernel (first slice).
+//! Sunsetz-owned agent kernel.
 //!
 //! The product runtime is this in-process loop, not a spawned `grok agent stdio`
 //! process. It sends the user prompt to an OpenAI-compatible chat endpoint using
-//! existing providers/secrets, executes Host-owned `read_file` and
-//! `list_directory` inside a trusted project root, and emits the same
-//! `AcpEvent` surface the session UI already consumes.
+//! existing providers/secrets, executes Host-owned `read_file`, `list_directory`,
+//! `write_file`, and `run_command` inside a trusted project root, and emits the
+//! same `AcpEvent` surface the session UI already consumes.
 //!
-//! Out of scope this slice: write_file, run_command, Hermes skills, memory
-//! injection, cron, plugins, sandbox.
+//! Writes and commands wait on the Host permission dock (or an explicit
+//! auto-allow policy) before they run. Reads stay immediate inside a trusted
+//! root. This slice is unsandboxed: no bubblewrap / seatbelt / job object.
+//!
+//! Out of scope this slice: Hermes skills, memory injection, cron, plugins,
+//! sandbox. The Grok ACP adapter stays behind an explicit legacy flag.
 
 use std::collections::BTreeMap;
+use std::ffi::OsString;
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -22,6 +30,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use crate::acp_client::{AcpEvent, StreamKind};
 use crate::error::{AgentError, AgentErrorCode};
 use crate::fs_browser;
+use crate::process_util;
 use crate::providers::{self, ActiveRoute};
 use crate::runtime_compat;
 use crate::store::{self, ChatMessageStored};
@@ -38,6 +47,30 @@ const MAX_LIST_ENTRIES: usize = 200;
 const MAX_HISTORY_MESSAGES: usize = 24;
 const MAX_HISTORY_CHARS: usize = 32_768;
 const HTTP_TIMEOUT_SECS: u64 = 120;
+const COMMAND_TIMEOUT_SECS: u64 = 60;
+
+#[derive(Debug, Clone)]
+pub struct HostToolPermission {
+    pub tool_name: String,
+    pub title: String,
+    pub preview: String,
+    pub path_target: String,
+    pub command: String,
+    pub tool_call_id: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostToolPermissionDecision {
+    Allow,
+    Deny,
+    Cancelled,
+}
+
+pub type HostToolPermissionGate = Arc<
+    dyn Fn(HostToolPermission) -> Pin<Box<dyn Future<Output = HostToolPermissionDecision> + Send>>
+        + Send
+        + Sync,
+>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LlmEndpoint {
@@ -46,7 +79,7 @@ pub struct LlmEndpoint {
     pub model: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AgentTurnConfig {
     pub endpoint: LlmEndpoint,
     pub project_root: Option<PathBuf>,
@@ -56,6 +89,7 @@ pub struct AgentTurnConfig {
     pub stop: Arc<AtomicBool>,
     pub client: reqwest::Client,
     pub max_tool_rounds: u32,
+    pub permission_gate: Option<HostToolPermissionGate>,
 }
 
 pub fn default_runtime_backend() -> String {
@@ -306,9 +340,10 @@ pub fn chat_history_from_journal(messages: &[ChatMessageStored]) -> Vec<Value> {
 pub fn system_prompt(project_root: Option<&Path>, trusted: bool) -> String {
     let mut prompt = String::from(
         "You are Sunsetz Runtime, the built-in agent kernel of the Sunsetz desktop workbench. \
-         Answer the user directly. You may call read_file and list_directory only inside the \
-         trusted project root. You cannot write files, run commands, or access paths outside \
-         that root.",
+         Answer the user directly. You may call read_file, list_directory, write_file, and \
+         run_command only inside the trusted project root. Writes and commands require user \
+         permission. You cannot access paths outside that root. run_command is unsandboxed \
+         except for the trusted-root cwd pin, permission gate, and a 60s timeout.",
     );
     match (project_root, trusted) {
         (Some(root), true) => {
@@ -351,6 +386,36 @@ pub fn tool_definitions() -> Value {
                     }
                 }
             }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "write_file",
+                "description": "Create or overwrite a UTF-8 text file inside the trusted project root. Path is relative to that root. Requires permission.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "Relative file path under the trusted project root." },
+                        "content": { "type": "string", "description": "UTF-8 text to write." }
+                    },
+                    "required": ["path", "content"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "run_command",
+                "description": "Run a shell command with cwd pinned to a directory inside the trusted project root. Unsandboxed except for the cwd pin, permission gate, and 60s timeout. Requires permission; AcceptEdits does not auto-allow this tool.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "command": { "type": "string", "description": "Exact command string to run." },
+                        "cwd": { "type": "string", "description": "Optional relative directory under the trusted project root. Defaults to the root." }
+                    },
+                    "required": ["command"]
+                }
+            }
         }
     ])
 }
@@ -364,6 +429,60 @@ fn tool_path_arg(arguments: &Value) -> String {
         .unwrap_or(".")
         .trim()
         .to_string()
+}
+
+fn tool_write_path_arg(arguments: &Value) -> String {
+    arguments
+        .get("path")
+        .or_else(|| arguments.get("relative_path"))
+        .or_else(|| arguments.get("relativePath"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string()
+}
+
+fn tool_content_arg(arguments: &Value) -> Result<String, String> {
+    match arguments.get("content") {
+        Some(Value::String(text)) => Ok(text.clone()),
+        Some(_) => Err("write_file requires UTF-8 `content`".into()),
+        None => Err("write_file requires UTF-8 `content`".into()),
+    }
+}
+
+fn tool_command_arg(arguments: &Value) -> String {
+    arguments
+        .get("command")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string()
+}
+
+fn tool_cwd_arg(arguments: &Value) -> String {
+    arguments
+        .get("cwd")
+        .and_then(Value::as_str)
+        .unwrap_or(".")
+        .trim()
+        .to_string()
+}
+
+fn display_rel(relative: &str) -> String {
+    let trimmed = relative.trim();
+    if trimmed.is_empty() {
+        ".".into()
+    } else {
+        trimmed.trim_start_matches("./").to_string()
+    }
+}
+
+fn is_absolute_input(raw: &str) -> bool {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    Path::new(trimmed).is_absolute() || trimmed.starts_with('/') || trimmed.starts_with('\\')
 }
 
 fn ensure_within_trusted_root(root: &Path, candidate: &Path) -> Result<PathBuf, String> {
@@ -415,11 +534,361 @@ pub fn execute_list_directory(root: &Path, relative: &str) -> Result<String, Str
     serde_json::to_string_pretty(&entries).map_err(|error| error.to_string())
 }
 
-pub fn execute_tool(root: Option<&Path>, trusted: bool, name: &str, arguments: &Value) -> String {
-    if name == "write_file" || name == "run_command" {
-        return format!("unsupported tool `{name}` in this Sunsetz Runtime slice");
+/// Resolve a project-relative write destination without following a symlink out
+/// of the trusted root. Missing parents are reconstructed from the nearest
+/// existing ancestor after that ancestor canonicalizes inside the root.
+fn resolve_in_root_dest(root: &Path, relative: &str) -> Result<PathBuf, String> {
+    if relative.contains('\0') {
+        return Err("invalid path".into());
     }
-    if !matches!(name, "read_file" | "list_directory") {
+    let rel = relative.trim();
+    if rel.is_empty() || rel == "." {
+        return Err("empty relative path".into());
+    }
+    if is_absolute_input(rel) {
+        return Err("absolute path not allowed".into());
+    }
+    let joined = fs_browser::lexical_join(root, rel)?;
+    let root_canon = root
+        .canonicalize()
+        .map_err(|error| format!("trusted project root is not accessible: {error}"))?;
+    let Some(file_name) = joined.file_name() else {
+        return Err("empty relative path".into());
+    };
+    let parent = joined.parent().unwrap_or(root);
+    let mut ancestor = parent.to_path_buf();
+    let mut missing: Vec<OsString> = Vec::new();
+    while !ancestor.exists() {
+        match ancestor.file_name() {
+            Some(name) => missing.push(name.to_os_string()),
+            None => return Err("path escapes trusted project root".into()),
+        }
+        ancestor = ancestor
+            .parent()
+            .map(Path::to_path_buf)
+            .ok_or_else(|| "path escapes trusted project root".to_string())?;
+        if missing.len() > 64 {
+            return Err("path escapes trusted project root".into());
+        }
+    }
+    let mut parent_canon = ancestor
+        .canonicalize()
+        .map_err(|error| format!("path is not accessible: {error}"))?;
+    if !parent_canon.starts_with(&root_canon) {
+        return Err("path escapes trusted project root".into());
+    }
+    for name in missing.into_iter().rev() {
+        parent_canon.push(name);
+        if !parent_canon.starts_with(&root_canon) {
+            return Err("path escapes trusted project root".into());
+        }
+    }
+    let dest = parent_canon.join(file_name);
+    if !dest.starts_with(&root_canon) {
+        return Err("path escapes trusted project root".into());
+    }
+    if dest.exists() {
+        let meta = dest
+            .symlink_metadata()
+            .map_err(|error| format!("path is not accessible: {error}"))?;
+        if meta.is_dir() {
+            return Err(format!("not a file: {}", rel));
+        }
+        if meta.file_type().is_symlink() {
+            match dest.canonicalize() {
+                Ok(target) if target.starts_with(&root_canon) => {}
+                _ => return Err("path escapes trusted project root".into()),
+            }
+        }
+    }
+    Ok(dest)
+}
+
+fn atomic_write_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| "invalid parent directory".to_string())?;
+    let tmp_name = format!(
+        ".{}.sunsetz-write-{}",
+        path.file_name().and_then(|s| s.to_str()).unwrap_or("file"),
+        std::process::id()
+    );
+    let tmp = parent.join(tmp_name);
+    std::fs::write(&tmp, bytes).map_err(|error| format!("write temp: {error}"))?;
+    std::fs::rename(&tmp, path).map_err(|error| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("rename into place: {error}")
+    })?;
+    Ok(())
+}
+
+#[derive(Debug)]
+struct PreparedWrite {
+    rel: String,
+    content: String,
+    preview: String,
+    path_target: String,
+    title: String,
+}
+
+fn prepare_write_file(root: &Path, arguments: &Value) -> Result<PreparedWrite, String> {
+    let rel = tool_write_path_arg(arguments);
+    let content = tool_content_arg(arguments)?;
+    if rel.contains('\0') {
+        return Err("invalid path".into());
+    }
+    if content.contains('\0') {
+        return Err("invalid content".into());
+    }
+    if content.as_bytes().len() as u64 > fs_browser::MAX_TEXT_BYTES {
+        return Err(format!(
+            "file too large to write (max {} bytes)",
+            fs_browser::MAX_TEXT_BYTES
+        ));
+    }
+    let dest = resolve_in_root_dest(root, &rel)?;
+    if dest.is_dir() {
+        return Err(format!("not a file: {}", display_rel(&rel)));
+    }
+    let shown = display_rel(&rel);
+    Ok(PreparedWrite {
+        preview: format!("{} ({} bytes)", shown, content.as_bytes().len()),
+        path_target: dest.to_string_lossy().replace('\\', "/"),
+        title: format!("Write {shown}"),
+        rel: shown,
+        content,
+    })
+}
+
+pub fn execute_write_file(root: &Path, relative: &str, content: &str) -> Result<String, String> {
+    if content.contains('\0') {
+        return Err("invalid content".into());
+    }
+    let bytes = content.as_bytes();
+    if bytes.len() as u64 > fs_browser::MAX_TEXT_BYTES {
+        return Err(format!(
+            "file too large to write (max {} bytes)",
+            fs_browser::MAX_TEXT_BYTES
+        ));
+    }
+    let dest = resolve_in_root_dest(root, relative)?;
+    if dest.is_dir() {
+        return Err(format!("not a file: {}", display_rel(relative)));
+    }
+    if let Some(parent) = dest.parent() {
+        if !parent.exists() {
+            std::fs::create_dir_all(parent).map_err(|error| format!("create parent: {error}"))?;
+            let parent_canon = parent
+                .canonicalize()
+                .map_err(|error| format!("path is not accessible: {error}"))?;
+            let root_canon = root
+                .canonicalize()
+                .map_err(|error| format!("trusted project root is not accessible: {error}"))?;
+            if !parent_canon.starts_with(&root_canon) {
+                return Err("path escapes trusted project root".into());
+            }
+        }
+    }
+    atomic_write_file(&dest, bytes)?;
+    Ok(format!(
+        "wrote {} ({} bytes)",
+        display_rel(relative),
+        bytes.len()
+    ))
+}
+
+#[derive(Debug)]
+struct PreparedCommand {
+    command: String,
+    #[allow(dead_code)]
+    cwd_rel: String,
+    cwd_canon: PathBuf,
+    preview: String,
+    title: String,
+}
+
+fn prepare_run_command(root: &Path, arguments: &Value) -> Result<PreparedCommand, String> {
+    let command = tool_command_arg(arguments);
+    if command.is_empty() {
+        return Err("empty command".into());
+    }
+    if command.contains('\0') {
+        return Err("invalid command".into());
+    }
+    let cwd_rel = tool_cwd_arg(arguments);
+    if cwd_rel.contains('\0') {
+        return Err("invalid cwd".into());
+    }
+    if is_absolute_input(&cwd_rel) {
+        return Err("absolute path not allowed".into());
+    }
+    let cwd_joined = fs_browser::lexical_join(root, &cwd_rel)?;
+    let cwd = ensure_within_trusted_root(root, &cwd_joined)?;
+    if !cwd.is_dir() {
+        return Err(format!("not a directory: {}", display_rel(&cwd_rel)));
+    }
+    let cwd_canon = cwd
+        .canonicalize()
+        .map_err(|error| format!("path is not accessible: {error}"))?;
+    let root_canon = root
+        .canonicalize()
+        .map_err(|error| format!("trusted project root is not accessible: {error}"))?;
+    if !cwd_canon.starts_with(&root_canon) {
+        return Err("path escapes trusted project root".into());
+    }
+    let cwd_show = display_rel(&cwd_rel);
+    let title_cmd = if command.chars().count() > 96 {
+        format!("{}…", command.chars().take(96).collect::<String>())
+    } else {
+        command.clone()
+    };
+    Ok(PreparedCommand {
+        preview: format!("{command} (cwd: {cwd_show})"),
+        title: format!("Run {title_cmd}"),
+        command,
+        cwd_rel: cwd_show,
+        cwd_canon,
+    })
+}
+
+fn bound_command_output(mut text: String) -> String {
+    if text.chars().count() > MAX_FILE_CHARS {
+        text = text.chars().take(MAX_FILE_CHARS).collect();
+        text.push_str("\n… truncated");
+    }
+    text
+}
+
+fn kill_run_command_child(child: &mut tokio::process::Child) {
+    if let Some(pid) = child.id() {
+        #[cfg(unix)]
+        unsafe {
+            libc::kill(-(pid as i32), libc::SIGKILL);
+        }
+        let _ = pid;
+    }
+    let _ = child.start_kill();
+}
+
+#[derive(Debug)]
+enum RunCommandOutcome {
+    Output(String),
+    Cancelled,
+}
+
+async fn execute_run_command(
+    command: &str,
+    cwd: &Path,
+    stop: Arc<AtomicBool>,
+) -> Result<RunCommandOutcome, String> {
+    execute_run_command_timed(
+        command,
+        cwd,
+        stop,
+        Duration::from_secs(COMMAND_TIMEOUT_SECS),
+    )
+    .await
+}
+
+async fn execute_run_command_timed(
+    command: &str,
+    cwd: &Path,
+    stop: Arc<AtomicBool>,
+    timeout: Duration,
+) -> Result<RunCommandOutcome, String> {
+    if command.trim().is_empty() {
+        return Err("empty command".into());
+    }
+    if command.contains('\0') {
+        return Err("invalid command".into());
+    }
+    let mut cmd = if cfg!(windows) {
+        let mut spawned = tokio::process::Command::new("cmd.exe");
+        spawned.arg("/C").arg(command);
+        process_util::apply_no_window_tokio(&mut spawned);
+        spawned
+    } else {
+        let mut spawned = tokio::process::Command::new("/bin/sh");
+        spawned.arg("-lc").arg(command);
+        spawned
+    };
+    cmd.current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    {
+        cmd.process_group(0);
+    }
+    let mut child = cmd
+        .spawn()
+        .map_err(|error| format!("run_command: {error}"))?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "run_command: missing stdout".to_string())?;
+    let mut stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "run_command: missing stderr".to_string())?;
+    let read_out = async {
+        let mut buf = Vec::new();
+        let _ = stdout.read_to_end(&mut buf).await;
+        buf
+    };
+    let read_err = async {
+        let mut buf = Vec::new();
+        let _ = stderr.read_to_end(&mut buf).await;
+        buf
+    };
+    tokio::select! {
+        _ = wait_until_stopped(Arc::clone(&stop)) => {
+            kill_run_command_child(&mut child);
+            let _ = child.wait().await;
+            Ok(RunCommandOutcome::Cancelled)
+        }
+        _ = tokio::time::sleep(timeout) => {
+            kill_run_command_child(&mut child);
+            let _ = child.wait().await;
+            Err(format!("command timed out after {COMMAND_TIMEOUT_SECS}s"))
+        }
+        joined = async {
+            let status = child.wait().await;
+            let (out, err) = tokio::join!(read_out, read_err);
+            (status, out, err)
+        } => {
+            let (status, out, err) = joined;
+            let status = status.map_err(|error| format!("run_command: {error}"))?;
+            let mut text = String::from_utf8_lossy(&out).into_owned();
+            if !err.is_empty() {
+                if !text.is_empty() && !text.ends_with('\n') {
+                    text.push('\n');
+                }
+                text.push_str(&String::from_utf8_lossy(&err));
+            }
+            if text.is_empty() {
+                text = if status.success() {
+                    String::new()
+                } else {
+                    format!("exit {}", status.code().unwrap_or(-1))
+                };
+            } else if !status.success() {
+                if !text.ends_with('\n') {
+                    text.push('\n');
+                }
+                text.push_str(&format!("exit {}", status.code().unwrap_or(-1)));
+            }
+            Ok(RunCommandOutcome::Output(bound_command_output(text)))
+        }
+    }
+}
+
+pub fn execute_tool(root: Option<&Path>, trusted: bool, name: &str, arguments: &Value) -> String {
+    if !matches!(
+        name,
+        "read_file" | "list_directory" | "write_file" | "run_command"
+    ) {
         return format!("unknown tool `{name}`");
     }
     if !trusted {
@@ -428,10 +897,19 @@ pub fn execute_tool(root: Option<&Path>, trusted: bool, name: &str, arguments: &
     let Some(root) = root else {
         return "no trusted project root".into();
     };
-    let rel = tool_path_arg(arguments);
     match name {
-        "read_file" => execute_read_file(root, &rel).unwrap_or_else(|error| error),
-        "list_directory" => execute_list_directory(root, &rel).unwrap_or_else(|error| error),
+        "read_file" => {
+            execute_read_file(root, &tool_path_arg(arguments)).unwrap_or_else(|error| error)
+        }
+        "list_directory" => {
+            execute_list_directory(root, &tool_path_arg(arguments)).unwrap_or_else(|error| error)
+        }
+        "write_file" => match tool_content_arg(arguments) {
+            Ok(content) => execute_write_file(root, &tool_write_path_arg(arguments), &content)
+                .unwrap_or_else(|error| error),
+            Err(error) => error,
+        },
+        "run_command" => "run_command requires the async Host turn".into(),
         _ => format!("unknown tool `{name}`"),
     }
 }
@@ -485,6 +963,131 @@ async fn wait_until_stopped(stop: Arc<AtomicBool>) {
     }
 }
 
+fn needs_permission(name: &str) -> bool {
+    matches!(name, "write_file" | "run_command")
+}
+
+enum HostToolDispatch {
+    Output(String),
+    Cancelled,
+}
+
+async fn request_tool_permission(
+    cfg: &AgentTurnConfig,
+    req: HostToolPermission,
+) -> HostToolPermissionDecision {
+    let Some(gate) = cfg.permission_gate.clone() else {
+        return HostToolPermissionDecision::Deny;
+    };
+    tokio::select! {
+        _ = wait_until_stopped(Arc::clone(&cfg.stop)) => HostToolPermissionDecision::Cancelled,
+        decision = gate(req) => decision,
+    }
+}
+
+async fn dispatch_host_tool(
+    cfg: &AgentTurnConfig,
+    name: &str,
+    arguments: &Value,
+    tool_call_id: &str,
+    prepared_write: Option<Result<PreparedWrite, String>>,
+    prepared_command: Option<Result<PreparedCommand, String>>,
+) -> HostToolDispatch {
+    if !matches!(
+        name,
+        "read_file" | "list_directory" | "write_file" | "run_command"
+    ) {
+        return HostToolDispatch::Output(format!("unknown tool `{name}`"));
+    }
+    if !cfg.trusted || cfg.project_root.is_none() {
+        return HostToolDispatch::Output("no trusted project root".into());
+    }
+    let root = cfg.project_root.as_deref().unwrap();
+
+    if name == "write_file" {
+        let prepared = match prepared_write.unwrap_or_else(|| prepare_write_file(root, arguments)) {
+            Ok(prepared) => prepared,
+            Err(error) => return HostToolDispatch::Output(error),
+        };
+        if needs_permission(name) {
+            let decision = request_tool_permission(
+                cfg,
+                HostToolPermission {
+                    tool_name: name.into(),
+                    title: prepared.title.clone(),
+                    preview: prepared.preview.clone(),
+                    path_target: prepared.path_target.clone(),
+                    command: String::new(),
+                    tool_call_id: tool_call_id.into(),
+                },
+            )
+            .await;
+            match decision {
+                HostToolPermissionDecision::Allow => {}
+                HostToolPermissionDecision::Deny => {
+                    return HostToolDispatch::Output("permission denied by user".into());
+                }
+                HostToolPermissionDecision::Cancelled => {
+                    return HostToolDispatch::Cancelled;
+                }
+            }
+        }
+        return HostToolDispatch::Output(
+            execute_write_file(root, &prepared.rel, &prepared.content)
+                .unwrap_or_else(|error| error),
+        );
+    }
+
+    if name == "run_command" {
+        let prepared =
+            match prepared_command.unwrap_or_else(|| prepare_run_command(root, arguments)) {
+                Ok(prepared) => prepared,
+                Err(error) => return HostToolDispatch::Output(error),
+            };
+        if needs_permission(name) {
+            let decision = request_tool_permission(
+                cfg,
+                HostToolPermission {
+                    tool_name: name.into(),
+                    title: prepared.title.clone(),
+                    preview: prepared.preview.clone(),
+                    path_target: String::new(),
+                    command: prepared.command.clone(),
+                    tool_call_id: tool_call_id.into(),
+                },
+            )
+            .await;
+            match decision {
+                HostToolPermissionDecision::Allow => {}
+                HostToolPermissionDecision::Deny => {
+                    return HostToolDispatch::Output("permission denied by user".into());
+                }
+                HostToolPermissionDecision::Cancelled => {
+                    return HostToolDispatch::Cancelled;
+                }
+            }
+        }
+        return match execute_run_command(
+            &prepared.command,
+            &prepared.cwd_canon,
+            Arc::clone(&cfg.stop),
+        )
+        .await
+        {
+            Ok(RunCommandOutcome::Output(text)) => HostToolDispatch::Output(text),
+            Ok(RunCommandOutcome::Cancelled) => HostToolDispatch::Cancelled,
+            Err(error) => HostToolDispatch::Output(error),
+        };
+    }
+
+    HostToolDispatch::Output(execute_tool(
+        cfg.project_root.as_deref(),
+        cfg.trusted,
+        name,
+        arguments,
+    ))
+}
+
 pub async fn run_turn<F>(cfg: AgentTurnConfig, mut emit: F)
 where
     F: FnMut(AcpEvent) + Send,
@@ -494,7 +1097,7 @@ where
         "role": "system",
         "content": system_prompt(cfg.project_root.as_deref(), cfg.trusted),
     })];
-    messages.extend(cfg.history);
+    messages.extend(cfg.history.clone());
     messages.push(json!({
         "role": "user",
         "content": cfg.user_prompt,
@@ -544,19 +1147,73 @@ where
                         call.id.clone()
                     };
                     let args_value = parse_tool_arguments(&call.arguments);
+                    let prepared_write =
+                        if call.name == "write_file" && cfg.trusted && cfg.project_root.is_some() {
+                            cfg.project_root
+                                .as_deref()
+                                .map(|root| prepare_write_file(root, &args_value))
+                        } else {
+                            None
+                        };
+                    let prepared_command = if call.name == "run_command"
+                        && cfg.trusted
+                        && cfg.project_root.is_some()
+                    {
+                        cfg.project_root
+                            .as_deref()
+                            .map(|root| prepare_run_command(root, &args_value))
+                    } else {
+                        None
+                    };
                     let title = match call.name.as_str() {
                         "read_file" => format!("Read {}", tool_path_arg(&args_value)),
                         "list_directory" => {
                             format!("List {}", tool_path_arg(&args_value))
                         }
+                        "write_file" => prepared_write
+                            .as_ref()
+                            .and_then(|prepared| prepared.as_ref().ok())
+                            .map(|prepared| prepared.title.clone())
+                            .unwrap_or_else(|| {
+                                format!("Write {}", display_rel(&tool_write_path_arg(&args_value)))
+                            }),
+                        "run_command" => prepared_command
+                            .as_ref()
+                            .and_then(|prepared| prepared.as_ref().ok())
+                            .map(|prepared| prepared.title.clone())
+                            .unwrap_or_else(|| {
+                                let command = tool_command_arg(&args_value);
+                                if command.is_empty() {
+                                    "Run".into()
+                                } else {
+                                    format!("Run {command}")
+                                }
+                            }),
                         other => other.to_string(),
                     };
                     let kind = match call.name.as_str() {
                         "read_file" => "read",
                         "list_directory" => "list",
+                        "write_file" => "edit",
+                        "run_command" => "execute",
                         other => other,
                     };
-                    let raw = json!({ "rawInput": args_value });
+                    let raw_input = match call.name.as_str() {
+                        "write_file" => {
+                            let rel = display_rel(&tool_write_path_arg(&args_value));
+                            let bytes = tool_content_arg(&args_value)
+                                .ok()
+                                .map(|content| content.len())
+                                .unwrap_or(0);
+                            json!({ "path": rel, "bytes": bytes })
+                        }
+                        "run_command" => json!({
+                            "command": tool_command_arg(&args_value),
+                            "cwd": display_rel(&tool_cwd_arg(&args_value)),
+                        }),
+                        _ => args_value.clone(),
+                    };
+                    let raw = json!({ "rawInput": raw_input });
                     emit(AcpEvent::ToolCall {
                         tool_call_id: id.clone(),
                         title: title.clone(),
@@ -564,12 +1221,22 @@ where
                         status: "in_progress".into(),
                         raw: raw.clone(),
                     });
-                    let output = execute_tool(
-                        cfg.project_root.as_deref(),
-                        cfg.trusted,
+                    let output = match dispatch_host_tool(
+                        &cfg,
                         &call.name,
                         &args_value,
-                    );
+                        &id,
+                        prepared_write,
+                        prepared_command,
+                    )
+                    .await
+                    {
+                        HostToolDispatch::Cancelled => return,
+                        HostToolDispatch::Output(output) => output,
+                    };
+                    if cfg.stop.load(Ordering::SeqCst) {
+                        return;
+                    }
                     emit(AcpEvent::ToolCall {
                         tool_call_id: id.clone(),
                         title,
@@ -934,7 +1601,36 @@ mod tests {
             stop: Arc::new(AtomicBool::new(false)),
             client: http_client().unwrap(),
             max_tool_rounds: MAX_TOOL_ROUNDS,
+            permission_gate: None,
         }
+    }
+
+    fn allow_gate() -> HostToolPermissionGate {
+        Arc::new(|_req| Box::pin(async { HostToolPermissionDecision::Allow }))
+    }
+
+    fn deny_gate() -> HostToolPermissionGate {
+        Arc::new(|_req| Box::pin(async { HostToolPermissionDecision::Deny }))
+    }
+
+    fn counting_gate(
+        hits: Arc<std::sync::atomic::AtomicU32>,
+        decision: HostToolPermissionDecision,
+    ) -> HostToolPermissionGate {
+        Arc::new(move |_req| {
+            hits.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move { decision })
+        })
+    }
+
+    fn recording_gate(
+        sink: Arc<Mutex<Vec<HostToolPermission>>>,
+        decision: HostToolPermissionDecision,
+    ) -> HostToolPermissionGate {
+        Arc::new(move |req| {
+            sink.lock().unwrap().push(req);
+            Box::pin(async move { decision })
+        })
     }
 
     #[test]
@@ -956,12 +1652,12 @@ mod tests {
     }
 
     #[test]
-    fn tools_do_not_include_write_or_shell() {
+    fn tools_include_write_and_run_command() {
         let listed = tool_definitions().to_string();
         assert!(listed.contains("read_file"));
         assert!(listed.contains("list_directory"));
-        assert!(!listed.contains("write_file"));
-        assert!(!listed.contains("run_command"));
+        assert!(listed.contains("write_file"));
+        assert!(listed.contains("run_command"));
     }
 
     #[test]
@@ -993,14 +1689,141 @@ mod tests {
             &json!({"path":"README.md"})
         )
         .contains("no trusted project root"));
-        assert!(
-            execute_tool(Some(&root), true, "write_file", &json!({"path":"x"}))
-                .contains("unsupported")
+        assert!(execute_tool(
+            Some(&root),
+            true,
+            "write_file",
+            &json!({"path":"x.txt","content":"hi"})
+        )
+        .starts_with("wrote x.txt"));
+        assert!(root.join("x.txt").is_file());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn write_file_create_overwrite_and_parent_dir() {
+        let root = temp_root("write-ok");
+        let created = execute_write_file(&root, "notes.txt", "alpha").unwrap();
+        assert!(created.contains("wrote notes.txt"));
+        assert_eq!(
+            std::fs::read_to_string(root.join("notes.txt")).unwrap(),
+            "alpha"
         );
-        assert!(
-            execute_tool(Some(&root), true, "run_command", &json!({"path":"x"}))
-                .contains("unsupported")
+
+        execute_write_file(&root, "notes.txt", "beta").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("notes.txt")).unwrap(),
+            "beta"
         );
+
+        execute_write_file(&root, "nested/dir/file.txt", "gamma").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("nested").join("dir").join("file.txt")).unwrap(),
+            "gamma"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn write_file_refuses_escape_absolute_dir_and_oversize() {
+        let root = temp_root("write-refuse");
+        let outside = root.parent().unwrap().join(format!(
+            "sunsetz-agent-loop-secret-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let escape = execute_write_file(&root, "../secret.txt", "nope").unwrap_err();
+        assert!(
+            escape.contains("escapes") || escape.contains("absolute"),
+            "{escape}"
+        );
+        assert!(!outside.exists());
+        assert!(!root.parent().unwrap().join("secret.txt").exists());
+
+        let abs = execute_write_file(&root, "/etc/passwd", "nope").unwrap_err();
+        assert!(abs.contains("absolute") || abs.contains("escapes"), "{abs}");
+
+        std::fs::create_dir(root.join("dir")).unwrap();
+        let dir_err = execute_write_file(&root, "dir", "nope").unwrap_err();
+        assert!(
+            dir_err.contains("not a file") || dir_err.contains("empty"),
+            "{dir_err}"
+        );
+
+        let huge = "x".repeat((fs_browser::MAX_TEXT_BYTES as usize) + 1);
+        let oversize = execute_write_file(&root, "big.txt", &huge).unwrap_err();
+        assert!(oversize.contains("too large"), "{oversize}");
+        assert!(!root.join("big.txt").exists());
+
+        let empty = execute_write_file(&root, "", "x").unwrap_err();
+        assert!(empty.contains("empty"), "{empty}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn write_file_prepare_preview_has_no_body() {
+        let root = temp_root("write-preview");
+        let prepared = prepare_write_file(
+            &root,
+            &json!({"path":"src/a.rs","content":"fn secret() {}"}),
+        )
+        .unwrap();
+        assert_eq!(prepared.preview, "src/a.rs (14 bytes)");
+        assert!(!prepared.preview.contains("secret"));
+        assert!(!prepared.path_target.contains("fn secret"));
+        assert_eq!(prepared.title, "Write src/a.rs");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn run_command_succeeds_in_root_and_refuses_escape_cwd() {
+        let root = temp_root("run-ok");
+        std::fs::create_dir(root.join("sub")).unwrap();
+        std::fs::write(root.join("sub").join("marker.txt"), "here").unwrap();
+        let echo = prepare_run_command(&root, &json!({"command":"echo sunsetz-host"})).unwrap();
+        match execute_run_command(
+            &echo.command,
+            &echo.cwd_canon,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
+        .unwrap()
+        {
+            RunCommandOutcome::Output(text) => assert!(text.contains("sunsetz-host"), "{text}"),
+            RunCommandOutcome::Cancelled => panic!("echo cancelled"),
+        }
+
+        let escaped = prepare_run_command(&root, &json!({"command":"pwd","cwd":".."})).unwrap_err();
+        assert!(
+            escaped.contains("escapes") || escaped.contains("absolute"),
+            "{escaped}"
+        );
+        let abs = prepare_run_command(&root, &json!({"command":"pwd","cwd":"/tmp"})).unwrap_err();
+        assert!(abs.contains("absolute") || abs.contains("escapes"), "{abs}");
+        let empty = prepare_run_command(&root, &json!({"command":"  "})).unwrap_err();
+        assert!(empty.contains("empty"), "{empty}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn run_command_timeout_kills_child() {
+        let root = temp_root("run-timeout");
+        let hang = if cfg!(windows) {
+            "ping -n 30 127.0.0.1"
+        } else {
+            "sleep 30"
+        };
+        let prepared = prepare_run_command(&root, &json!({"command": hang})).unwrap();
+        let started = std::time::Instant::now();
+        let err = execute_run_command_timed(
+            &prepared.command,
+            &prepared.cwd_canon,
+            Arc::new(AtomicBool::new(false)),
+            Duration::from_millis(400),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("timed out"), "{err}");
+        assert!(started.elapsed() < Duration::from_secs(8));
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1138,5 +1961,198 @@ mod tests {
         assert!(!events
             .iter()
             .any(|event| matches!(event, AcpEvent::PromptComplete { .. })));
+    }
+
+    #[tokio::test]
+    async fn write_file_turn_allows_then_answers() {
+        let root = temp_root("write-turn");
+        let (tool, answer) = sse_tool_then(
+            "write_file",
+            r#"{"path":"out.txt","content":"PERM_OK"}"#,
+            &["wrote the file"],
+        );
+        let (base, server) = spawn_mock_llm(vec![tool, answer]).await;
+        let mut cfg = base_cfg(base, Some(root.clone()), true, "write out");
+        cfg.permission_gate = Some(allow_gate());
+        let events = collect_events(cfg).await;
+        server.abort();
+        assert_eq!(
+            std::fs::read_to_string(root.join("out.txt")).unwrap(),
+            "PERM_OK"
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AcpEvent::ToolCall { kind, status, title, .. }
+                if kind == "edit" && status == "completed" && title.contains("out.txt")
+        )));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn write_file_deny_does_not_touch_disk() {
+        let root = temp_root("write-deny");
+        let (tool, answer) = sse_tool_then(
+            "write_file",
+            r#"{"path":"out.txt","content":"NOPE"}"#,
+            &["denied"],
+        );
+        let (base, server) = spawn_mock_llm(vec![tool, answer]).await;
+        let mut cfg = base_cfg(base, Some(root.clone()), true, "write out");
+        cfg.permission_gate = Some(deny_gate());
+        let _events = collect_events(cfg).await;
+        server.abort();
+        assert!(!root.join("out.txt").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn write_file_escape_does_not_open_dock_or_create_file() {
+        let root = temp_root("write-escape-turn");
+        let hits = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let (tool, answer) = sse_tool_then(
+            "write_file",
+            r#"{"path":"../secret.txt","content":"NOPE"}"#,
+            &["refused"],
+        );
+        let (base, server) = spawn_mock_llm(vec![tool, answer]).await;
+        let mut cfg = base_cfg(base, Some(root.clone()), true, "write escape");
+        cfg.permission_gate = Some(counting_gate(
+            Arc::clone(&hits),
+            HostToolPermissionDecision::Allow,
+        ));
+        let _events = collect_events(cfg).await;
+        server.abort();
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+        assert!(!root.parent().unwrap().join("secret.txt").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn write_file_untrusted_does_not_open_dock() {
+        let root = temp_root("write-untrusted");
+        let hits = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let (tool, answer) = sse_tool_then(
+            "write_file",
+            r#"{"path":"out.txt","content":"NOPE"}"#,
+            &["refused"],
+        );
+        let (base, server) = spawn_mock_llm(vec![tool, answer]).await;
+        let mut cfg = base_cfg(base, Some(root.clone()), false, "write");
+        cfg.permission_gate = Some(counting_gate(
+            Arc::clone(&hits),
+            HostToolPermissionDecision::Allow,
+        ));
+        let _events = collect_events(cfg).await;
+        server.abort();
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+        assert!(!root.join("out.txt").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn write_file_missing_gate_is_fail_closed() {
+        let root = temp_root("write-no-gate");
+        let (tool, answer) = sse_tool_then(
+            "write_file",
+            r#"{"path":"out.txt","content":"NOPE"}"#,
+            &["denied"],
+        );
+        let (base, server) = spawn_mock_llm(vec![tool, answer]).await;
+        let events = collect_events(base_cfg(base, Some(root.clone()), true, "write")).await;
+        server.abort();
+        assert!(!root.join("out.txt").exists());
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AcpEvent::ToolCall { status, .. } if status == "completed"
+        )));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn write_file_preview_never_includes_body() {
+        let root = temp_root("write-preview-turn");
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let (tool, answer) = sse_tool_then(
+            "write_file",
+            r#"{"path":"a.rs","content":"fn secret_token() {}"}"#,
+            &["ok"],
+        );
+        let (base, server) = spawn_mock_llm(vec![tool, answer]).await;
+        let mut cfg = base_cfg(base, Some(root.clone()), true, "write");
+        cfg.permission_gate = Some(recording_gate(
+            Arc::clone(&seen),
+            HostToolPermissionDecision::Deny,
+        ));
+        let events = collect_events(cfg).await;
+        server.abort();
+        let reqs = seen.lock().unwrap();
+        assert_eq!(reqs.len(), 1);
+        assert!(reqs[0].preview.contains("bytes"));
+        assert!(!reqs[0].preview.contains("secret_token"));
+        assert!(!reqs[0].path_target.contains("secret_token"));
+        for event in &events {
+            if let AcpEvent::ToolCall { raw, .. } = event {
+                let dumped = raw.to_string();
+                assert!(!dumped.contains("secret_token"), "{dumped}");
+            }
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn run_command_turn_allows_then_answers() {
+        let root = temp_root("run-turn");
+        let (tool, answer) =
+            sse_tool_then("run_command", r#"{"command":"echo host-ok"}"#, &["ran it"]);
+        let (base, server) = spawn_mock_llm(vec![tool, answer]).await;
+        let mut cfg = base_cfg(base, Some(root.clone()), true, "run");
+        cfg.permission_gate = Some(allow_gate());
+        let events = collect_events(cfg).await;
+        server.abort();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AcpEvent::ToolCall { kind, status, .. }
+                if kind == "execute" && status == "completed"
+        )));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn stop_during_permission_wait_does_not_write() {
+        let root = temp_root("write-stop");
+        let started = Arc::new(tokio::sync::Notify::new());
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let gate: HostToolPermissionGate = {
+            let started = Arc::clone(&started);
+            let stop_flag = Arc::clone(&stop_flag);
+            Arc::new(move |_req| {
+                let started = Arc::clone(&started);
+                let stop_flag = Arc::clone(&stop_flag);
+                Box::pin(async move {
+                    started.notify_one();
+                    wait_until_stopped(stop_flag).await;
+                    HostToolPermissionDecision::Cancelled
+                })
+            })
+        };
+        let (tool, answer) = sse_tool_then(
+            "write_file",
+            r#"{"path":"out.txt","content":"NOPE"}"#,
+            &["should not run"],
+        );
+        let (base, server) = spawn_mock_llm(vec![tool, answer]).await;
+        let mut cfg = base_cfg(base, Some(root.clone()), true, "write");
+        cfg.stop = Arc::clone(&stop_flag);
+        cfg.permission_gate = Some(gate);
+        let turn = tokio::spawn(collect_events(cfg));
+        started.notified().await;
+        stop_flag.store(true, Ordering::SeqCst);
+        let events = turn.await.unwrap();
+        server.abort();
+        assert!(!root.join("out.txt").exists());
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, AcpEvent::PromptComplete { .. })));
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -303,10 +303,7 @@ pub fn may_auto_allow(
         return matches!(policy, PermissionPolicy::AlwaysApprove);
     }
 
-    if matches!(
-        policy,
-        PermissionPolicy::Deny | PermissionPolicy::DontAsk
-    ) {
+    if matches!(policy, PermissionPolicy::Deny | PermissionPolicy::DontAsk) {
         return false;
     }
 
@@ -661,6 +658,128 @@ mod tests {
             "",
             "search_replace",
             "",
+        ));
+    }
+
+    #[test]
+    fn accept_edits_allows_host_write_file_but_not_run_command() {
+        let c = SessionAllowCache::default();
+        let root = std::env::temp_dir().join("sunsetz-perm-host-write");
+        let _ = std::fs::create_dir_all(&root);
+        let inside = root.join("a.rs");
+        let _ = std::fs::write(&inside, "x");
+        assert!(may_auto_allow(
+            PermissionPolicy::AcceptEdits,
+            &c,
+            &format!("write_file:{}", inside.to_string_lossy()),
+            Some(&root),
+            &inside.to_string_lossy(),
+            "write_file",
+            "",
+        ));
+        assert!(!may_auto_allow(
+            PermissionPolicy::AcceptEdits,
+            &c,
+            "run_command:echo hi",
+            Some(&root),
+            "",
+            "run_command",
+            "echo hi",
+        ));
+        assert!(!may_auto_allow(
+            PermissionPolicy::Ask,
+            &c,
+            &format!("write_file:{}", inside.to_string_lossy()),
+            Some(&root),
+            &inside.to_string_lossy(),
+            "write_file",
+            "",
+        ));
+    }
+
+    #[test]
+    fn always_approve_auto_allows_in_root_host_commands() {
+        let c = SessionAllowCache::default();
+        let root = std::env::temp_dir().join("sunsetz-perm-host-yolo");
+        let _ = std::fs::create_dir_all(&root);
+        assert!(may_auto_allow(
+            PermissionPolicy::AlwaysApprove,
+            &c,
+            "run_command:echo hi",
+            Some(&root),
+            "",
+            "run_command",
+            "echo hi",
+        ));
+        // Policy YOLO still returns true for outside paths; the Host kernel
+        // refuses escaped writes/commands before the dock or execute.
+        assert!(is_outside_project(&root, "/etc/passwd"));
+    }
+
+    #[test]
+    fn host_session_cache_matches_exact_write_path_and_command() {
+        let mut c = SessionAllowCache::default();
+        let root = std::env::temp_dir().join("sunsetz-perm-host-cache");
+        let _ = std::fs::create_dir_all(root.join("src"));
+        let first = root.join("src/a.rs");
+        let second = root.join("src/b.rs");
+        let _ = std::fs::write(&first, "x");
+        let _ = std::fs::write(&second, "y");
+        let write_key = permission_scope_key(
+            "write_file",
+            &first.to_string_lossy(),
+            "",
+            Some(&root),
+            "Write src/a.rs",
+        );
+        c.allow(write_key.clone());
+        assert!(may_auto_allow(
+            PermissionPolicy::Ask,
+            &c,
+            &write_key,
+            Some(&root),
+            &first.to_string_lossy(),
+            "write_file",
+            "",
+        ));
+        let other_write = permission_scope_key(
+            "write_file",
+            &second.to_string_lossy(),
+            "",
+            Some(&root),
+            "Write src/b.rs",
+        );
+        assert!(!may_auto_allow(
+            PermissionPolicy::Ask,
+            &c,
+            &other_write,
+            Some(&root),
+            &second.to_string_lossy(),
+            "write_file",
+            "",
+        ));
+        let cmd_key =
+            permission_scope_key("run_command", "", "npm test", Some(&root), "Run npm test");
+        c.allow(cmd_key.clone());
+        assert!(may_auto_allow(
+            PermissionPolicy::Ask,
+            &c,
+            &cmd_key,
+            Some(&root),
+            "",
+            "run_command",
+            "npm test",
+        ));
+        let other_cmd =
+            permission_scope_key("run_command", "", "npm build", Some(&root), "Run npm build");
+        assert!(!may_auto_allow(
+            PermissionPolicy::Ask,
+            &c,
+            &other_cmd,
+            Some(&root),
+            "",
+            "run_command",
+            "npm build",
         ));
     }
 
