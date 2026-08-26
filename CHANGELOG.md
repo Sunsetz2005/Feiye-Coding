@@ -2,6 +2,7 @@
 
 ## [UNRELEASED] — 2026-08-26
 
+- Host 内建循环对显式选择的 Skill 读取库存已信任目录中的有界 `SKILL.md` 并写入该轮模型提示，不依赖 grok 二进制，也不把 GROK_HOME 当作产品内核。
 - Host 内建循环新增可信项目根内的 `write_file` 与 `run_command`，经现有权限条批准后才执行；`AcceptEdits` 不自动放行命令，权限预览不含文件正文。
 - Sunsetz 默认使用内建 Agent 循环调用已配置的 OpenAI 兼容聊天接口，不再把 grok CLI 作为进入工作台或运行会话的硬门槛。
 - 将底部三层输入器抽离为 `ComposerDock`，工作台只保留会话协调以及提问/权限接管。

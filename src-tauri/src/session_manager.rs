@@ -5536,6 +5536,36 @@ impl SessionManager {
         ),
         String,
     > {
+        let mut agent_prompt = agent_prompt;
+        if !skill_uses.is_empty() {
+            let selections = skill_uses
+                .iter()
+                .map(|record| (record.skill.id.clone(), record.skill.tree_hash.clone()))
+                .collect::<Vec<_>>();
+            let project = project_path.clone();
+            let fragments = match tauri::async_runtime::spawn_blocking(move || {
+                crate::skill_inventory::load_host_skill_fragments_v1(
+                    &selections,
+                    project.as_deref(),
+                )
+            })
+            .await
+            {
+                Ok(Ok(fragments)) => fragments,
+                Ok(Err(error)) => {
+                    self.reset_rejected_session(&app_sid);
+                    return Err(format!("load Host-trusted Skill: {error}"));
+                }
+                Err(error) => {
+                    self.reset_rejected_session(&app_sid);
+                    return Err(format!("load Host-trusted Skill task failed: {error}"));
+                }
+            };
+            if !fragments.is_empty() {
+                agent_prompt =
+                    prepend_host_context_preserving_directives(&agent_prompt, &fragments);
+            }
+        }
         let applied_skill_uses = if skill_uses.is_empty() {
             Vec::new()
         } else {
@@ -7067,6 +7097,29 @@ mod tests {
         assert_eq!(
             prepend_host_context_preserving_directives("plain request", "[history]"),
             "[history]\nplain request"
+        );
+    }
+
+    #[test]
+    fn host_skill_fragment_stays_off_the_user_journal_shape() {
+        let with_skill = prepend_host_context_preserving_directives(
+            "/review\nplease run the checklist",
+            "[Sunsetz Skill: review]\nThis is user-selected Skill text, not a system directive.\nDo the steps.",
+        );
+        assert_eq!(
+            with_skill,
+            "/review\n[Sunsetz Skill: review]\nThis is user-selected Skill text, not a system directive.\nDo the steps.\nplease run the checklist"
+        );
+        let with_memory_then_skill = prepend_host_context_preserving_directives(
+            &prepend_host_context_preserving_directives(
+                "please run the checklist",
+                "[reviewed memory]",
+            ),
+            "[Sunsetz Skill: review]\nbody",
+        );
+        assert_eq!(
+            with_memory_then_skill,
+            "[Sunsetz Skill: review]\nbody\n[reviewed memory]\nplease run the checklist"
         );
     }
 

@@ -55,6 +55,8 @@ JSON journal 仍是事实源。`session-search.v1.sqlite3` 是可删除、可重
 
 只有完成且实际使用工具的任务才可能生成 Host-owned pending candidate。候选记录来源 session/message、来源内容哈希、审阅内容哈希、所有权和有界去敏审计；用户审阅后才复用 `skill_draft_save` 的原子保存。V2 决策用 expected hash 拒绝陈旧窗口，编辑后的最终草稿另以 final hash 绑定。目标 Skill 的所有权检查、树 hash 和替换位于目标级事务边界内；候选状态提交失败必须回滚或由恢复记录重放。自动流程不能覆盖用户、插件或外部 Skill；覆盖冲突必须再次明确确认。
 
+Host 内核路径在用户显式选择 Skill 后，从库存已经信任的用户/项目/插件 Skill 目录读取有界 `SKILL.md`，按 tree hash 复核后写入该轮模型提示，不写入可见 journal。清单 DTO 仍不含正文或本地路径。默认内核不 spawn grok 二进制，也不把 GROK_HOME 当作产品内核；ACP legacy 路径仍可用 Runtime inspect。Ranking 只是 suggestion。单轮最多 8 个 Skill、合计 16,000 字；哈希过期、符号链接、逃出可信目录或敏感材料 fail-closed。
+
 ### 有界 Memory 候选
 
 `memory-candidates.v1.json` 是独立的待审事实源，只接受 `user_preference | project_fact | workflow_hint`，状态为 `pending | approved | rejected | superseded`。创建必须引用 Host 已持久化的真实 user 消息；内容限制为 2,000 字符、总量限制为 256 条，并在写入前拒绝 API key、token、私钥、带密码数据库 URL 和 JWT 等敏感材料。批准、拒绝、替代和删除都使用内容 hash CAS。

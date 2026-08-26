@@ -343,7 +343,8 @@ pub fn system_prompt(project_root: Option<&Path>, trusted: bool) -> String {
          Answer the user directly. You may call read_file, list_directory, write_file, and \
          run_command only inside the trusted project root. Writes and commands require user \
          permission. You cannot access paths outside that root. run_command is unsandboxed \
-         except for the trusted-root cwd pin, permission gate, and a 60s timeout.",
+         except for the trusted-root cwd pin, permission gate, and a 60s timeout. \
+         The user may attach reviewed Skill text for this turn; do not invent or auto-load Skills.",
     );
     match (project_root, trusted) {
         (Some(root), true) => {

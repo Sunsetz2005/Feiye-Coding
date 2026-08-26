@@ -2583,6 +2583,9 @@ fn fresh_skill_inventory(
     let project_root = trusted_inventory_project_root_with(project_path, |path| {
         crate::resource_handles::require_trusted_project_root(path)
     })?;
+    if crate::agent_loop::use_sunsetz_kernel() {
+        return crate::skill_inventory::build_host_trusted_inventory_v1(project_root);
+    }
     let (parsed, error) = run_grok_inspect(project_root.as_deref());
     if let Some(error) = error {
         return Err(error);

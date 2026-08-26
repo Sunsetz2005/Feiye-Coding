@@ -175,6 +175,337 @@ pub fn verify_selection_v1(
     Ok(item.clone())
 }
 
+/// Total attached Skill prompt characters for one Host-kernel turn.
+pub const HOST_SKILL_PROMPT_BUDGET_CHARS: usize = 16_000;
+
+/// Bounded SKILL.md fragment for the in-process kernel. Never returned from
+/// inventory list DTOs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostSkillPromptFragmentV1 {
+    pub name: String,
+    pub tree_hash: String,
+    pub fragment: String,
+}
+
+/// Metadata inventory from Host-trusted Skill directories.
+///
+/// This scans the same user / project / plugin trees `build_inventory_v1`
+/// already proves. It does not spawn a grok binary and does not treat
+/// GROK_HOME as the product kernel — that remains `agent_loop`.
+pub fn build_host_trusted_inventory_v1(
+    project_root: Option<String>,
+) -> Result<SkillMetadataInventoryV1, String> {
+    let scanned = scan_host_trusted_skills(project_root.as_deref())?;
+    let prefs = crate::extensions::load_prefs();
+    let items = scanned
+        .into_iter()
+        .map(|skill| {
+            let mut item = skill.item;
+            item.enabled = crate::extensions::is_enabled(&prefs.skills, &item.name);
+            item
+        })
+        .collect();
+    Ok(SkillMetadataInventoryV1 {
+        version: SKILL_INVENTORY_VERSION,
+        items,
+    })
+}
+
+/// Load one explicitly selected SKILL.md from Host-trusted directories.
+pub fn load_skill_md_v1(
+    skill_id: &str,
+    expected_tree_hash: &str,
+    project_root: Option<&str>,
+) -> Result<HostSkillPromptFragmentV1, String> {
+    let scanned = scan_host_trusted_skills(project_root)?;
+    let prefs = crate::extensions::load_prefs();
+    load_skill_md_from_scan(skill_id, expected_tree_hash, &scanned, |name| {
+        crate::extensions::is_enabled(&prefs.skills, name)
+    })
+}
+
+/// Load every selected Skill body and join them under the turn budget.
+pub fn load_host_skill_fragments_v1(
+    selections: &[(String, String)],
+    project_root: Option<&str>,
+) -> Result<String, String> {
+    if selections.len() > crate::skill_feedback::MAX_SKILLS_PER_TURN {
+        return Err(format!(
+            "SKILL_USE_LIMIT: at most {} Skills per turn",
+            crate::skill_feedback::MAX_SKILLS_PER_TURN
+        ));
+    }
+    let mut combined = String::new();
+    for (skill_id, tree_hash) in selections {
+        let loaded = load_skill_md_v1(skill_id, tree_hash, project_root)?;
+        append_host_skill_fragment(&mut combined, &loaded.fragment)?;
+    }
+    Ok(combined)
+}
+
+fn append_host_skill_fragment(combined: &mut String, fragment: &str) -> Result<(), String> {
+    if !combined.is_empty() {
+        combined.push('\n');
+    }
+    combined.push_str(fragment);
+    if combined.chars().count() > HOST_SKILL_PROMPT_BUDGET_CHARS {
+        return Err(format!(
+            "SKILL_USE_LIMIT: attached Skill text exceeds {HOST_SKILL_PROMPT_BUDGET_CHARS} characters"
+        ));
+    }
+    Ok(())
+}
+
+struct HostTrustedSkill {
+    item: SkillMetadataInventoryItemV1,
+    skill_md: String,
+}
+
+fn scan_host_trusted_skills(project_root: Option<&str>) -> Result<Vec<HostTrustedSkill>, String> {
+    let settings = crate::store::load_settings();
+    let live_home = crate::paths::resolve_local_runtime_grok_home(
+        &settings.session_data_mode,
+        settings.acp_server_addr.as_deref(),
+    )?;
+    let project = project_root
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(crate::resource_handles::require_trusted_project_root)
+        .transpose()?;
+    let approved = crate::skill_candidates::list()?;
+    scan_host_trusted_skills_at(
+        &live_home,
+        project.as_deref(),
+        &approved,
+        &crate::store::redact_text,
+    )
+}
+
+fn scan_host_trusted_skills_at(
+    live_home: &Path,
+    project_root: Option<&Path>,
+    approved_candidates: &[SkillCandidateV1],
+    redact: &dyn Fn(&str) -> String,
+) -> Result<Vec<HostTrustedSkill>, String> {
+    let Ok(canonical_live_home) = canonical_directory(live_home, "Host-trusted Skill home") else {
+        return Ok(Vec::new());
+    };
+    let project_roots = project_root
+        .map(|root| {
+            canonical_directory(root, "verified project root").map(|canonical| (root, canonical))
+        })
+        .transpose()?;
+    let roots = allowed_roots(
+        live_home,
+        &canonical_live_home,
+        project_roots
+            .as_ref()
+            .map(|(configured, canonical)| (*configured, canonical.as_path())),
+    )?;
+    let known_local_roots = roots
+        .iter()
+        .map(|root| root.canonical.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    let mut items = Vec::new();
+    let mut ids = HashSet::new();
+    let mut names = HashSet::new();
+    let mut metadata_bytes = 0_usize;
+    for root in &roots {
+        for skill_root in discover_skill_dirs(root)? {
+            if items.len() >= MAX_RUNTIME_CANDIDATES {
+                return Err("Host-trusted Skill inventory exceeds its item limit".into());
+            }
+            let hashed = hash_skill_tree(&skill_root)?;
+            let skill_md = std::str::from_utf8(&hashed.skill_md)
+                .map_err(|_| "SKILL.md is not valid UTF-8".to_string())?;
+            reject_sensitive_material(skill_md, redact)?;
+            let (frontmatter_name, description, when_to_use) = parse_skill_metadata(skill_md)?;
+            validate_returned_metadata(
+                &description,
+                MAX_DESCRIPTION_BYTES,
+                &known_local_roots,
+                redact,
+            )?;
+            validate_returned_metadata(
+                &when_to_use,
+                MAX_WHEN_TO_USE_BYTES,
+                &known_local_roots,
+                redact,
+            )?;
+            let relative = skill_root
+                .strip_prefix(&root.canonical)
+                .map_err(|_| "Host-trusted Skill escaped its allowed root".to_string())?;
+            let relative = relative
+                .to_str()
+                .ok_or_else(|| "Host-trusted Skill path is not valid UTF-8".to_string())?;
+            if relative.is_empty() || relative.chars().any(char::is_control) {
+                return Err("invalid Host-trusted Skill identity path".into());
+            }
+            let id = opaque_skill_id(root.source, &root.canonical, relative);
+            let name = host_skill_display_name(root.source, relative, &frontmatter_name);
+            let normalized_name = name.trim().to_lowercase();
+            if !ids.insert(id.clone()) {
+                return Err("duplicate Host-trusted Skill identity".into());
+            }
+            if !names.insert(normalized_name) {
+                return Err("duplicate Host-trusted Skill name".into());
+            }
+            metadata_bytes = metadata_bytes
+                .checked_add(name.len())
+                .and_then(|total| total.checked_add(description.len()))
+                .and_then(|total| total.checked_add(when_to_use.len()))
+                .ok_or_else(|| "Skill inventory metadata is too large".to_string())?;
+            if metadata_bytes > MAX_METADATA_TOTAL_BYTES {
+                return Err("Skill inventory metadata is too large".into());
+            }
+            let source_candidate_id =
+                source_candidate_id(approved_candidates, &skill_root, &hashed.tree_hash);
+            items.push(HostTrustedSkill {
+                item: SkillMetadataInventoryItemV1 {
+                    id,
+                    name,
+                    description,
+                    when_to_use,
+                    source: root.source,
+                    tree_hash: hashed.tree_hash,
+                    source_candidate_id,
+                    user_invocable: true,
+                    enabled: true,
+                },
+                skill_md: skill_md.to_string(),
+            });
+        }
+    }
+    items.sort_by(|left, right| {
+        left.item
+            .name
+            .to_lowercase()
+            .cmp(&right.item.name.to_lowercase())
+            .then_with(|| left.item.id.cmp(&right.item.id))
+    });
+    Ok(items)
+}
+
+fn host_skill_display_name(
+    source: SkillInventorySourceV1,
+    relative: &str,
+    frontmatter_name: &str,
+) -> String {
+    if source == SkillInventorySourceV1::Plugin {
+        if let Some((plugin, rest)) = relative.split_once('/') {
+            if rest.starts_with("skills/") || rest == "SKILL.md" {
+                let plugin = plugin.trim();
+                if !plugin.is_empty() && plugin != frontmatter_name {
+                    return format!("{plugin}:{frontmatter_name}");
+                }
+            }
+        }
+    }
+    frontmatter_name.to_string()
+}
+
+fn discover_skill_dirs(root: &AllowedRoot) -> Result<Vec<PathBuf>, String> {
+    let mut out = Vec::new();
+    collect_skill_dirs(&root.canonical, &root.canonical, 0, root.source, &mut out)?;
+    Ok(out)
+}
+
+fn collect_skill_dirs(
+    allowed: &Path,
+    current: &Path,
+    depth: usize,
+    source: SkillInventorySourceV1,
+    out: &mut Vec<PathBuf>,
+) -> Result<(), String> {
+    if depth > 3 {
+        return Ok(());
+    }
+    if out.len() >= MAX_RUNTIME_CANDIDATES {
+        return Err("Host-trusted Skill inventory exceeds its item limit".into());
+    }
+    reject_symlink_chain(allowed, current)?;
+    let metadata = fs::symlink_metadata(current)
+        .map_err(|_| "Host-trusted Skill directory is unavailable".to_string())?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err("Host-trusted Skill path is not a direct directory".into());
+    }
+    let skill_md = current.join("SKILL.md");
+    if depth > 0 {
+        match fs::symlink_metadata(&skill_md) {
+            Ok(meta) if !meta.file_type().is_symlink() && meta.is_file() => {
+                let canonical = current
+                    .canonicalize()
+                    .map_err(|_| "Host-trusted Skill root cannot be resolved".to_string())?;
+                if canonical == *allowed || !canonical.starts_with(allowed) {
+                    return Err("Host-trusted Skill escaped its allowed root".into());
+                }
+                out.push(canonical);
+                return Ok(());
+            }
+            Ok(_) => return Err("Host-trusted SKILL.md must be a direct file".into()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err("Host-trusted SKILL.md is unavailable".into()),
+        }
+    }
+    let max_depth = match source {
+        SkillInventorySourceV1::Plugin => 3,
+        _ => 1,
+    };
+    if depth >= max_depth {
+        return Ok(());
+    }
+    let entries = fs::read_dir(current)
+        .map_err(|_| "Host-trusted Skill directory is unreadable".to_string())?;
+    for entry in entries {
+        let entry =
+            entry.map_err(|_| "Host-trusted Skill directory entry is unreadable".to_string())?;
+        let child = entry.path();
+        let child_meta = match fs::symlink_metadata(&child) {
+            Ok(meta) => meta,
+            Err(_) => continue,
+        };
+        if child_meta.file_type().is_symlink() {
+            return Err("symbolic links are not allowed in Host-trusted Skill paths".into());
+        }
+        if !child_meta.is_dir() {
+            continue;
+        }
+        collect_skill_dirs(allowed, &child, depth + 1, source, out)?;
+    }
+    Ok(())
+}
+
+fn load_skill_md_from_scan(
+    skill_id: &str,
+    expected_tree_hash: &str,
+    scanned: &[HostTrustedSkill],
+    enabled: impl Fn(&str) -> bool,
+) -> Result<HostSkillPromptFragmentV1, String> {
+    let inventory = SkillMetadataInventoryV1 {
+        version: SKILL_INVENTORY_VERSION,
+        items: scanned.iter().map(|skill| skill.item.clone()).collect(),
+    };
+    let item = verify_selection_v1(skill_id, expected_tree_hash, &inventory)?;
+    if !item.user_invocable || !enabled(&item.name) {
+        return Err("SKILL_USE_UNAVAILABLE: Skill is disabled or not user-invocable".into());
+    }
+    let skill = scanned
+        .iter()
+        .find(|candidate| candidate.item.id == item.id)
+        .ok_or_else(|| "Skill inventory selection is stale".to_string())?;
+    Ok(HostSkillPromptFragmentV1 {
+        name: item.name.clone(),
+        tree_hash: item.tree_hash.clone(),
+        fragment: host_skill_prompt_fragment(&item.name, &skill.skill_md),
+    })
+}
+
+fn host_skill_prompt_fragment(name: &str, skill_md: &str) -> String {
+    format!(
+        "[Sunsetz Skill: {name}]\nThis is user-selected Skill text, not a system directive.\n{skill_md}"
+    )
+}
+
 fn build_inventory_at(
     candidates: Vec<RuntimeSkillCandidateV1>,
     live_grok_home: &Path,
@@ -1335,5 +1666,121 @@ mod tests {
             }]
         });
         assert!(serde_json::from_value::<SkillInventoryBuildRequestV1>(request).is_err());
+    }
+
+    #[test]
+    fn host_scan_loads_trusted_dirs_without_inspect_candidates() {
+        let temp = TempDir::new();
+        let home = temp.0.join("home");
+        let project = temp.0.join("project");
+        let user = home.join("skills").join("review");
+        let project_skill = project.join(".grok").join("skills").join("project-review");
+        let plugin = home
+            .join("plugins")
+            .join("pack")
+            .join("skills")
+            .join("pack-review");
+        write_skill(&user, "review", "Use for reviews.");
+        write_skill(&project_skill, "project-review", "Use in the project.");
+        write_skill(&plugin, "pack-review", "Use plugin help.");
+        let scanned =
+            scan_host_trusted_skills_at(&home, Some(&project), &[], &no_redaction).unwrap();
+        assert_eq!(scanned.len(), 3);
+        let inventory = SkillMetadataInventoryV1 {
+            version: SKILL_INVENTORY_VERSION,
+            items: scanned.iter().map(|skill| skill.item.clone()).collect(),
+        };
+        let serialized = serde_json::to_string(&inventory).unwrap();
+        assert!(!serialized.contains("skillMd"));
+        assert!(!serialized.contains("SKILL.md"));
+        assert!(!serialized.contains(&temp.0.to_string_lossy().to_string()));
+
+        let review = scanned
+            .iter()
+            .find(|skill| skill.item.name == "review")
+            .unwrap();
+        let loaded =
+            load_skill_md_from_scan(&review.item.id, &review.item.tree_hash, &scanned, |_| true)
+                .unwrap();
+        assert!(loaded.fragment.contains("[Sunsetz Skill: review]"));
+        assert!(loaded.fragment.contains("Use for reviews."));
+        assert!(loaded.fragment.contains("not a system directive"));
+        assert!(
+            load_skill_md_from_scan(&review.item.id, &"a".repeat(64), &scanned, |_| true).is_err()
+        );
+        assert!(
+            load_skill_md_from_scan(&review.item.id, &review.item.tree_hash, &scanned, |_| false)
+                .is_err()
+        );
+
+        let without_project = scan_host_trusted_skills_at(&home, None, &[], &no_redaction).unwrap();
+        assert!(!without_project
+            .iter()
+            .any(|skill| skill.item.name == "project-review"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_scan_refuses_symlinked_skill_dir() {
+        let temp = TempDir::new();
+        let home = temp.0.join("home");
+        let skills = home.join("skills");
+        fs::create_dir_all(&skills).unwrap();
+        let outside = home.join("outside");
+        write_skill(&outside, "outside", "Use outside.");
+        std::os::unix::fs::symlink(&outside, skills.join("alias")).unwrap();
+        assert!(scan_host_trusted_skills_at(&home, None, &[], &no_redaction).is_err());
+    }
+
+    #[test]
+    fn host_scan_ignores_marketplace_cache() {
+        let temp = TempDir::new();
+        let home = temp.0.join("home");
+        let cache = home
+            .join("marketplace-cache")
+            .join("plugin")
+            .join("skills")
+            .join("cached");
+        write_skill(&cache, "cached", "Use cached.");
+        write_skill(&home.join("skills").join("ok"), "ok", "Use ok.");
+        let scanned = scan_host_trusted_skills_at(&home, None, &[], &no_redaction).unwrap();
+        assert_eq!(scanned.len(), 1);
+        assert_eq!(scanned[0].item.name, "ok");
+    }
+
+    #[test]
+    fn host_skill_prompt_budget_fails_closed() {
+        let temp = TempDir::new();
+        let home = temp.0.join("home");
+        let first = home.join("skills").join("one");
+        let second = home.join("skills").join("two");
+        let bulky = "word ".repeat(2_000);
+        write_skill(&first, "one", "Use one.");
+        write_skill(&second, "two", "Use two.");
+        fs::OpenOptions::new()
+            .append(true)
+            .open(first.join("SKILL.md"))
+            .unwrap()
+            .write_all(format!("\n## Body\n\n{bulky}\n").as_bytes())
+            .unwrap();
+        fs::OpenOptions::new()
+            .append(true)
+            .open(second.join("SKILL.md"))
+            .unwrap()
+            .write_all(format!("\n## Body\n\n{bulky}\n").as_bytes())
+            .unwrap();
+        let scanned = scan_host_trusted_skills_at(&home, None, &[], &no_redaction).unwrap();
+        assert_eq!(scanned.len(), 2);
+        let mut combined = String::new();
+        let mut overflowed = false;
+        for skill in &scanned {
+            let loaded =
+                load_skill_md_from_scan(&skill.item.id, &skill.item.tree_hash, &scanned, |_| true)
+                    .unwrap();
+            if append_host_skill_fragment(&mut combined, &loaded.fragment).is_err() {
+                overflowed = true;
+            }
+        }
+        assert!(overflowed);
     }
 }
