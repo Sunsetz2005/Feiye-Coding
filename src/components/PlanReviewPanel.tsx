@@ -66,9 +66,18 @@ export function PlanReviewPanel({
         planVisible: plan.visible,
         planWaiting: plan.waiting,
         planRpcId: plan.rpcId,
+        artifactStatus: plan.artifactStatus,
+        liveReview: plan.liveReview,
         entries: plan.entries,
       }),
-    [plan.visible, plan.waiting, plan.rpcId, plan.entries],
+    [
+      plan.visible,
+      plan.waiting,
+      plan.rpcId,
+      plan.artifactStatus,
+      plan.liveReview,
+      plan.entries,
+    ],
   );
 
   // Real planContent markdown only (do not dump raw entries as MD when collapsed).

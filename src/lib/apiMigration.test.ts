@@ -42,6 +42,7 @@ describe("migration API contracts", () => {
       errors: ["Desktop Host required"],
     });
     await expect(api.sessionInteractionsList("s1")).resolves.toEqual([]);
+    await expect(api.sessionPlanArtifactsListV1("s1")).resolves.toEqual([]);
     expect(invokeMock).not.toHaveBeenCalled();
   });
 
@@ -59,6 +60,7 @@ describe("migration API contracts", () => {
     await api.capabilityManifestValidateV1(manifest);
     await api.sessionInteractionsList();
     await api.sessionInteractionsList("s1");
+    await api.sessionPlanArtifactsListV1("s1");
     await api.sessionResolveInteractionV1({
       interactionId: "i1",
       sessionId: "s1",
@@ -71,6 +73,7 @@ describe("migration API contracts", () => {
         ["capability_manifest_validate_v1", { manifest }],
         ["session_interactions_list", { sessionId: null }],
         ["session_interactions_list", { sessionId: "s1" }],
+        ["session_plan_artifacts_list_v1", { sessionId: "s1" }],
       ]),
     );
   });

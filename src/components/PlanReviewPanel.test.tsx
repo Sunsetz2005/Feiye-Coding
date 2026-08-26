@@ -40,6 +40,8 @@ describe("PlanReviewPanel", () => {
           body: "## Scope\n\nKeep the resource pane read-only.",
           entries: [{ content: "Inspect", status: "completed" }],
           rpcId: 42,
+          liveReview: true,
+          artifactStatus: "proposed",
         }}
         labels={labels}
       />,
@@ -49,6 +51,29 @@ describe("PlanReviewPanel", () => {
     expect(screen.getByRole("heading", { name: "Implementation plan" }))
       .toBeTruthy();
     expect(screen.getByText("Keep the resource pane read-only.")).toBeTruthy();
+    expect(screen.queryByText(/approve|review|dismiss/i)).toBeNull();
+  });
+
+  it.each([
+    ["approved", "In progress"],
+    ["executing", "In progress"],
+    ["completed", "Done"],
+  ] as const)("renders %s artifacts without decision buttons", (status, copy) => {
+    render(
+      <PlanReviewPanel
+        plan={{
+          visible: true,
+          waiting: false,
+          title: "Implementation plan",
+          body: "Read-only body",
+          entries: [{ content: "Inspect", status: "completed" }],
+          artifactStatus: status,
+          liveReview: false,
+        }}
+        labels={labels}
+      />,
+    );
+    expect(screen.getByText(copy)).toBeTruthy();
     expect(screen.queryByText(/approve|review|dismiss/i)).toBeNull();
   });
 

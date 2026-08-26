@@ -2,6 +2,7 @@
  * Plan body helpers — markdown for resource review + entry fallbacks.
  */
 
+import type { PlanArtifactStatusV1 } from "@/lib/planArtifacts";
 import {
   parsePlanEntries,
   type PlanEntry,
@@ -16,7 +17,13 @@ export type PlanReviewState = {
   body: string;
   entries: unknown[];
   rpcId?: number | null;
+  interactionId?: string | null;
   toolCallId?: string | null;
+  artifactId?: string | null;
+  artifactStatus?: PlanArtifactStatusV1 | null;
+  currentRevision?: number | null;
+  /** Live pending/resolving plan interaction — the only review gate. */
+  liveReview?: boolean;
 };
 
 /** Checkbox-style prefix for markdown step lists. */
@@ -53,14 +60,19 @@ export function planDisplayMarkdown(
   return planEntriesToMarkdown(parsed);
 }
 
-/** True when approve / request-changes should be enabled (exit_plan_mode gate). */
-export function planActionsEnabled(plan: Pick<PlanReviewState, "rpcId">): boolean {
-  return plan.rpcId != null;
+/**
+ * Resource/status surfaces never expose plan decision buttons.
+ * AskUserDock is the only review entry.
+ */
+export function planActionsEnabled(
+  _plan?: Pick<PlanReviewState, "rpcId" | "liveReview">,
+): boolean {
+  return false;
 }
 
-/** Review gate ready for user decision. */
+/** Review gate ready for user decision. Dead/interrupted RPCs are never true. */
 export function planIsAwaitingReview(
-  plan: Pick<PlanReviewState, "visible" | "rpcId">,
+  plan: Pick<PlanReviewState, "visible" | "liveReview">,
 ): boolean {
-  return plan.visible && plan.rpcId != null;
+  return plan.visible && plan.liveReview === true;
 }

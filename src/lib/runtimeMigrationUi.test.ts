@@ -4,6 +4,7 @@ import type {
   SessionSearchResultV1,
   SkillCandidateV1,
 } from "./api";
+import type { PlanArtifactV1 } from "./planArtifacts";
 import type { InteractionSnapshotV1 } from "./session";
 import {
   askUserFromInteraction,
@@ -12,10 +13,13 @@ import {
   canStartAutomationClaim,
   interactionMatches,
   isActiveInteraction,
+  isReviewablePlanInteraction,
+  livePlanInteraction,
   mergeContentSearchSessions,
   normalizeSandboxProfile,
   pendingInteractionSessionIds,
   permissionFromInteraction,
+  planFromArtifact,
   planResolutionContext,
   rememberSkillCandidateIds,
   sandboxStateMessageKey,
@@ -58,6 +62,41 @@ const ask: InteractionSnapshotV1 = {
   },
 };
 
+const plan: InteractionSnapshotV1 = {
+  ...base,
+  interactionId: "i3",
+  payload: {
+    kind: "plan",
+    entries: [{ content: "Inspect", status: "pending" }],
+    body: "Live plan body",
+  },
+};
+
+const planArtifact: PlanArtifactV1 = {
+  version: 1,
+  id: "plan_1",
+  sessionId: "s1",
+  processId: "p1",
+  interactionId: "i3",
+  toolCallId: "t1",
+  status: "approved",
+  currentRevision: 1,
+  revisions: [
+    {
+      revision: 1,
+      contentHash: "a".repeat(64),
+      body: "Approved plan body",
+      entries: [{ content: "Inspect", status: "pending" }],
+      createdAt: "2026-01-01T00:00:00Z",
+    },
+  ],
+  transitions: [
+    { status: "approved", occurredAt: "2026-01-01T00:00:00Z" },
+  ],
+  createdAt: "2026-01-01T00:00:00Z",
+  updatedAt: "2026-01-01T00:00:00Z",
+};
+
 describe("runtime migration UI reducers", () => {
   it("tracks active interactions and derives background sessions", () => {
     expect(isActiveInteraction(permission)).toBe(true);
@@ -84,6 +123,25 @@ describe("runtime migration UI reducers", () => {
     expect(askUserFromInteraction(permission)).toBe(null);
     expect(interactionMatches("i1", permission)).toBe(true);
     expect(interactionMatches(null, permission)).toBe(false);
+  });
+
+  it("projects plan artifacts without treating permission as reviewable", () => {
+    expect(isReviewablePlanInteraction(permission)).toBe(false);
+    expect(isReviewablePlanInteraction(plan)).toBe(true);
+    expect(isReviewablePlanInteraction({ ...plan, status: "resolved" })).toBe(
+      false,
+    );
+    expect(
+      isReviewablePlanInteraction({ ...plan, status: "interrupted" }),
+    ).toBe(false);
+    const projected = planFromArtifact(planArtifact);
+    expect(projected.artifactStatus).toBe("approved");
+    expect(projected.body).toBe("Approved plan body");
+    expect(projected.rpcId).toBeNull();
+    expect(projected.liveReview).toBe(false);
+    const map = updateActiveInteractions(new Map(), plan);
+    expect(livePlanInteraction(map, "s1")?.interactionId).toBe("i3");
+    expect(livePlanInteraction(map, "other")).toBeNull();
   });
 
   it("normalizes sandbox values and optional plan routing", () => {

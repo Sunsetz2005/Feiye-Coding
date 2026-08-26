@@ -501,6 +501,9 @@ export const zhTW: Record<MessageKey, string> = {
 
   "plan.waiting": "等待計劃",
   "plan.ready": "計劃待審閱",
+  "plan.status.approved": "已核准",
+  "plan.status.executing": "執行中",
+  "plan.status.done": "已完成",
   "plan.context": "上下文",
   "plan.empty": "（空 plan）",
   "plan.approve": "核准並建置",

@@ -1,5 +1,7 @@
 /** Plan entry parse + progress for the sticky plan/goal bar. */
 
+import type { PlanArtifactStatusV1 } from "@/lib/planArtifacts";
+
 export type PlanEntryStatus =
   | "pending"
   | "in_progress"
@@ -153,21 +155,46 @@ export function resolvePlanBarModel(input: {
   planVisible: boolean;
   planWaiting: boolean;
   planRpcId?: number | null;
+  artifactStatus?: PlanArtifactStatusV1 | null;
+  liveReview?: boolean;
   entries: unknown[];
 }): PlanBarModel {
   const parsed = parsePlanEntries(input.entries);
   const progress = computePlanProgress(parsed);
   const hasEntries = progress.total > 0;
-  const canAct = input.planRpcId != null;
+  const liveReview = input.liveReview === true;
 
-  // exit_plan_mode pending — user must approve / revise.
-  if (input.planVisible && canAct) {
+  // Live proposed review is shown in AskUserDock; the bar stays actionless.
+  if (input.planVisible && liveReview) {
     return {
       kind: "plan_review",
       progress,
       headlineKey: "planBar.review",
       currentLabel: progress.current?.content ?? "",
-      showActions: true,
+      showActions: false,
+    };
+  }
+
+  if (input.planVisible && input.artifactStatus === "completed") {
+    return {
+      kind: "plan_progress",
+      progress,
+      headlineKey: "planBar.done",
+      currentLabel: progress.current?.content ?? "",
+      showActions: false,
+    };
+  }
+
+  if (
+    input.planVisible &&
+    (input.artifactStatus === "approved" || input.artifactStatus === "executing")
+  ) {
+    return {
+      kind: "plan_progress",
+      progress,
+      headlineKey: "planBar.progress",
+      currentLabel: progress.current?.content ?? "",
+      showActions: false,
     };
   }
 

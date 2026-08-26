@@ -44,6 +44,8 @@ const apiListenerCapture = vi.hoisted(() => ({
   sessions: [] as Array<Record<string, unknown>>,
   projects: [] as Array<Record<string, unknown>>,
   interactionRows: [] as Array<Record<string, unknown>>,
+  planArtifacts: [] as Array<Record<string, unknown>>,
+  planArtifactsBySession: {} as Record<string, Array<Record<string, unknown>>>,
   candidateResponses: [] as Array<Array<Record<string, unknown>>>,
   searchHits: [] as Array<Record<string, unknown>>,
   sessionCreate: vi.fn(async () => ({ id: "scheduled-session", title: "Scheduled" })),
@@ -189,6 +191,10 @@ vi.mock("@/lib/api", async (importOriginal) => {
     })),
     sessionPendingInteractions: vi.fn(async () => []),
     sessionInteractionsList: vi.fn(async () => apiListenerCapture.interactionRows),
+    sessionPlanArtifactsListV1: vi.fn(async (sessionId: string) =>
+      apiListenerCapture.planArtifactsBySession[sessionId] ??
+      apiListenerCapture.planArtifacts,
+    ),
     sessionGetState: vi.fn(async () => apiListenerCapture.sessionState),
     skillCandidatesListV1: vi.fn(async () =>
       apiListenerCapture.candidateResponses.shift() ?? [],
@@ -344,6 +350,8 @@ beforeEach(() => {
   apiListenerCapture.sessions = [];
   apiListenerCapture.projects = [];
   apiListenerCapture.interactionRows = [];
+  apiListenerCapture.planArtifacts = [];
+  apiListenerCapture.planArtifactsBySession = {};
   apiListenerCapture.candidateResponses = [];
   apiListenerCapture.searchHits = [];
   apiListenerCapture.sessionSearch.mockImplementation(async () =>
@@ -1436,6 +1444,171 @@ describe("App workbench integration", () => {
       expect(screen.queryByText(/Plan ready|计划待审阅/)).toBeNull();
       expect(screen.getByTestId("plan-artifact-card")).toBeTruthy();
       expect(screen.queryByTestId("resource-viewer-mock")).toBeNull();
+    },
+    20_000,
+  );
+
+  function planArtifactRow(
+    status: "approved" | "executing" | "completed",
+    body: string,
+    sessionId = "session-restore",
+  ) {
+    return {
+      version: 1,
+      id: `plan_${status}`,
+      sessionId,
+      processId: "process-1",
+      interactionId: "interaction-old",
+      status,
+      currentRevision: 1,
+      revisions: [
+        {
+          revision: 1,
+          contentHash: "a".repeat(64),
+          body,
+          entries: [{ content: body, status }],
+          createdAt: "2026-01-01T00:00:00Z",
+        },
+      ],
+      transitions: [
+        { status, occurredAt: "2026-01-01T00:00:00Z" },
+      ],
+      createdAt: "2026-01-01T00:00:00Z",
+      updatedAt: "2026-01-01T00:00:00Z",
+    };
+  }
+
+  it(
+    "restores durable plan artifacts when switching sessions without opening AskUserDock",
+    async () => {
+      apiListenerCapture.tauri = true;
+      apiListenerCapture.sessions = [
+        {
+          id: "session-restore",
+          title: "Restore plan",
+          projectId: null,
+          updatedAt: "2026-08-24T00:00:00Z",
+        },
+      ];
+      apiListenerCapture.planArtifactsBySession["session-restore"] = [
+        planArtifactRow("approved", "Persisted approved plan"),
+      ];
+
+      const { default: App } = await import("./App");
+      render(<App />);
+      await screen.findByTestId("workbench-shell");
+      await waitFor(() => {
+        expect(sidebarCapture.current?.tree.onOpenSession).toBeTruthy();
+      });
+
+      act(() =>
+        sidebarCapture.current?.tree.onOpenSession("session-restore", null),
+      );
+      await waitFor(() => {
+        expect(screen.getByText("Persisted approved plan")).toBeTruthy();
+      });
+      expect(screen.queryByText(/Plan ready|计划待审阅/)).toBeNull();
+      expect(screen.getByTestId("plan-artifact-card")).toBeTruthy();
+    },
+    20_000,
+  );
+
+  it(
+    "keeps a live pending plan in the dock when an older completed artifact is on disk",
+    async () => {
+      apiListenerCapture.tauri = true;
+      apiListenerCapture.sessionState = {
+        ...apiListenerCapture.sessionState,
+        sessionId: "s1",
+        state: "ready",
+        title: "Live plan",
+      };
+      apiListenerCapture.planArtifacts = [
+        planArtifactRow("completed", "Old completed plan", "s1"),
+      ];
+
+      const { default: App } = await import("./App");
+      render(<App />);
+      await waitFor(() => {
+        expect(apiListenerCapture.handlers.has("session://interaction")).toBe(
+          true,
+        );
+      });
+
+      act(() => {
+        apiListenerCapture.handlers.get("session://interaction")?.({
+          version: 1,
+          interactionId: "live-plan",
+          sessionId: "s1",
+          processId: "p1",
+          rpcId: 77,
+          status: "pending",
+          createdAt: "2026-01-01T00:00:00Z",
+          updatedAt: "2026-01-01T00:00:00Z",
+          payload: {
+            kind: "plan",
+            entries: [{ content: "Live proposed step", status: "pending" }],
+            body: "Live proposed body",
+          },
+        });
+      });
+
+      expect(await screen.findByText("Live proposed body")).toBeTruthy();
+      expect(screen.getAllByText(/Plan ready|计划待审阅/).length).toBeGreaterThan(
+        0,
+      );
+      expect(screen.queryByText("Old completed plan")).toBeNull();
+    },
+    20_000,
+  );
+
+  it(
+    "does not let permission interactions change plan artifacts",
+    async () => {
+      apiListenerCapture.tauri = true;
+      apiListenerCapture.sessionState = {
+        ...apiListenerCapture.sessionState,
+        sessionId: "s1",
+        state: "ready",
+      };
+      apiListenerCapture.planArtifacts = [
+        planArtifactRow("executing", "Keep executing plan", "s1"),
+      ];
+
+      const { default: App } = await import("./App");
+      render(<App />);
+      await waitFor(() => {
+        expect(apiListenerCapture.handlers.has("session://interaction")).toBe(
+          true,
+        );
+      });
+      await waitFor(() => {
+        expect(screen.getByText("Keep executing plan")).toBeTruthy();
+      });
+
+      act(() => {
+        apiListenerCapture.handlers.get("session://interaction")?.({
+          version: 1,
+          interactionId: "perm",
+          sessionId: "s1",
+          processId: "p1",
+          rpcId: 1,
+          status: "pending",
+          createdAt: "2026-01-01T00:00:00Z",
+          updatedAt: "2026-01-01T00:00:00Z",
+          payload: {
+            kind: "permission",
+            toolName: "write",
+            title: "Write migration file",
+            preview: "preview",
+            scopeKey: "write:/project/a",
+            options: [],
+          },
+        });
+      });
+      expect(await screen.findByText("Write migration file")).toBeTruthy();
+      expect(screen.getByText("Keep executing plan")).toBeTruthy();
+      expect(screen.queryByText(/Plan ready|计划待审阅/)).toBeNull();
     },
     20_000,
   );

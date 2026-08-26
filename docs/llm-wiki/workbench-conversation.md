@@ -134,11 +134,23 @@ Host 按会话保存所有 pending interaction：
 
 进程退出后的 pending RPC 会标记 `interrupted`。磁盘边车不能恢复已经死亡的 Runtime RPC，也不得把它显示为仍可回答。
 
+计划有两套必须分开的状态机：
+
+- `InteractionSnapshotV1` 只描述 live RPC：`pending → resolving → resolved | failed | interrupted`。不包含 `approved / executing / done`。
+- `PlanArtifactV1` 是批准后正文与步骤的权威来源：`proposed → approved → executing → completed`，另有 `revision_requested / abandoned / interrupted`。serde 成功终态仍是 `completed`；产品文案写 done。
+- 计划审阅不得进入 `AwaitingPermission`，也没有 `AwaitingPlan`。
+
+长期产物恢复：
+
+- `session_plan_artifacts_list_v1` 列出当前会话的 `plan-artifacts.v1.json`；启动和切会话用它恢复正文，不要求仍有可回复的 `rpcId`。
+- `session://plan_artifact` 在 sidecar 写入成功后发布完整 `PlanArtifactV1`；旧 `session://plan` 保留一个兼容周期。
+- sidecar 不是 RPC 恢复队列。死亡 pending 审阅只能是 `interrupted`，不能从磁盘产物复活。
+
 计划模式复用同一底部交互语言：
 
 - 底部 `AskUserDock` 是批准、要求修改或放弃的唯一决策入口，也是全页面唯一显示“计划待审阅”的位置。
-- 计划正文可在会话或资源面板查看；消息卡片和资源面板只显示中性“计划”状态，不提供第二组决策按钮。
-- `session_resolve_plan` 只从底部决策入口调用；Host 成功前不提前清除 pending 状态，失败时保留当前计划与用户输入。
+- 计划正文可在会话或资源面板查看；消息卡片和资源面板只显示中性“计划”或产物态（approved / executing / done），不提供第二组决策按钮。
+- `session_resolve_plan` 只从底部决策入口调用；Host 成功前不提前清除 pending 状态，失败时保留当前计划与用户输入。RPC 写失败 restore pending 且不推进产物；sidecar 写失败只记警告。
 - 批准后保留计划正文供后续执行和回看，不自动打开资源面板；用户主动点击计划卡片时才打开全文。
 - `TaskProgressRail` 只显示可从真实计划和变更数据得出的步骤、文件数、行数和耗时；数据不完整时不伪造。
 
@@ -173,6 +185,7 @@ Host 校验名称、frontmatter、相对路径、体积、路径穿越、符号�
 | 会话技能保存 | `available` | `host_capabilities`、`skill_draft_save` |
 | 全会话待回答查询 | Agent 进程存活期间可恢复 | `session_pending_interactions` |
 | 统一交互查询/决策 | live Runtime 期间 `available`；死亡 RPC 仅审计为 interrupted | `session_interactions_list`、`session_resolve_interaction_v1` |
+| 长期 Plan 产物 | 只读恢复 approved / executing / done；不能批准或复活死亡 RPC | `session_plan_artifacts_list_v1`、`session://plan_artifact` |
 | Runtime 能力/事件 | `available` | `runtime_capabilities_v1`、`session://runtime_event_v1` |
 | 会话可见消息检索 | `available`，SQLite 可删可重建 | `session_search_v1` |
 | 有限 Memory 候选 | 可审阅并显式导出有界上下文包，但不自动注入 Runtime | `memory_candidates_list_v1`、`memory_candidate_*_v1`、`memory_context_pack_build_v1` |

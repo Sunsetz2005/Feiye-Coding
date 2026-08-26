@@ -2,6 +2,7 @@
 
 ## [UNRELEASED] — 2026-08-26
 
+- 计划的 approved / executing / done 已作为可恢复的 `PlanArtifactV1` 产物，与 Permission 的 live RPC 生命周期分开，切会话后仍能回看正文且不会把死亡审阅重新打开。
 - Host 内建循环对显式选择的 Skill 读取库存已信任目录中的有界 `SKILL.md` 并写入该轮模型提示，不依赖 grok 二进制，也不把 GROK_HOME 当作产品内核。
 - Host 内建循环新增可信项目根内的 `write_file` 与 `run_command`，经现有权限条批准后才执行；`AcceptEdits` 不自动放行命令，权限预览不含文件正文。
 - Sunsetz 默认使用内建 Agent 循环调用已配置的 OpenAI 兼容聊天接口，不再把 grok CLI 作为进入工作台或运行会话的硬门槛。

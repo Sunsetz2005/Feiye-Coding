@@ -479,6 +479,31 @@ fn list_at(path: &Path) -> Result<Vec<PlanArtifactV1>, String> {
     Ok(artifacts)
 }
 
+/// Pick the artifact the workbench should restore for a session.
+/// Live `proposed` reviews outrank older completed rows; abandoned rows never display.
+pub fn display_artifact(artifacts: &[PlanArtifactV1]) -> Option<&PlanArtifactV1> {
+    let mut visible = artifacts
+        .iter()
+        .filter(|artifact| artifact.status != PlanArtifactStatusV1::Abandoned)
+        .collect::<Vec<_>>();
+    if visible.is_empty() {
+        return None;
+    }
+    if visible
+        .iter()
+        .any(|artifact| artifact.status == PlanArtifactStatusV1::Proposed)
+    {
+        visible.retain(|artifact| artifact.status == PlanArtifactStatusV1::Proposed);
+    }
+    visible.sort_by(|left, right| {
+        right
+            .updated_at
+            .cmp(&left.updated_at)
+            .then_with(|| right.id.cmp(&left.id))
+    });
+    visible.into_iter().next()
+}
+
 pub fn record_runtime_plan(request: RuntimePlanArtifactRecordV1) -> Result<PlanArtifactV1, String> {
     let path = store_path(&request.session_id)?;
     record_runtime_plan_at(&path, request, Utc::now())
@@ -985,6 +1010,59 @@ mod tests {
         assert!(interrupt_process_at(&store.path, "process-1", now(2))
             .unwrap()
             .is_empty());
+        assert!(
+            resolve_plan_at(&store.path, "interaction-1", "approved", None, now(3))
+                .unwrap_err()
+                .contains("not awaiting")
+        );
+    }
+
+    #[test]
+    fn display_artifact_prefers_live_proposed_over_older_completed() {
+        let store = TestStore::new("display");
+        record_runtime_plan_at(
+            &store.path,
+            RuntimePlanArtifactRecordV1 {
+                version: 1,
+                session_id: "session-1".into(),
+                process_id: "process-1".into(),
+                interaction_id: Some("interaction-old".into()),
+                tool_call_id: Some("tool-old".into()),
+                body: Some("Old completed plan".into()),
+                entries: serde_json::json!([{ "content": "Inspect", "status": "completed" }]),
+                awaiting_review: false,
+            },
+            now(0),
+        )
+        .unwrap();
+        record_runtime_plan_at(
+            &store.path,
+            record(
+                Some("interaction-new"),
+                "Live proposed plan",
+                serde_json::json!([]),
+                true,
+            ),
+            now(1),
+        )
+        .unwrap();
+        let artifacts = list_at(&store.path).unwrap();
+        let display = display_artifact(&artifacts).unwrap();
+        assert_eq!(display.status, PlanArtifactStatusV1::Proposed);
+        assert_eq!(display.interaction_id.as_deref(), Some("interaction-new"));
+        assert_eq!(
+            display.revisions.last().and_then(|row| row.body.as_deref()),
+            Some("Live proposed plan")
+        );
+
+        resolve_plan_at(&store.path, "interaction-new", "abandoned", None, now(2)).unwrap();
+        let after_abandon = list_at(&store.path).unwrap();
+        let fallback = display_artifact(&after_abandon).unwrap();
+        assert_eq!(fallback.status, PlanArtifactStatusV1::Completed);
+        assert_eq!(
+            fallback.revisions.last().and_then(|row| row.body.as_deref()),
+            Some("Old completed plan")
+        );
     }
 
     #[test]

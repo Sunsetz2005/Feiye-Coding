@@ -123,21 +123,61 @@ describe("resolvePlanBarModel", () => {
     expect(m.headlineKey).toBe("planBar.generating");
   });
 
-  it("prefers review when exit_plan_mode is pending", () => {
+  it("prefers review when a live plan interaction is pending", () => {
     const m = resolvePlanBarModel({
       goalMode: false,
       mode: "plan",
       planVisible: true,
       planWaiting: false,
       planRpcId: 9,
+      liveReview: true,
+      artifactStatus: "proposed",
       entries: [
         { content: "Touch fixtures", status: "pending" },
         { content: "Run cargo test", status: "pending" },
       ],
     });
     expect(m.kind).toBe("plan_review");
-    expect(m.showActions).toBe(true);
+    expect(m.showActions).toBe(false);
     expect(m.progress.total).toBe(2);
+  });
+
+  it("maps artifact completed to done without actions", () => {
+    const m = resolvePlanBarModel({
+      goalMode: false,
+      mode: "agent",
+      planVisible: true,
+      planWaiting: false,
+      planRpcId: 9,
+      artifactStatus: "completed",
+      liveReview: false,
+      entries: [{ content: "a", status: "completed" }],
+    });
+    expect(m.headlineKey).toBe("planBar.done");
+    expect(m.showActions).toBe(false);
+  });
+
+  it("maps approved and executing artifacts to progress", () => {
+    const approved = resolvePlanBarModel({
+      goalMode: false,
+      mode: "agent",
+      planVisible: true,
+      planWaiting: false,
+      artifactStatus: "approved",
+      entries: [{ content: "a", status: "pending" }],
+    });
+    expect(approved.headlineKey).toBe("planBar.progress");
+    expect(approved.showActions).toBe(false);
+    const executing = resolvePlanBarModel({
+      goalMode: false,
+      mode: "agent",
+      planVisible: true,
+      planWaiting: false,
+      artifactStatus: "executing",
+      entries: [{ content: "a", status: "in_progress" }],
+    });
+    expect(executing.headlineKey).toBe("planBar.progress");
+    expect(executing.showActions).toBe(false);
   });
 
   it("does not show review actions without rpc id", () => {

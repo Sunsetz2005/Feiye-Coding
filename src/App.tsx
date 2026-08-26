@@ -207,16 +207,25 @@ import {
   looksLikeScheduleIntent,
   wrapAutomationSetupAgentText,
 } from "@/lib/automationSetup";
+import type {
+  PlanArtifactStatusV1,
+  PlanArtifactV1,
+} from "@/lib/planArtifacts";
+import { selectDisplayPlanArtifact } from "@/lib/planArtifacts";
+import { planIsAwaitingReview } from "@/lib/planBody";
 import {
   askUserFromInteraction,
   automationClaimIntake,
   canStartAutomationClaim,
   interactionMatches,
   isActiveInteraction,
+  isReviewablePlanInteraction,
+  livePlanInteraction,
   mergeContentSearchSessions,
   normalizeSandboxProfile,
   pendingInteractionSessionIds,
   permissionFromInteraction,
+  planFromArtifact,
   planResolutionContext,
   rememberSkillCandidateIds,
   skillCandidateAtBootstrap,
@@ -319,11 +328,33 @@ interface PlanState {
   rpcId?: number | null;
   interactionId?: string | null;
   toolCallId?: string | null;
+  artifactId?: string | null;
+  artifactStatus?: PlanArtifactStatusV1 | null;
+  currentRevision?: number | null;
+  liveReview?: boolean;
   /**
    * Soft-hide the top PlanStatusBar without clearing progress.
    * Cleared when new plan events arrive or review gate opens.
    */
   barDismissed?: boolean;
+}
+
+function emptyPlanState(title: string): PlanState & { visible: boolean } {
+  return {
+    title,
+    body: "",
+    entries: [],
+    waiting: true,
+    visible: false,
+    rpcId: null,
+    interactionId: null,
+    toolCallId: null,
+    artifactId: null,
+    artifactStatus: null,
+    currentRevision: null,
+    liveReview: false,
+    barDismissed: false,
+  };
 }
 
 export default function App() {
@@ -651,18 +682,9 @@ export default function App() {
   /** Polite SR announce for stream start/stop (not every token). */
   const [streamA11yNote, setStreamA11yNote] = useState("");
   const wasStreamingRef = useRef(false);
-  const [plan, setPlan] = useState<PlanState & { visible: boolean }>({
-    title: "Plan ready for review",
-    body: "",
-    entries: [],
-    waiting: true,
-    // Only show when Agent sends a plan event (or user opens Plan mode later)
-    visible: false,
-    rpcId: null,
-    interactionId: null,
-    toolCallId: null,
-    barDismissed: false,
-  });
+  const [plan, setPlan] = useState<PlanState & { visible: boolean }>(() =>
+    emptyPlanState("Plan ready for review"),
+  );
   const [locale, setLocale] = useState<Locale>("zh");
   const localeRef = useRef(locale);
   localeRef.current = locale;
@@ -703,7 +725,7 @@ export default function App() {
               ? {
                   ...current,
                   rpcId: null,
-                  interactionId: null,
+                  liveReview: false,
                   waiting: false,
                 }
               : current,
@@ -730,11 +752,49 @@ export default function App() {
           rpcId: interaction.rpcId,
           interactionId: interaction.interactionId,
           toolCallId: interaction.toolCallId,
+          liveReview: isReviewablePlanInteraction(interaction),
           barDismissed: false,
         }));
       }
     },
     [syncPendingInteractionSessions],
+  );
+  const applyPlanArtifact = useCallback((artifact: PlanArtifactV1) => {
+    if (artifact.sessionId !== viewingSessionIdRef.current) return;
+    const live = livePlanInteraction(
+      activeInteractionsRef.current,
+      artifact.sessionId,
+    );
+    if (
+      live &&
+      artifact.status !== "proposed" &&
+      artifact.interactionId !== live.interactionId
+    ) {
+      return;
+    }
+    const projected = planFromArtifact(artifact);
+    setPlan((current) => ({
+      ...current,
+      ...projected,
+      title: trRef.current("resources.plan"),
+      rpcId: live?.rpcId ?? null,
+      interactionId: live?.interactionId ?? projected.interactionId,
+      liveReview: !!live,
+      waiting: live ? false : projected.waiting,
+    }));
+  }, []);
+  const restorePlanArtifacts = useCallback(
+    async (sessionId: string) => {
+      try {
+        const artifacts = await api.sessionPlanArtifactsListV1(sessionId);
+        if (viewingSessionIdRef.current !== sessionId) return;
+        const display = selectDisplayPlanArtifact(artifacts);
+        if (display) applyPlanArtifact(display);
+      } catch {
+        // Live events can still restore the card.
+      }
+    },
+    [applyPlanArtifact],
   );
   useEffect(() => {
     syncPendingInteractionSessions();
@@ -1793,10 +1853,17 @@ export default function App() {
                     : prev.visible
                       ? (prev.toolCallId ?? null)
                       : null,
+                liveReview: p.rpcId != null ? true : prev.liveReview,
                 // New plan activity always resurfaces the top progress bar.
                 barDismissed: false,
               };
             });
+          }),
+        );
+        await track(
+          api.listen<PlanArtifactV1>("session://plan_artifact", (artifact) => {
+            if (cancelled) return;
+            applyPlanArtifact(artifact);
           }),
         );
         await track(
@@ -1829,6 +1896,10 @@ export default function App() {
         if (!cancelled) {
           pendingInteractions.forEach(applyInteractionSnapshot);
         }
+        const focusedSessionId = viewingSessionIdRef.current;
+        if (!cancelled && focusedSessionId) {
+          await restorePlanArtifacts(focusedSessionId);
+        }
       } catch (e) {
         if (!cancelled) {
           if (!recoveryActivated) {
@@ -1847,6 +1918,8 @@ export default function App() {
     };
   }, [
     applyInteractionSnapshot,
+    applyPlanArtifact,
+    restorePlanArtifacts,
     patchSessionMessages,
     tryApplyAutomationFromSession,
   ]);
@@ -1951,6 +2024,7 @@ export default function App() {
     viewingSessionIdRef.current = s.id;
     setEditingUserMessageId(null);
     setEditAttachments([]);
+    setPlan(emptyPlanState(tr("resources.plan")));
 
     try {
       const stored = await api.sessionMessages(s.id);
@@ -2190,6 +2264,7 @@ export default function App() {
     // Recover any interaction that belongs to this task, including one raised
     // while it was in the background or while the WebView was reloading.
     if (api.isTauri()) {
+      void restorePlanArtifacts(s.id);
       void api
         .sessionInteractionsList(s.id)
         .then((interactions) => {
@@ -2347,13 +2422,7 @@ export default function App() {
     viewingSessionIdRef.current = null;
     setMessages([]);
     setContextUsage(INITIAL_CONTEXT_USAGE);
-    setPlan({
-      title: "Plan ready for review",
-      body: "",
-      entries: [],
-      waiting: true,
-      visible: false,
-    });
+    setPlan(emptyPlanState(tr("resources.plan")));
     setPerm(null);
     setAskUser(null);
     setRetryStatus(null);
@@ -5375,7 +5444,7 @@ export default function App() {
     isSessionBusy(session.state);
   const planApprovalPayload = useMemo<AskUserPayload | null>(
     () =>
-      plan.rpcId == null
+      !planIsAwaitingReview(plan) || plan.rpcId == null
         ? null
         : {
             rpcId: plan.rpcId,
@@ -5395,7 +5464,15 @@ export default function App() {
               },
             ],
           },
-    [plan.rpcId, plan.toolCallId, session.sessionId, tr],
+    [
+      plan,
+      plan.rpcId,
+      plan.toolCallId,
+      plan.liveReview,
+      plan.visible,
+      session.sessionId,
+      tr,
+    ],
   );
   const taskGoalSummary = useMemo(() => {
     const firstPlanLine = plan.body
@@ -7677,6 +7754,7 @@ export default function App() {
                     body: plan.body,
                     entries: plan.entries,
                     waiting: plan.waiting,
+                    artifactStatus: plan.artifactStatus,
                   }
                 : null
             }
@@ -7895,6 +7973,8 @@ export default function App() {
                       visible: true,
                       waiting: false,
                       rpcId: null,
+                      liveReview: false,
+                      artifactStatus: "approved",
                     }));
                     showToast(tr("plan.approvedToast"), 2500);
                     return;
@@ -7914,6 +7994,8 @@ export default function App() {
                       visible: true,
                       waiting: false,
                       rpcId: null,
+                      liveReview: false,
+                      artifactStatus: "revision_requested",
                     }));
                     showToast(tr("plan.reviseToast"), 2800);
                     return;
@@ -7926,15 +8008,10 @@ export default function App() {
                     decision: "abandoned",
                     rpcId: planApprovalPayload.rpcId,
                   });
-                  setPlan((current) => ({
-                    ...current,
-                    visible: false,
-                    waiting: true,
-                    entries: [],
-                    body: "",
-                    rpcId: null,
-                    barDismissed: false,
-                  }));
+                  setPlan({
+                    ...emptyPlanState(tr("resources.plan")),
+                    artifactStatus: "abandoned",
+                  });
                 }}
                 onCancel={async () => {
                   await api.sessionResolvePlan({
@@ -7945,15 +8022,10 @@ export default function App() {
                     decision: "abandoned",
                     rpcId: planApprovalPayload.rpcId,
                   });
-                  setPlan((current) => ({
-                    ...current,
-                    visible: false,
-                    waiting: true,
-                    entries: [],
-                    body: "",
-                    rpcId: null,
-                    barDismissed: false,
-                  }));
+                  setPlan({
+                    ...emptyPlanState(tr("resources.plan")),
+                    artifactStatus: "abandoned",
+                  });
                 }}
               />
             ) : null

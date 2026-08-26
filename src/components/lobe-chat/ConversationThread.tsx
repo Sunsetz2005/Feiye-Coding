@@ -820,6 +820,9 @@ export function ConversationThread({
                 plan: tr("resources.plan"),
                 empty: tr("plan.empty"),
                 open: tr("planBar.expand"),
+                approved: tr("plan.status.approved"),
+                executing: tr("plan.status.executing"),
+                done: tr("plan.status.done"),
               }}
               onOpen={onOpenPlanArtifact}
             />

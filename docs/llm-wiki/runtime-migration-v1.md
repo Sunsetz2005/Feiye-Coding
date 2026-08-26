@@ -8,15 +8,15 @@
 
 ## 交互生命周期
 
-`InteractionSnapshotV1` 统一承载 `permission | ask_user | plan`，状态为 `pending | resolving | resolved | failed | interrupted`。Plan 与 Permission 仍是不同语义，只共享生命周期、路由和审计外壳。
+`InteractionSnapshotV1` 统一承载 `permission | ask_user | plan`，状态为 `pending | resolving | resolved | failed | interrupted`。Plan 与 Permission 仍是不同语义，只共享生命周期、路由和审计外壳。`approved / executing / done` 属于独立的 `PlanArtifactV1` 产物 schema，不得写入 snapshot status 或 `SessionState`。
 
-- 新事件：`session://interaction`。
-- 新命令：`session_interactions_list`、`session_resolve_interaction_v1`。
-- 旧 permission、ask-user、plan 命令和事件保留一个兼容周期。
-- 前台和后台会话进入同一 reducer；切换任务或 WebView 重载后，只要原 ACP 进程仍活着，pending 交互可继续处理。
+- 新事件：`session://interaction`、`session://plan_artifact`。
+- 新命令：`session_interactions_list`、`session_resolve_interaction_v1`、只读 `session_plan_artifacts_list_v1`。
+- 旧 permission、ask-user、plan 命令和事件保留一个兼容周期。没有 `session_resolve_plan_artifact`。
+- 前台和后台会话进入同一 reducer；切换任务或 WebView 重载后，只要原 ACP 进程仍活着，pending 交互可继续处理。批准后的计划正文改从 `plan-artifacts.v1.json` 恢复。
 - 回复先以 `interactionId + processId + rpcId` 比较并将状态置为 `resolving`，Runtime 写成功后才清除；写失败恢复 `pending`。重复、过期或跨进程回复被拒绝。
 - 每个会话的 `interactions.v1.json` 只保存最多 256 条有界审计快照。完整权限 scope 仅存哈希，ask-user 已提交答案不落盘，敏感键和值做去敏。
-- 审计边车不是 RPC 恢复队列。Runtime 进程退出后，未完成项改为 `interrupted`，不能继续回复。
+- 审计边车不是 RPC 恢复队列。Runtime 进程退出后，未完成项改为 `interrupted`，不能继续回复；Plan sidecar 同样不能把死亡 JSON-RPC 重新显示为待审阅。
 
 ## 桌面信任边界
 

@@ -1,5 +1,6 @@
 /** Typed Tauri invoke helpers with browser fallback. */
 
+import type { PlanArtifactV1 } from "./planArtifacts";
 import type {
   AskUserPayload,
   InteractionSnapshotV1,
@@ -411,6 +412,14 @@ export async function sessionResolveInteractionV1(
   request: ResolveInteractionRequestV1,
 ): Promise<SessionSnapshot> {
   return invoke("session_resolve_interaction_v1", { request });
+}
+
+/** Recover durable Plan artifacts for a session. Dead RPCs are not revived. */
+export async function sessionPlanArtifactsListV1(
+  sessionId: string,
+): Promise<PlanArtifactV1[]> {
+  if (!isTauri()) return [];
+  return invoke("session_plan_artifacts_list_v1", { sessionId });
 }
 
 export interface SkillDraftSaveRequest {

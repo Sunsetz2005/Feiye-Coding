@@ -532,6 +532,9 @@ const en = {
   // Plan card
   "plan.waiting": "Waiting for plan",
   "plan.ready": "Plan ready for review",
+  "plan.status.approved": "Approved",
+  "plan.status.executing": "In progress",
+  "plan.status.done": "Done",
   "plan.context": "Context",
   "plan.empty": "(empty plan)",
   "plan.approve": "Approve & build",
@@ -2045,6 +2048,9 @@ const zh: Record<MessageKey, string> = {
 
   "plan.waiting": "等待计划",
   "plan.ready": "计划待审阅",
+  "plan.status.approved": "已批准",
+  "plan.status.executing": "执行中",
+  "plan.status.done": "已完成",
   "plan.context": "上下文",
   "plan.empty": "（空 plan）",
   "plan.approve": "批准并构建",

@@ -443,36 +443,58 @@ fn take_pending_ask_activity(session: &mut LiveSession) -> Option<PendingAskActi
     })
 }
 
-fn interrupt_pending_interactions(session: &mut LiveSession) -> Vec<InteractionSnapshotV1> {
-    let mut interrupted = Vec::new();
+struct InterruptedSessionGates {
+    interactions: Vec<InteractionSnapshotV1>,
+    plan_artifacts: Vec<crate::plan_artifacts::PlanArtifactV1>,
+}
+
+impl InterruptedSessionGates {
+    fn empty() -> Self {
+        Self {
+            interactions: Vec::new(),
+            plan_artifacts: Vec::new(),
+        }
+    }
+}
+
+fn interrupt_pending_interactions(session: &mut LiveSession) -> InterruptedSessionGates {
+    let mut interactions = Vec::new();
     if let Some(mut pending) = session.pending_permission.take() {
         pending
             .interaction
             .set_status(InteractionStatusV1::Interrupted);
-        interrupted.push(pending.interaction);
+        interactions.push(pending.interaction);
     }
     if let Some(mut pending) = session.pending_plan.take() {
         pending
             .interaction
             .set_status(InteractionStatusV1::Interrupted);
-        interrupted.push(pending.interaction);
+        interactions.push(pending.interaction);
     }
     if let Some(pending) = session.pending_ask_user.as_mut() {
         pending
             .interaction
             .set_status(InteractionStatusV1::Interrupted);
-        interrupted.push(pending.interaction.clone());
+        interactions.push(pending.interaction.clone());
     }
-    if let Err(error) =
-        crate::plan_artifacts::interrupt_process(&session.app_session_id, &session.process_id)
-    {
-        tracing::warn!(
-            session_id = %session.app_session_id,
-            process_id = %session.process_id,
-            "interrupt durable Plan artifacts failed: {error}"
-        );
+    let plan_artifacts = match crate::plan_artifacts::interrupt_process(
+        &session.app_session_id,
+        &session.process_id,
+    ) {
+        Ok(artifacts) => artifacts,
+        Err(error) => {
+            tracing::warn!(
+                session_id = %session.app_session_id,
+                process_id = %session.process_id,
+                "interrupt durable Plan artifacts failed: {error}"
+            );
+            Vec::new()
+        }
+    };
+    InterruptedSessionGates {
+        interactions,
+        plan_artifacts,
     }
-    interrupted
 }
 
 /// Ready agent process parked while another App session is focused (I01/I02).
@@ -2395,6 +2417,59 @@ impl SessionManager {
         let _ = app.emit("session://interaction", snapshot);
     }
 
+    fn emit_plan_compat(
+        app: &AppHandle,
+        session_id: &str,
+        entries: &serde_json::Value,
+        body: &Option<String>,
+        rpc_id: Option<u64>,
+        tool_call_id: &Option<String>,
+        interaction_id: Option<&str>,
+    ) {
+        let payload = serde_json::json!({
+            "sessionId": session_id,
+            "entries": entries,
+            "body": body,
+            "rpcId": rpc_id,
+            "toolCallId": tool_call_id,
+            "waiting": rpc_id.is_none(),
+            "interactionId": interaction_id,
+        });
+        let _ = app.emit("session://plan", &payload);
+    }
+
+    fn emit_plan_artifact(app: &AppHandle, artifact: &crate::plan_artifacts::PlanArtifactV1) {
+        let _ = app.emit("session://plan_artifact", artifact);
+    }
+
+    fn emit_plan_artifact_pair(
+        app: &AppHandle,
+        artifact: &crate::plan_artifacts::PlanArtifactV1,
+        rpc_id: Option<u64>,
+    ) {
+        let revision = artifact.revisions.last();
+        let empty_entries = serde_json::Value::Array(Vec::new());
+        Self::emit_plan_compat(
+            app,
+            &artifact.session_id,
+            revision.map(|row| &row.entries).unwrap_or(&empty_entries),
+            &revision.and_then(|row| row.body.clone()),
+            rpc_id,
+            &artifact.tool_call_id,
+            artifact.interaction_id.as_deref(),
+        );
+        Self::emit_plan_artifact(app, artifact);
+    }
+
+    fn publish_interrupted_session_gates(app: &AppHandle, interrupted: InterruptedSessionGates) {
+        for snapshot in interrupted.interactions {
+            Self::publish_interaction(app, &snapshot);
+        }
+        for artifact in interrupted.plan_artifacts {
+            Self::emit_plan_artifact_pair(app, &artifact, None);
+        }
+    }
+
     /// Persist + push a chat-visible error for a failed turn (retries exhausted, RPC fail, …).
     /// Updates UI via `session://turn_error` so the optimistic thinking bubble becomes a record.
     ///
@@ -3488,26 +3563,31 @@ impl SessionManager {
                         entries: entries.clone(),
                         awaiting_review: rpc_id.is_some(),
                     };
-                    if let Err(error) = crate::plan_artifacts::record_runtime_plan(record) {
-                        tracing::warn!(
-                            session_id = app_sid,
-                            "persist Plan artifact failed: {error}"
-                        );
+                    match crate::plan_artifacts::record_runtime_plan(record) {
+                        Ok(artifact) => {
+                            Self::emit_plan_artifact(app, &artifact);
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                session_id = app_sid,
+                                "persist Plan artifact failed: {error}"
+                            );
+                        }
                     }
                 }
                 if let Some(interaction) = interaction.as_ref() {
                     Self::publish_interaction(app, interaction);
                 }
-                let _ = app.emit(
-                    "session://plan",
-                    serde_json::json!({
-                        "sessionId": app_sid,
-                        "entries": entries,
-                        "body": body,
-                        "rpcId": rpc_id,
-                        "toolCallId": tool_call_id,
-                        "waiting": rpc_id.is_none(),
-                    }),
+                Self::emit_plan_compat(
+                    app,
+                    &app_sid,
+                    &entries,
+                    &body,
+                    rpc_id,
+                    &tool_call_id,
+                    interaction
+                        .as_ref()
+                        .map(|snapshot| snapshot.interaction_id.as_str()),
                 );
             }
             AcpEvent::AskUserQuestion {
@@ -3601,12 +3681,10 @@ impl SessionManager {
                         let interrupted = interrupt_pending_interactions(s);
                         (take_pending_ask_activity(s), interrupted)
                     } else {
-                        (None, Vec::new())
+                        (None, InterruptedSessionGates::empty())
                     }
                 };
-                for snapshot in interrupted {
-                    Self::publish_interaction(app, &snapshot);
-                }
+                Self::publish_interrupted_session_gates(app, interrupted);
                 if let Some(activity) = ask_activity {
                     record_ask_user_activity(
                         app,
@@ -3677,12 +3755,10 @@ impl SessionManager {
                         let interrupted = interrupt_pending_interactions(s);
                         (take_pending_ask_activity(s), interrupted)
                     } else {
-                        (None, Vec::new())
+                        (None, InterruptedSessionGates::empty())
                     }
                 };
-                for snapshot in interrupted {
-                    Self::publish_interaction(app, &snapshot);
-                }
+                Self::publish_interrupted_session_gates(app, interrupted);
                 if let Some(activity) = ask_activity {
                     record_ask_user_activity(
                         app,
@@ -4298,11 +4374,16 @@ impl SessionManager {
                     entries: entries.clone(),
                     awaiting_review: rpc_id.is_some(),
                 };
-                if let Err(error) = crate::plan_artifacts::record_runtime_plan(record) {
-                    tracing::warn!(
-                        session_id,
-                        "persist background Plan artifact failed: {error}"
-                    );
+                match crate::plan_artifacts::record_runtime_plan(record) {
+                    Ok(artifact) => {
+                        Self::emit_plan_artifact(app, &artifact);
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            session_id,
+                            "persist background Plan artifact failed: {error}"
+                        );
+                    }
                 }
                 if let Some(interaction) = interaction.as_ref() {
                     Self::publish_interaction(app, interaction);
@@ -4314,6 +4395,9 @@ impl SessionManager {
                     "rpcId": rpc_id,
                     "toolCallId": tool_call_id,
                     "waiting": rpc_id.is_none(),
+                    "interactionId": interaction
+                        .as_ref()
+                        .map(|snapshot| snapshot.interaction_id.clone()),
                 });
                 let _ = app.emit("session://plan", &payload);
                 let _ = app.emit("session://background_plan", &payload);
@@ -4405,12 +4489,10 @@ impl SessionManager {
                         let interrupted = interrupt_pending_interactions(&mut s);
                         (take_pending_ask_activity(&mut s), interrupted)
                     } else {
-                        (None, Vec::new())
+                        (None, InterruptedSessionGates::empty())
                     }
                 };
-                for snapshot in interrupted {
-                    Self::publish_interaction(app, &snapshot);
-                }
+                Self::publish_interrupted_session_gates(app, interrupted);
                 if let Some(activity) = ask_activity {
                     record_ask_user_activity(
                         app,
@@ -4436,12 +4518,10 @@ impl SessionManager {
                         let interrupted = interrupt_pending_interactions(s);
                         (take_pending_ask_activity(s), interrupted)
                     } else {
-                        (None, Vec::new())
+                        (None, InterruptedSessionGates::empty())
                     }
                 };
-                for snapshot in interrupted {
-                    Self::publish_interaction(app, &snapshot);
-                }
+                Self::publish_interrupted_session_gates(app, interrupted);
                 if let Some(activity) = ask_activity {
                     record_ask_user_activity(
                         app,
@@ -5773,9 +5853,7 @@ impl SessionManager {
             let ask_activity = take_pending_ask_activity(s);
             (s.acp.clone(), ask_activity, interrupted)
         };
-        for snapshot in interrupted {
-            Self::publish_interaction(&app, &snapshot);
-        }
+        Self::publish_interrupted_session_gates(&app, interrupted);
         if let Some(activity) = ask_activity {
             record_ask_user_activity(
                 &app,
@@ -6530,17 +6608,20 @@ impl SessionManager {
 
         // The durable artifact advances only after Runtime accepted the RPC.
         // A sidecar failure cannot make the already-written RPC safely retryable.
-        if let Err(error) = crate::plan_artifacts::resolve_plan(
+        match crate::plan_artifacts::resolve_plan(
             &target.session_id,
             &target.interaction_id,
             &artifact_decision,
             artifact_feedback.as_deref(),
         ) {
-            tracing::warn!(
-                session_id = %target.session_id,
-                interaction_id = %target.interaction_id,
-                "persist Plan artifact resolution failed: {error}"
-            );
+            Ok(artifact) => Self::emit_plan_artifact_pair(&app, &artifact, None),
+            Err(error) => {
+                tracing::warn!(
+                    session_id = %target.session_id,
+                    interaction_id = %target.interaction_id,
+                    "persist Plan artifact resolution failed: {error}"
+                );
+            }
         }
 
         let (resolved, finished, empty_run, was_background) = {
@@ -7017,12 +7098,10 @@ impl SessionManager {
                     interrupted,
                 )
             } else {
-                (None, None, Vec::new())
+                (None, None, InterruptedSessionGates::empty())
             }
         };
-        for snapshot in interrupted {
-            Self::publish_interaction(app, &snapshot);
-        }
+        Self::publish_interrupted_session_gates(app, interrupted);
         if let Some(activity) = ask_activity {
             record_ask_user_activity(
                 app,
@@ -7875,8 +7954,11 @@ mod tests {
             host_reply: Some(tx),
         });
         let interrupted = interrupt_pending_interactions(&mut session);
-        assert_eq!(interrupted.len(), 1);
-        assert_eq!(interrupted[0].status, InteractionStatusV1::Interrupted);
+        assert_eq!(interrupted.interactions.len(), 1);
+        assert_eq!(
+            interrupted.interactions[0].status,
+            InteractionStatusV1::Interrupted
+        );
         assert!(session.pending_permission.is_none());
         assert!(rx.blocking_recv().is_err());
     }

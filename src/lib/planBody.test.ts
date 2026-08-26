@@ -43,14 +43,15 @@ describe("planDisplayMarkdown", () => {
 });
 
 describe("plan gate helpers", () => {
-  it("actions enabled only with rpcId", () => {
-    expect(planActionsEnabled({ rpcId: 3 })).toBe(true);
+  it("never enables resource-surface plan actions", () => {
+    expect(planActionsEnabled({ rpcId: 3, liveReview: true })).toBe(false);
     expect(planActionsEnabled({ rpcId: null })).toBe(false);
   });
 
-  it("awaiting review needs visible + rpcId", () => {
-    expect(planIsAwaitingReview({ visible: true, rpcId: 1 })).toBe(true);
-    expect(planIsAwaitingReview({ visible: true, rpcId: null })).toBe(false);
-    expect(planIsAwaitingReview({ visible: false, rpcId: 1 })).toBe(false);
+  it("awaiting review only with a live pending/resolving plan interaction", () => {
+    expect(planIsAwaitingReview({ visible: true, liveReview: true })).toBe(true);
+    expect(planIsAwaitingReview({ visible: true, liveReview: false })).toBe(false);
+    expect(planIsAwaitingReview({ visible: true })).toBe(false);
+    expect(planIsAwaitingReview({ visible: false, liveReview: true })).toBe(false);
   });
 });

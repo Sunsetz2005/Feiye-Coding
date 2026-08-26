@@ -1,8 +1,11 @@
+import type { PlanArtifactV1 } from "./planArtifacts";
+import { currentPlanRevision } from "./planArtifacts";
 import type {
   AskUserPayload,
   InteractionSnapshotV1,
   PermissionPayload,
 } from "./session";
+import type { PlanReviewState } from "./planBody";
 import type {
   AutomationClaimV1,
   SandboxProfileV1,
@@ -191,5 +194,60 @@ export function planResolutionContext(
   return {
     ...(interactionId ? { interactionId } : {}),
     ...(sessionId ? { sessionId } : {}),
+  };
+}
+
+export function isReviewablePlanInteraction(
+  interaction: InteractionSnapshotV1,
+): boolean {
+  return interaction.payload.kind === "plan" && isActiveInteraction(interaction);
+}
+
+export function livePlanInteraction(
+  interactions: ReadonlyMap<string, InteractionSnapshotV1>,
+  sessionId: string | null | undefined,
+): InteractionSnapshotV1 | null {
+  if (!sessionId) return null;
+  for (const interaction of interactions.values()) {
+    if (
+      interaction.sessionId === sessionId &&
+      isReviewablePlanInteraction(interaction)
+    ) {
+      return interaction;
+    }
+  }
+  return null;
+}
+
+export function planFromArtifact(
+  artifact: PlanArtifactV1,
+): Pick<
+  PlanReviewState,
+  | "visible"
+  | "waiting"
+  | "body"
+  | "entries"
+  | "rpcId"
+  | "interactionId"
+  | "toolCallId"
+  | "artifactId"
+  | "artifactStatus"
+  | "currentRevision"
+  | "liveReview"
+> {
+  const revision = currentPlanRevision(artifact);
+  const entries = Array.isArray(revision?.entries) ? revision.entries : [];
+  return {
+    visible: artifact.status !== "abandoned",
+    waiting: artifact.status === "proposed",
+    body: (revision?.body ?? "").trim(),
+    entries,
+    rpcId: null,
+    interactionId: artifact.interactionId ?? null,
+    toolCallId: artifact.toolCallId ?? null,
+    artifactId: artifact.id,
+    artifactStatus: artifact.status,
+    currentRevision: artifact.currentRevision,
+    liveReview: false,
   };
 }

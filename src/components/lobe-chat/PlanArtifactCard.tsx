@@ -1,6 +1,10 @@
 import { useMemo } from "react";
 import { IconChevronRight, IconPlan } from "@/components/icons";
 import { MarkdownBody } from "@/components/MarkdownBody";
+import {
+  planArtifactProductStatus,
+  type PlanArtifactStatusV1,
+} from "@/lib/planArtifacts";
 import { buildPlanArtifactPreview } from "./planArtifact";
 import "./workbench-content.css";
 
@@ -10,12 +14,16 @@ export interface PlanArtifactCardModel {
   body: string;
   entries?: unknown[];
   waiting?: boolean;
+  artifactStatus?: PlanArtifactStatusV1 | null;
 }
 
 export interface PlanArtifactCardLabels {
   plan: string;
   empty: string;
   open: string;
+  approved: string;
+  executing: string;
+  done: string;
 }
 
 export interface PlanArtifactCardProps {
@@ -36,7 +44,15 @@ export function PlanArtifactCard({
 
   if (artifact.visible === false) return null;
 
-  const status = labels.plan;
+  const product = planArtifactProductStatus(artifact.artifactStatus);
+  const status =
+    product === "approved"
+      ? labels.approved
+      : product === "executing"
+        ? labels.executing
+        : product === "done"
+          ? labels.done
+          : labels.plan;
   return (
     <article
       className="plan-artifact-card"
