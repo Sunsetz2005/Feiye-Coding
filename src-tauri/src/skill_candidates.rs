@@ -414,6 +414,35 @@ fn contains_sensitive_material(text: &str) -> bool {
     .any(|needle| lower.contains(needle))
 }
 
+fn candidate_match_terms(text: &str) -> Vec<String> {
+    const STOP_WORDS: &[&str] = &[
+        "this", "that", "with", "from", "into", "your", "please", "task", "make", "create", "完成",
+        "帮我", "这个", "一个", "需要", "进行",
+    ];
+    let mut terms = Vec::new();
+    for raw in text.split_whitespace() {
+        if raw.contains(['/', '\\', '@', '=']) {
+            continue;
+        }
+        let term = raw
+            .trim_matches(|character: char| !character.is_alphanumeric())
+            .to_ascii_lowercase();
+        let meaningful = term.chars().any(|character| !character.is_ascii_digit())
+            && (term.chars().count() >= 3 || term.chars().any(|character| !character.is_ascii()));
+        if !meaningful
+            || STOP_WORDS.contains(&term.as_str())
+            || terms.iter().any(|existing| existing == &term)
+        {
+            continue;
+        }
+        terms.push(term);
+        if terms.len() >= 8 {
+            break;
+        }
+    }
+    terms
+}
+
 fn load_path(path: &Path) -> Result<SkillCandidateV1, String> {
     let raw = fs::read_to_string(path).map_err(|e| format!("read skill candidate: {e}"))?;
     serde_json::from_str(&raw).map_err(|e| format!("parse skill candidate: {e}"))
@@ -434,13 +463,17 @@ fn create_from_messages_at(
         return Ok(None);
     };
     let user = &messages[user_index];
-    let Some(assistant) = messages[user_index + 1..]
-        .iter()
-        .rev()
-        .find(|message| message.role == "assistant" && !message.content.trim().is_empty())
-    else {
+    let Some(assistant) = messages[user_index + 1..].iter().rev().find(|message| {
+        message.role == "assistant" && !message.is_error && !message.content.trim().is_empty()
+    }) else {
         return Ok(None);
     };
+    if messages[user_index + 1..]
+        .iter()
+        .any(|message| message.role == "tool" && message.is_error)
+    {
+        return Ok(None);
+    }
     if assistant.content.chars().count() < 160 || user.content.trim().is_empty() {
         return Ok(None);
     }
@@ -478,10 +511,25 @@ fn create_from_messages_at(
             .unwrap_or_default()
     });
     let name = format!("learned-{}", &source_hash[..10]);
-    let description =
-        "Review and reuse a workflow learned from a completed local task.".to_string();
+    let terms = candidate_match_terms(&user_text);
+    let description = if terms.is_empty() {
+        "Review for reuse when a similar verified local workflow recurs.".to_string()
+    } else {
+        format!(
+            "Use for similar verified workflows involving {}.",
+            terms.join(", ")
+        )
+    };
+    let when_to_use = if terms.is_empty() {
+        "A future request repeats the same verified workflow and prerequisites.".to_string()
+    } else {
+        format!(
+            "A future request matches these reviewed signals: {}.",
+            terms.join(", ")
+        )
+    };
     let skill_md = format!(
-        "---\nname: {name}\ndescription: {description}\n---\n\n# Review-required workflow candidate\n\nThis draft was generated from visible task output. Verify and generalize every step before enabling it.\n\n## Source request\n\n{user_text}\n\n## Observed outcome\n\n{assistant_text}\n\n## Review checklist\n\n- Remove task-specific paths and identifiers.\n- Confirm prerequisites, failure modes, and safe defaults.\n- Keep secrets, hidden reasoning, and raw tool payloads out of the Skill.\n"
+        "---\nname: {name}\ndescription: {description}\n---\n\n# Review-required workflow candidate\n\nThis draft was generated from visible task output. Verify and generalize every step before enabling it.\n\n## When to use\n\n{when_to_use}\n\n## Source request\n\n{user_text}\n\n## Observed outcome\n\n{assistant_text}\n\n## Review checklist\n\n- Remove task-specific paths and identifiers.\n- Confirm prerequisites, failure modes, and safe defaults.\n- Keep secrets, hidden reasoning, and raw tool payloads out of the Skill.\n"
     );
     let draft = SkillCandidateDraftV1 {
         name,
@@ -946,6 +994,9 @@ mod tests {
             .draft
             .skill_md
             .contains("Review-required workflow candidate"));
+        assert!(candidate.draft.skill_md.contains("## When to use"));
+        assert!(candidate.draft.description.contains("workflow"));
+        assert!(!candidate.draft.description.contains("completed local task"));
         assert!(candidate.draft.skill_md.contains("Source request"));
         assert!(candidate.approved_path.is_none());
         assert!(candidate.approved_content_hash.is_none());
@@ -1014,6 +1065,25 @@ mod tests {
                 .is_none()
         );
 
+        let mut assistant_error = eligible_messages("assistant-error");
+        assistant_error.last_mut().unwrap().is_error = true;
+        assert!(create_from_messages_at(
+            "s",
+            &assistant_error,
+            Some(String::new()),
+            &candidates_root,
+        )
+        .unwrap()
+        .is_none());
+
+        let mut tool_error = eligible_messages("tool-error");
+        tool_error[1].is_error = true;
+        assert!(
+            create_from_messages_at("s", &tool_error, Some(String::new()), &candidates_root,)
+                .unwrap()
+                .is_none()
+        );
+
         assert!(contains_sensitive_material("Authorization: Bearer abc"));
         assert!(contains_sensitive_material("client_secret=value"));
         assert!(!contains_sensitive_material(
@@ -1021,6 +1091,10 @@ mod tests {
         ));
         assert_eq!(bounded("你好世界", 2), "你好…");
         assert_eq!(bounded("short", 10), "short");
+        assert_eq!(
+            candidate_match_terms("Please migrate Rust workspace tests safely"),
+            vec!["migrate", "rust", "workspace", "tests", "safely"]
+        );
         assert!(list_at(&candidates_root).unwrap().is_empty());
 
         fs::remove_dir_all(candidates_root).unwrap();

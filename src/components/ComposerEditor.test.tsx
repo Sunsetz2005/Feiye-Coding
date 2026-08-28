@@ -45,6 +45,37 @@ function drainAnimationFrames(maxBatches = 20) {
 }
 
 describe("ComposerEditor slash query events", () => {
+  it("preserves an exact v1 Skill binding through DOM edits", () => {
+    const onChange = vi.fn();
+    const token = `[[skill-v1:review|${"a".repeat(64)}|${"b".repeat(64)}|accepted_suggestion]]`;
+    render(<ComposerEditor value={token} onChange={onChange} />);
+
+    const editor = screen.getByRole("textbox");
+    const chip = editor.querySelector<HTMLElement>("[data-skill]");
+    expect(chip?.dataset.skillToken).toBe(token);
+    editor.appendChild(document.createTextNode(" now"));
+    fireEvent.input(editor, { data: "w", inputType: "insertText" });
+
+    expect(onChange).toHaveBeenLastCalledWith(`${token} now`);
+  });
+
+  it("does not downgrade a mutated binding token into a legacy Skill", () => {
+    const onChange = vi.fn();
+    const token = `[[skill-v1:review|${"a".repeat(64)}|${"b".repeat(64)}|explicit]]`;
+    render(<ComposerEditor value={token} onChange={onChange} />);
+
+    const editor = screen.getByRole("textbox");
+    const chip = editor.querySelector<HTMLElement>("[data-skill]");
+    if (!chip) throw new Error("Skill chip missing");
+    chip.dataset.skillToken = "[[skill-v1:review|invalid]]";
+    editor.appendChild(document.createTextNode(" changed"));
+    fireEvent.input(editor, { data: "d", inputType: "insertText" });
+
+    const stored = onChange.mock.lastCall?.[0] as string;
+    expect(stored).toContain("[[skill-v1:review|invalid]]");
+    expect(stored).not.toContain("[[skill:review]]");
+  });
+
   it("reports the exact query from user input", () => {
     const onChange = vi.fn();
     const onSlashQueryChange = vi.fn();

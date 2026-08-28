@@ -715,6 +715,11 @@ const en = {
   "composer.memory.provenance": "Source: {sessionId} / {messageId}",
   "composer.memory.queueBlocked":
     "Reviewed Memory can only be sent immediately. Wait for the current turn or remove it.",
+  "composer.memory.restoreFailed":
+    "Reviewed Memory could not be restored because the selection is no longer valid.",
+  "composer.projectInstruction.attached": "Project instructions: {path}",
+  "composer.projectInstruction.truncated":
+    "Project instructions: {path} (truncated)",
   "settings.cliPath": "CLI path",
   "settings.cliPathDesc": "Path to the Sunsetz Runtime CLI binary",
   "settings.cliNotFound": "(not found)",
@@ -2225,6 +2230,10 @@ const zh: Record<MessageKey, string> = {
   "composer.memory.provenance": "来源：{sessionId} / {messageId}",
   "composer.memory.queueBlocked":
     "已审阅记忆只能立即发送；请等待当前轮次结束，或先移除记忆上下文。",
+  "composer.memory.restoreFailed":
+    "已审阅记忆无法恢复，因为所选内容已失效。",
+  "composer.projectInstruction.attached": "项目说明：{path}",
+  "composer.projectInstruction.truncated": "项目说明：{path}（已截断）",
   "settings.cliPath": "CLI 路径",
   "settings.cliPathDesc": "Sunsetz Runtime CLI 可执行文件路径",
   "settings.cliNotFound": "（未找到）",

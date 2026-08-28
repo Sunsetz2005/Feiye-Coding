@@ -8,6 +8,7 @@ Product rules for the slash palette, skill chips, mode markers, and Doctor.
 - Skills render as **inline chips** inside the editor (not a top-only chip bar).
 - Mode markers (`goal`, and plan via session mode) live in the **composer toolbar**, not in the body.
 - Storage / user bubble text uses stable tokens: `[[skill:name]]`.
+- Recovery drafts may bind a chip to inventory identity with `[[skill-v1:name|id|treeHash|explicit|accepted_suggestion]]`. User-visible journals keep the legacy `[[skill:name]]` marker. Stale tree hashes must not silently load Skill text.
 - Agent prompt serialization:
   - Skills → `/name` tokens (Grok Build invocable form), then plain text.
   - Goal mode on → prefix `/goal\n`.

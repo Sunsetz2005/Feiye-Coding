@@ -216,6 +216,16 @@ vi.mock("@/lib/api", async (importOriginal) => {
     settingsSet: apiListenerCapture.settingsSet,
     settingsPatchV1: apiListenerCapture.settingsPatch,
     trayRefresh: vi.fn(async () => undefined),
+    projectInstructionInspectV1: vi.fn(async () => ({
+      version: 1 as const,
+      relativePath: null,
+      truncated: false,
+      characterCount: 0,
+    })),
+    memoryContextPackBuildV1: vi.fn(async () => ({
+      version: 1 as const,
+      items: [],
+    })),
   };
 });
 

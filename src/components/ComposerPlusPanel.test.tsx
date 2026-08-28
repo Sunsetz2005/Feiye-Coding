@@ -116,6 +116,38 @@ describe("ComposerPlusPanel semantics", () => {
     expect(html).toContain('aria-live="polite"');
     expect(html).toContain("Nothing is selected in Finder");
   });
+
+  it("labels ranked Skills as suggestions without changing selection semantics", () => {
+    const html = renderToStaticMarkup(
+      <ComposerPlusPanel
+        open
+        mode="plus"
+        locale="en"
+        entries={[
+          {
+            id: "skill:review",
+            kind: "slash",
+            item: {
+              id: "skill:review",
+              kind: "skill",
+              name: "review",
+              displayTitle: "Review",
+              suggested: true,
+            },
+          },
+        ]}
+        activeIndex={0}
+        onActiveIndexChange={() => undefined}
+        onSelectUpload={() => undefined}
+        onSelectSlash={() => undefined}
+        resolveTitle={() => "Review"}
+        resolveDescription={() => "Review the current change"}
+      />,
+    );
+
+    expect(html).toContain("Suggested");
+    expect(html).toContain('role="menuitem"');
+  });
 });
 
 describe("composer plus rows", () => {

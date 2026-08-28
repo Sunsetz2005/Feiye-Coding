@@ -32,6 +32,12 @@ type PlanButtonProps = ComponentProps<
 type ContextChipProps = ComponentProps<
   typeof import("@/components/ContextUsageChip").ContextUsageChip
 >;
+type ProgressRailProps = ComponentProps<
+  typeof import("@/components/lobe-chat/TaskProgressRail").TaskProgressRail
+>;
+type MemoryBadgeProps = ComponentProps<
+  typeof import("@/components/MemoryContextBadge").MemoryContextBadge
+>;
 
 vi.mock("@/components/ui/tooltip", () => ({
   Tip: ({ children }: { children: ReactNode }) => children,
@@ -187,6 +193,26 @@ vi.mock("@/components/ContextUsageChip", () => ({
   ),
 }));
 
+vi.mock("@/components/lobe-chat/TaskProgressRail", () => ({
+  TaskProgressRail: ({ goalSummary, onOpenDetails }: ProgressRailProps) => (
+    <div data-testid="task-progress-rail">
+      <span>{goalSummary}</span>
+      <button type="button" onClick={onOpenDetails}>open details</button>
+    </div>
+  ),
+}));
+
+vi.mock("@/components/MemoryContextBadge", () => ({
+  MemoryContextBadge: ({ disabled, onClear }: MemoryBadgeProps) => (
+    <div
+      data-testid="memory-badge"
+      data-disabled={disabled ? "true" : "false"}
+    >
+      <button type="button" onClick={onClear}>clear memory</button>
+    </div>
+  ),
+}));
+
 import { ComposerDock } from "./ComposerDock";
 
 afterEach(cleanup);
@@ -260,7 +286,7 @@ function makeProps(overrides: DockOverrides = {}): ComposerDockProps {
   } satisfies ComposerDockProps["menu"];
   return {
     locale: "en",
-    taskProgressVisible: false,
+    welcomeSession: false,
     goalMode: false,
     settingsLocked: false,
     sessionState: "idle",
@@ -315,6 +341,7 @@ function makeProps(overrides: DockOverrides = {}): ComposerDockProps {
       ...overrides.preferences,
     },
     refs: {
+      wrap: createRef<HTMLDivElement>(),
       input: createRef<HTMLDivElement>(),
       shell: createRef<HTMLDivElement>(),
       plusTrigger: createRef<HTMLButtonElement>(),
@@ -354,6 +381,7 @@ describe("ComposerDock", () => {
     const permission = renderDock({ sessionState: "awaiting_permission", draft: "blocked" });
     const editor = screen.getByRole("textbox");
     expect(editor.getAttribute("aria-disabled")).toBe("true");
+    expect(screen.getByRole("button", { name: "Stop" })).toBeTruthy();
     fireEvent.keyDown(editor, { key: "Enter" });
     fireEvent.keyDown(editor, { key: "Enter", isComposing: true });
     fireEvent.keyDown(editor, { key: "Enter", keyCode: 229 });
@@ -470,7 +498,7 @@ describe("ComposerDock", () => {
   });
 
   it("uses keyboard navigation and selection for open plus and slash menus", () => {
-    const { props } = renderDock({
+    const { props, unmount } = renderDock({
       menu: { open: true, positioned: false, activeIndex: 1 },
       draft: "command",
     });
@@ -487,6 +515,168 @@ describe("ComposerDock", () => {
     expect(typeof up === "function" ? up(0) : up).toBe(2);
     expect(props.menu.onSelectAction).toHaveBeenCalledTimes(2);
     expect(props.menu.onClose).toHaveBeenCalledOnce();
+    expect(props.onSend).not.toHaveBeenCalled();
+    unmount();
+
+    const slashView = renderDock({
+      menu: { open: true, entries: menuEntries, activeIndex: 0 },
+      draft: "command",
+    });
+    fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter" });
+    fireEvent.keyDown(screen.getByRole("textbox"), { key: "Tab" });
+    expect(slashView.props.menu.onPickFiles).toHaveBeenCalledTimes(2);
+    slashView.unmount();
+
+    const slashPick = renderDock({
+      menu: { open: true, entries: menuEntries, activeIndex: 2 },
+      draft: "command",
+    });
+    fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter" });
+    fireEvent.keyDown(screen.getByRole("textbox"), { key: "Tab" });
+    expect(slashPick.props.menu.onSelectSlash).toHaveBeenCalledTimes(2);
+    expect(slashPick.props.menu.onSelectSlash).toHaveBeenCalledWith(slashItem);
+    slashPick.unmount();
+
+    const sendView = renderDock({ draft: "Ship it" });
+    fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter" });
+    fireEvent.keyDown(screen.getByRole("textbox"), { key: "Escape" });
+    expect(sendView.props.onSend).toHaveBeenCalledOnce();
+    expect(sendView.props.menu.onClose).toHaveBeenCalledOnce();
+  });
+
+  it("owns the floating wrap, progress rail, permission slot, and takeover", async () => {
+    const user = userEvent.setup();
+    const onOpenDetails = vi.fn();
+    const onClear = vi.fn();
+    const pack = {
+      version: 1 as const,
+      items: [
+        {
+          candidateId: "c1",
+          contentHash: "a".repeat(64),
+          type: "user_preference" as const,
+          content: "Prefer evidence.",
+          source: { sessionId: "s1", messageId: "m1" },
+        },
+      ],
+    };
+    const { props, rerender, container } = renderDock({
+      welcomeSession: true,
+      memory: {
+        pack,
+        labels: {
+          regionLabel: "Reviewed Memory context",
+          title: "Memory",
+          reviewedContext: "reviewed",
+          notInstructions: "not instructions",
+          noFtsSessionEvidence: "no fts",
+          itemCount: "{count} items",
+          clear: "clear",
+          content: "content",
+          expandItem: "expand",
+          fullContent: "full",
+          emptyContent: "empty",
+          provenance: "source",
+          typeLabels: {
+            user_preference: "preference",
+            project_fact: "fact",
+            workflow_hint: "hint",
+          },
+        },
+        onClear,
+      },
+      permission: <div data-testid="permission-slot">Allow once</div>,
+    });
+
+    const wrap = container.querySelector(".composer-wrap");
+    expect(wrap?.classList.contains("composer-wrap--welcome")).toBe(true);
+    expect(wrap).toBe(props.refs.wrap.current);
+    expect(screen.getByTestId("project-menu")).toBeTruthy();
+    expect(screen.queryByTestId("project-instruction-chip")).toBeNull();
+    expect(screen.getByTestId("permission-slot")).toBeTruthy();
+    expect(screen.getByTestId("memory-badge").getAttribute("data-disabled")).toBe("false");
+
+    rerender(
+      <ComposerDock
+        {...props}
+        projectInstruction={{
+          path: "AGENTS.md",
+          truncated: false,
+          labels: {
+            attached: "Project instructions: AGENTS.md",
+            truncated: "Project instructions: AGENTS.md (truncated)",
+          },
+        }}
+      />,
+    );
+    expect(screen.getByTestId("project-instruction-chip").textContent).toBe(
+      "Project instructions: AGENTS.md",
+    );
+    await user.click(screen.getByRole("button", { name: "clear memory" }));
+    expect(onClear).toHaveBeenCalledOnce();
+
+    rerender(
+      <ComposerDock {...props} connecting sessionState="connecting" />,
+    );
+    expect(screen.getByTestId("memory-badge").getAttribute("data-disabled")).toBe(
+      "true",
+    );
+
+    rerender(
+      <ComposerDock
+        {...props}
+        progress={{
+          entries: [{ title: "Ship", status: "in_progress" }],
+          changes: [],
+          goalSummary: "Land the dock",
+          elapsedMs: 1200,
+          streaming: true,
+          labels: {
+            step: "Step {current} / {total}",
+            filesChanged: "{count} files",
+            activeGoal: "Active goal",
+            details: "Details",
+            edit: "Edit",
+            pause: "Pause",
+            delete: "Delete",
+          },
+          onOpenDetails,
+        }}
+      />,
+    );
+    expect(screen.queryByTestId("project-menu")).toBeNull();
+    expect(screen.getByTestId("task-progress-rail")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "open details" }));
+    expect(onOpenDetails).toHaveBeenCalledOnce();
+    expect(screen.getByRole("textbox")).toBeTruthy();
+
+    rerender(
+      <ComposerDock
+        {...props}
+        connecting
+        sessionState="connecting"
+        takeover={<div role="region">Question 1 of 2</div>}
+      />,
+    );
+    expect(screen.getByText("Question 1 of 2")).toBeTruthy();
+    expect(screen.queryByRole("textbox")).toBeNull();
+    expect(screen.queryByTestId("project-menu")).toBeNull();
+    expect(container.querySelector(".composer-dock")).toBeNull();
+  });
+
+  it("ignores empty plus-menu keyboard events instead of sending", () => {
+    const { props } = renderDock({
+      menu: { open: true, entries: [], activeIndex: 0 },
+      draft: "ready",
+    });
+    const editor = screen.getByRole("textbox");
+    fireEvent.keyDown(editor, { key: "ArrowDown" });
+    fireEvent.keyDown(editor, { key: "ArrowUp" });
+    fireEvent.keyDown(editor, { key: "Enter" });
+    fireEvent.keyDown(editor, { key: "Tab" });
+    expect(props.menu.onActiveIndexChange).not.toHaveBeenCalled();
+    expect(props.menu.onPickFiles).not.toHaveBeenCalled();
+    expect(props.menu.onSelectAction).not.toHaveBeenCalled();
     expect(props.onSend).not.toHaveBeenCalled();
   });
 });

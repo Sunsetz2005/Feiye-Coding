@@ -1,17 +1,70 @@
 /**
  * Composer draft document model: text segments + inline skill chips.
- * Storage / user bubbles use stable tokens `[[skill:name]]`.
+ * Recovery storage can bind a chip to an exact Skill identity with a v1 token;
+ * user-visible journals keep the stable legacy `[[skill:name]]` marker.
  * Agent prompts serialize skills as `/name` (Grok Build invocable form).
  */
 
+export type SkillBindingV1 = {
+  version: 1;
+  id: string;
+  expectedTreeHash: string;
+  selection: "explicit" | "accepted_suggestion";
+};
+
 export type DraftSegment =
   | { type: "text"; text: string }
-  | { type: "skill"; name: string };
+  | { type: "skill"; name: string; binding?: SkillBindingV1 };
 
 /** Skill name character class: letters, digits, `_` `.` `:` `-`. */
-export const SKILL_NAME_RE = /[a-zA-Z0-9_.:-]+/;
+const SKILL_NAME_SOURCE = "[a-zA-Z0-9_.:-]+";
+export const SKILL_NAME_RE = new RegExp(`^${SKILL_NAME_SOURCE}$`);
 
-const SKILL_TOKEN_RE = /\[\[skill:([a-zA-Z0-9_.:-]+)\]\]/g;
+const HEX_64_SOURCE = "[a-fA-F0-9]{64}";
+const SKILL_TOKEN_RE = new RegExp(
+  `^\\[\\[skill:(${SKILL_NAME_SOURCE})\\]\\]$`,
+);
+const SKILL_V1_TOKEN_RE = new RegExp(
+  `^\\[\\[skill-v1:(${SKILL_NAME_SOURCE})\\|(${HEX_64_SOURCE})\\|(${HEX_64_SOURCE})\\|(explicit|accepted_suggestion)\\]\\]$`,
+);
+const LEGACY_SKILL_TOKEN_PREFIX = "[[skill:";
+const V1_SKILL_TOKEN_PREFIX = "[[skill-v1:";
+
+function validHex64(value: unknown): value is string {
+  return typeof value === "string" && /^[a-fA-F0-9]{64}$/.test(value);
+}
+
+function validSkillName(value: unknown): value is string {
+  return typeof value === "string" && SKILL_NAME_RE.test(value);
+}
+
+function validSkillBinding(value: unknown): value is SkillBindingV1 {
+  if (!value || typeof value !== "object") return false;
+  const binding = value as Partial<SkillBindingV1>;
+  return (
+    binding.version === 1 &&
+    validHex64(binding.id) &&
+    validHex64(binding.expectedTreeHash) &&
+    (binding.selection === "explicit" ||
+      binding.selection === "accepted_suggestion")
+  );
+}
+
+function serializeSkillToken(
+  segment: Extract<DraftSegment, { type: "skill" }>,
+  displayOnly = false,
+): string {
+  if (!validSkillName(segment.name)) {
+    throw new Error("invalid Skill name in draft segment");
+  }
+  if (segment.binding !== undefined && !validSkillBinding(segment.binding)) {
+    throw new Error("invalid Skill binding in draft segment");
+  }
+  if (displayOnly || segment.binding === undefined) {
+    return `[[skill:${segment.name}]]`;
+  }
+  return `[[skill-v1:${segment.name}|${segment.binding.id}|${segment.binding.expectedTreeHash}|${segment.binding.selection}]]`;
+}
 
 /**
  * Slash names that are App/Build commands, not skill chips, when rehydrating
@@ -50,7 +103,12 @@ const NON_SKILL_SLASH = new Set(
  */
 export function hydrateDisplayContent(content: string): string {
   if (!content) return content;
-  if (content.includes("[[skill:")) return content;
+  if (
+    content.includes(LEGACY_SKILL_TOKEN_PREFIX) ||
+    content.includes(V1_SKILL_TOKEN_PREFIX)
+  ) {
+    return content;
+  }
 
   let rest = content;
   // Drop goal mode prefix from display hydration (mode is session chrome, not a chip).
@@ -102,43 +160,100 @@ export function draftFromPlainText(text: string): DraftSegment[] {
 }
 
 /**
- * Parse stored content with `[[skill:name]]` tokens into segments.
- * Invalid / incomplete tokens stay as plain text.
+ * Parse legacy `[[skill:name]]` and identity-bound `[[skill-v1:…]]` tokens.
+ * Invalid / incomplete v1 tokens stay as plain text and never downgrade to an
+ * unbound Skill segment.
  */
 export function parseStoredContent(content: string): DraftSegment[] {
   if (!content) return [];
   const segments: DraftSegment[] = [];
-  let last = 0;
-  const re = new RegExp(SKILL_TOKEN_RE.source, "g");
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(content)) !== null) {
-    if (m.index > last) {
-      segments.push({ type: "text", text: content.slice(last, m.index) });
+  const pushText = (text: string) => {
+    if (!text) return;
+    const previous = segments[segments.length - 1];
+    if (previous?.type === "text") {
+      previous.text += text;
+    } else {
+      segments.push({ type: "text", text });
     }
-    segments.push({ type: "skill", name: m[1]! });
-    last = m.index + m[0].length;
-  }
-  if (last < content.length) {
-    segments.push({ type: "text", text: content.slice(last) });
+  };
+  let cursor = 0;
+  while (cursor < content.length) {
+    const legacyStart = content.indexOf(LEGACY_SKILL_TOKEN_PREFIX, cursor);
+    const v1Start = content.indexOf(V1_SKILL_TOKEN_PREFIX, cursor);
+    const starts = [legacyStart, v1Start].filter((index) => index >= 0);
+    if (starts.length === 0) {
+      pushText(content.slice(cursor));
+      break;
+    }
+    const start = Math.min(...starts);
+    pushText(content.slice(cursor, start));
+    const isV1 = start === v1Start;
+    const end = content.indexOf("]]", start);
+    if (end < 0) {
+      pushText(content.slice(start));
+      break;
+    }
+    const rawToken = content.slice(start, end + 2);
+    const match = isV1
+      ? SKILL_V1_TOKEN_RE.exec(rawToken)
+      : SKILL_TOKEN_RE.exec(rawToken);
+    if (isV1 && match) {
+      segments.push({
+        type: "skill",
+        name: match[1]!,
+        binding: {
+          version: 1,
+          id: match[2]!,
+          expectedTreeHash: match[3]!,
+          selection: match[4] as SkillBindingV1["selection"],
+        },
+      });
+    } else if (!isV1 && match) {
+      segments.push({ type: "skill", name: match[1]! });
+    } else {
+      pushText(rawToken);
+    }
+    cursor = end + 2;
   }
   return segments;
 }
 
-/** Serialize segments back to stored form (`[[skill:name]]` tokens). */
+/** Serialize recovery/editor storage, preserving exact v1 Skill bindings. */
 export function serializeStored(segments: DraftSegment[]): string {
   return segments
-    .map((s) => (s.type === "text" ? s.text : `[[skill:${s.name}]]`))
+    .map((segment) =>
+      segment.type === "text" ? segment.text : serializeSkillToken(segment),
+    )
     .join("");
 }
 
 /**
- * Replace `[[skill:name]]` with `/name` in place for one-line previews
+ * Serialize the user-visible journal form. Identity and selection metadata are
+ * deliberately omitted; the Host verifies them through the separate v2 DTO.
+ */
+export function serializeDisplayForJournal(segments: DraftSegment[]): string {
+  return segments
+    .map((segment) =>
+      segment.type === "text"
+        ? segment.text
+        : serializeSkillToken(segment, true),
+    )
+    .join("");
+}
+
+/**
+ * Replace valid legacy and v1 Skill tokens with `/name` in one-line previews.
+ * Invalid v1-shaped text stays visible as text.
  * (queue strip, titles). Keeps surrounding text order — unlike
  * {@link serializeForAgent}, which groups skills first.
  */
 export function previewStoredAsSlash(stored: string): string {
   if (!stored) return stored;
-  return stored.replace(new RegExp(SKILL_TOKEN_RE.source, "g"), "/$1");
+  return parseStoredContent(stored)
+    .map((segment) =>
+      segment.type === "text" ? segment.text : `/${segment.name}`,
+    )
+    .join("");
 }
 
 /**
@@ -202,8 +317,13 @@ export function applySkillAtSlash(
   slashStart: number,
   slashEnd: number,
   skillName: string,
+  binding?: SkillBindingV1,
 ): string {
-  const token = `[[skill:${skillName}]] `;
+  const token = `${serializeSkillToken({
+    type: "skill",
+    name: skillName,
+    ...(binding !== undefined ? { binding } : {}),
+  })} `;
   return stored.slice(0, slashStart) + token + stored.slice(slashEnd);
 }
 
@@ -284,8 +404,8 @@ export function mergeAdjacentText(segments: DraftSegment[]): DraftSegment[] {
 }
 
 /**
- * Simple editor projection: text as-is, skills as `[[skill:name]]`.
- * Same wire form as `serializeStored`.
+ * Editor projection uses the recovery storage form so identity bindings survive
+ * contenteditable round-trips. Journals must use `serializeDisplayForJournal`.
  */
 export function segmentsToPlainEditorText(segments: DraftSegment[]): string {
   return serializeStored(segments);

@@ -1,12 +1,23 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   catalog: vi.fn(),
   hooks: vi.fn(),
   uninstall: vi.fn(),
+  skillUsesList: vi.fn(),
+  skillFeedback: vi.fn(),
+  skillProposal: vi.fn(),
+  skillRank: vi.fn(),
 }));
 
 vi.mock("@/lib/api", async (importOriginal) => {
@@ -19,6 +30,10 @@ vi.mock("@/lib/api", async (importOriginal) => {
     runtimePluginsCatalogV1: mocks.catalog,
     runtimeHooksInventoryV1: mocks.hooks,
     pluginUninstall: mocks.uninstall,
+    skillUsesListV1: mocks.skillUsesList,
+    skillUseFeedbackV1: mocks.skillFeedback,
+    skillImprovementProposalV1: mocks.skillProposal,
+    skillMetadataRankV1: mocks.skillRank,
     providersList: vi.fn(async () => null),
   };
 });
@@ -45,6 +60,14 @@ beforeEach(() => {
     { version: 1, pluginName: "one", source: "runtime_inspect" },
     { version: 1, pluginName: "two", source: "runtime_inspect" },
   ]);
+  mocks.skillUsesList.mockResolvedValue([]);
+  mocks.skillRank.mockResolvedValue({
+    version: 1,
+    disposition: "suggestion_only",
+    requiresExplicitAcceptance: true,
+    items: [],
+  });
+  mocks.skillProposal.mockResolvedValue(null);
 });
 
 afterEach(() => {
@@ -106,5 +129,39 @@ describe("ExtensionsPanel Runtime catalog bridge", () => {
     fireEvent.click(uninstall);
     expect(mocks.uninstall).not.toHaveBeenCalled();
     expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("passes the active project and session into the Skill learning review", async () => {
+    const { ExtensionsPanel } = await import("./ExtensionsPanel");
+    render(
+      <ExtensionsPanel
+        locale="en"
+        projectPath="/trusted/project"
+        activeSessionId="session-review"
+      />,
+    );
+
+    const panel = screen.getByTestId("skill-learning-panel");
+    expect(within(panel).getByText("Metadata only")).toBeTruthy();
+    expect(
+      within(panel).getByText(/cannot write a Skill/),
+    ).toBeTruthy();
+    await waitFor(() =>
+      expect(mocks.skillUsesList).toHaveBeenCalledWith("session-review"),
+    );
+
+    fireEvent.change(within(panel).getByLabelText("Skill metadata query"), {
+      target: { value: "release notes" },
+    });
+    fireEvent.click(
+      within(panel).getByRole("button", { name: "Find suggestions" }),
+    );
+    await waitFor(() =>
+      expect(mocks.skillRank).toHaveBeenCalledWith(
+        "release notes",
+        "/trusted/project",
+        8,
+      ),
+    );
   });
 });

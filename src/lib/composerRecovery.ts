@@ -27,7 +27,17 @@ export const COMPOSER_RECOVERY_LIMITS = {
   queueIdChars: 256,
   queuedDisplayChars: 1_000_000,
   totalStateChars: 4_000_000,
+  memoryPackSelections: 8,
 } as const;
+
+const MEMORY_CANDIDATE_ID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const MEMORY_CONTENT_HASH_RE = /^[0-9a-f]{64}$/i;
+
+export type ComposerMemoryPackRefV1 = {
+  version: 1;
+  selections: Array<{ id: string; expectedContentHash: string }>;
+};
 
 export type ComposerRecoveryRevisionV1 = number;
 
@@ -40,6 +50,8 @@ export interface ComposerRecoveryStateV1 {
   draft: string;
   attachments: Attachment[];
   queue: QueuedSend[];
+  /** Reviewed Memory identity only; missing/null means no pack. */
+  memoryPack?: ComposerMemoryPackRefV1 | null;
 }
 
 export interface ComposerRecoverySnapshotV1 {
@@ -237,6 +249,8 @@ export function normalizeComposerRecoveryStateV1(
   const attachments = normalizeAttachments(value.attachments);
   const queue = normalizeQueue(value.queue);
   if (!attachments || !queue) return null;
+  const normalizedMemoryPack = normalizeMemoryPack(value.memoryPack);
+  const memoryPack = normalizedMemoryPack === false ? null : normalizedMemoryPack;
 
   const queuedAttachments = queue.reduce(
     (total, item) => total + item.attachments.length,
@@ -265,7 +279,47 @@ export function normalizeComposerRecoveryStateV1(
     );
   if (totalChars > COMPOSER_RECOVERY_LIMITS.totalStateChars) return null;
 
-  return { draft: value.draft, attachments, queue };
+  return {
+    draft: value.draft,
+    attachments,
+    queue,
+    memoryPack,
+  };
+}
+
+/** Invalid pack shapes fail closed (`false`). Missing/null is `null`. */
+function normalizeMemoryPack(
+  value: unknown,
+): ComposerMemoryPackRefV1 | null | false {
+  if (value == null) return null;
+  if (!isRecord(value) || value.version !== 1) return false;
+  if (!Array.isArray(value.selections)) return false;
+  if (
+    value.selections.length === 0 ||
+    value.selections.length > COMPOSER_RECOVERY_LIMITS.memoryPackSelections
+  ) {
+    return false;
+  }
+  const ids = new Set<string>();
+  const selections: ComposerMemoryPackRefV1["selections"] = [];
+  for (const entry of value.selections) {
+    if (!isRecord(entry)) return false;
+    if (
+      typeof entry.id !== "string" ||
+      !MEMORY_CANDIDATE_ID_RE.test(entry.id) ||
+      ids.has(entry.id.toLowerCase()) ||
+      typeof entry.expectedContentHash !== "string" ||
+      !MEMORY_CONTENT_HASH_RE.test(entry.expectedContentHash)
+    ) {
+      return false;
+    }
+    ids.add(entry.id.toLowerCase());
+    selections.push({
+      id: entry.id,
+      expectedContentHash: entry.expectedContentHash.toLowerCase(),
+    });
+  }
+  return { version: 1, selections };
 }
 
 export function cloneComposerRecoveryStateV1(
@@ -278,7 +332,51 @@ export function cloneComposerRecoveryStateV1(
       ...item,
       attachments: item.attachments.map((attachment) => ({ ...attachment })),
     })),
+    memoryPack: cloneMemoryPack(state.memoryPack),
   };
+}
+
+export function cloneMemoryPack(
+  pack: ComposerMemoryPackRefV1 | null | undefined,
+): ComposerMemoryPackRefV1 | null {
+  if (!pack) return null;
+  return {
+    version: 1,
+    selections: pack.selections.map((selection) => ({ ...selection })),
+  };
+}
+
+export function memoryPackRefFromContext(pack: {
+  items: Array<{ candidateId: string; contentHash: string }>;
+} | null): ComposerMemoryPackRefV1 | null {
+  if (!pack?.items.length) return null;
+  return {
+    version: 1,
+    selections: pack.items.map((item) => ({
+      id: item.candidateId,
+      expectedContentHash: item.contentHash,
+    })),
+  };
+}
+
+export function memoryPacksEqual(
+  left: ComposerMemoryPackRefV1 | null | undefined,
+  right: ComposerMemoryPackRefV1 | null | undefined,
+): boolean {
+  const a = left ?? null;
+  const b = right ?? null;
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return (
+    a.version === b.version &&
+    a.selections.length === b.selections.length &&
+    a.selections.every(
+      (selection, index) =>
+        selection.id === b.selections[index]?.id &&
+        selection.expectedContentHash ===
+          b.selections[index]?.expectedContentHash,
+    )
+  );
 }
 
 export function normalizeComposerRecoverySnapshotV1(

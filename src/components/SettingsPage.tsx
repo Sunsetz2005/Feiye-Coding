@@ -160,10 +160,14 @@ export interface SettingsPageProps {
   onDeleteArchivedSessions?: (ids: string[]) => void;
   /** Active project path for Skills/MCP inspect cwd. */
   projectPath?: string | null;
+  /** Authoritative current session for bounded Skill-use review. */
+  activeSessionId?: string | null;
   /** After skill enable toggle — refresh slash palette in App. */
   onSkillsPrefsChanged?: () => void;
   /** Provenance for a user-authored, review-only memory candidate. */
   memorySource?: { sessionId: string; messageId: string } | null;
+  /** Stage an explicitly reviewed pack for one immediate Composer turn. */
+  onUseMemoryContext?: (pack: api.MemoryContextPackV1) => void;
 }
 
 function NavIcon({
@@ -423,8 +427,10 @@ export function SettingsPage({
   onRestoreArchivedSessions,
   onDeleteArchivedSessions,
   projectPath = null,
+  activeSessionId = null,
   onSkillsPrefsChanged,
   memorySource = null,
+  onUseMemoryContext,
 }: SettingsPageProps) {
   const [query, setQuery] = useState("");
   const [accountTab, setAccountTab] = useState<"official" | "providers">(
@@ -945,6 +951,7 @@ export function SettingsPage({
               <MemoryCandidatesPanel
                 locale={resolveLocale(locale)}
                 source={memorySource}
+                onUseContextPack={onUseMemoryContext}
               />
             ) : null}
           </>
@@ -1316,6 +1323,7 @@ export function SettingsPage({
           <ExtensionsPanel
             locale={resolveLocale(locale)}
             projectPath={projectPath}
+            activeSessionId={activeSessionId}
             cliFound={cliInfo.found}
             onOpenRuntime={() => onSection("runtime")}
             onSkillsPrefsChanged={onSkillsPrefsChanged}

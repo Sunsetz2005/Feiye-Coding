@@ -145,7 +145,11 @@ import {
   type ExecuteSendFromQueue,
 } from "@/hooks/useSendQueue";
 import { useComposerRecovery } from "@/hooks/useComposerRecovery";
-import { COMPOSER_RECOVERY_DRAFT_KEY } from "@/lib/composerRecovery";
+import {
+  COMPOSER_RECOVERY_DRAFT_KEY,
+  memoryPackRefFromContext,
+  type ComposerMemoryPackRefV1,
+} from "@/lib/composerRecovery";
 import {
   buildSlashCatalog,
   flattenFilteredCatalog,
@@ -450,6 +454,8 @@ export default function App() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [sessions, setSessions] = useState<SessionRow[]>([]);
   const [activeProject, setActiveProject] = useState<Project | null>(null);
+  const [projectInstruction, setProjectInstruction] =
+    useState<api.ProjectInstructionInspectV1 | null>(null);
   /** Per-session message cache so switching away mid-turn does not drop the UI. */
   const messagesBySessionRef = useRef<Map<string, ChatMessage[]>>(new Map());
   const viewingSessionIdRef = useRef<string | null>(null);
@@ -484,12 +490,7 @@ export default function App() {
   /** Explicitly reviewed Memory pack for one immediate, non-queued turn. */
   const [pendingMemoryContext, setPendingMemoryContext] =
     useState<api.MemoryContextPackV1 | null>(null);
-  const pendingMemorySessionRef = useRef<string | null>(session.sessionId);
-  useEffect(() => {
-    if (pendingMemorySessionRef.current === session.sessionId) return;
-    pendingMemorySessionRef.current = session.sessionId;
-    setPendingMemoryContext(null);
-  }, [session.sessionId]);
+  const memoryPackRestoreGenRef = useRef(0);
   const seenSkillCandidateIdsRef = useRef<Set<string>>(new Set());
   const skillCandidatesReadyRef = useRef(false);
   const pendingSkillGenerationRef = useRef<{
@@ -4055,6 +4056,7 @@ export default function App() {
       );
     }
     if (sent && memoryContext) {
+      memoryPackRestoreGenRef.current += 1;
       setPendingMemoryContext((current) =>
         current === memoryContext ? null : current,
       );
@@ -4587,6 +4589,25 @@ export default function App() {
     };
   }, [activeProject?.path, skillsReloadToken]);
 
+  useEffect(() => {
+    if (!api.isTauri() || !activeProject?.trusted || !activeProject.path) {
+      setProjectInstruction(null);
+      return;
+    }
+    let cancelled = false;
+    void api
+      .projectInstructionInspectV1(activeProject.path)
+      .then((inspect) => {
+        if (!cancelled) setProjectInstruction(inspect);
+      })
+      .catch(() => {
+        if (!cancelled) setProjectInstruction(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeProject?.path, activeProject?.trusted]);
+
   const rankedSkillInfos = useMemo(() => {
     const annotated = skillInfos.map((skill, index) => ({
       ...skill,
@@ -4912,6 +4933,28 @@ export default function App() {
     showToast,
     labels: sendQueueLabels,
   });
+  const applyRecoveredMemoryPack = useCallback(
+    (ref: ComposerMemoryPackRefV1 | null) => {
+      const generation = ++memoryPackRestoreGenRef.current;
+      if (!ref?.selections.length || !api.isTauri()) {
+        setPendingMemoryContext(null);
+        return;
+      }
+      void api
+        .memoryContextPackBuildV1(ref.selections)
+        .then((pack) => {
+          if (memoryPackRestoreGenRef.current !== generation) return;
+          setPendingMemoryContext(pack);
+        })
+        .catch((error) => {
+          if (memoryPackRestoreGenRef.current !== generation) return;
+          setPendingMemoryContext(null);
+          showToast(tr("composer.memory.restoreFailed"), 4200);
+          console.warn("memory pack restore:", error);
+        });
+    },
+    [showToast, tr],
+  );
   const composerRecovery = useComposerRecovery({
     enabled: api.isTauri(),
     recoveryKey: composerRecoveryKey,
@@ -4921,6 +4964,8 @@ export default function App() {
     activeQueue: sendQueue.activeQueue,
     setDraft,
     setAttachments,
+    memoryPack: memoryPackRefFromContext(pendingMemoryContext),
+    setMemoryPack: applyRecoveredMemoryPack,
     queue: sendQueue,
     onError: (error) => console.warn("composer recovery:", error),
   });
@@ -7224,6 +7269,7 @@ export default function App() {
           }
           memorySource={memoryCandidateSource}
           onUseMemoryContext={(pack) => {
+            memoryPackRestoreGenRef.current += 1;
             setPendingMemoryContext(pack);
             setAppView("workbench");
             pendingComposerFocus.current = true;
@@ -8060,6 +8106,23 @@ export default function App() {
                 onRemove: sendQueue.removeItem,
                 onRetry: sendQueue.resumeFlush,
               }}
+              projectInstruction={
+                projectInstruction?.relativePath
+                  ? {
+                      path: projectInstruction.relativePath,
+                      truncated: projectInstruction.truncated,
+                      labels: {
+                        attached: tr("composer.projectInstruction.attached", {
+                          path: projectInstruction.relativePath,
+                        }),
+                        truncated: tr(
+                          "composer.projectInstruction.truncated",
+                          { path: projectInstruction.relativePath },
+                        ),
+                      },
+                    }
+                  : null
+              }
               memory={{
                 pack: pendingMemoryContext,
                 labels: {
@@ -8081,7 +8144,10 @@ export default function App() {
                     workflow_hint: tr("settings.memory.type.workflowHint"),
                   },
                 },
-                onClear: () => setPendingMemoryContext(null),
+                onClear: () => {
+                  memoryPackRestoreGenRef.current += 1;
+                  setPendingMemoryContext(null);
+                },
               }}
               menu={{
                 open: composerMenuOpen,

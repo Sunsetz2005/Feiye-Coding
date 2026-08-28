@@ -15,15 +15,21 @@ export type SlashItem = {
   displayTitle?: string;
   displayDescription?: string;
   source?: string;
+  suggested?: boolean;
   action?: string;
   mode?: "goal" | "plan";
 };
 
 export type SkillInfo = {
+  id?: string;
   name: string;
   description: string;
+  whenToUse?: string;
   source?: string;
+  treeHash?: string;
+  sourceCandidateId?: string | null;
   userInvocable?: boolean;
+  suggested?: boolean;
 };
 
 /** Built-in slash commands (modes, prompts, host actions). */
@@ -130,6 +136,7 @@ export function skillsToSlashItems(skills: SkillInfo[]): SlashItem[] {
       displayTitle: name,
       displayDescription: s.description,
       source: s.source,
+      suggested: s.suggested,
     });
   }
   return out;

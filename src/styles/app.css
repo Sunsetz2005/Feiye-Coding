@@ -5837,6 +5837,103 @@ html[data-theme="light"] .ui-check.is-mixed .ui-check__box {
   color: var(--text-primary);
 }
 
+.memory-context-badge {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  max-height: 220px;
+  margin: 4px;
+  padding: 8px 10px;
+  overflow: auto;
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border-subtle));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--accent) 7%, var(--bg-primary));
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.memory-context-badge__header,
+.memory-context-badge__heading,
+.memory-context-badge__item-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.memory-context-badge__header {
+  justify-content: space-between;
+}
+
+.memory-context-badge__title,
+.memory-context-badge__type {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.memory-context-badge__count,
+.memory-context-badge__provenance {
+  color: var(--text-tertiary);
+}
+
+.memory-context-badge__boundary {
+  line-height: 1.45;
+}
+
+.memory-context-badge__items {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.memory-context-badge__item {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  padding-top: 6px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.memory-context-badge__provenance {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.memory-context-badge__content-label,
+.memory-context-badge__full-content-label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.memory-context-badge__preview,
+.memory-context-badge__full-content p {
+  margin: 0;
+  color: var(--text-primary);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.memory-context-badge__details > summary {
+  cursor: pointer;
+}
+
+.memory-context-badge__full-content {
+  margin-top: 5px;
+  padding: 6px;
+  border-radius: 7px;
+  background: var(--bg-hover);
+}
+
 .composer__attachments {
   display: flex;
   flex-wrap: wrap;
@@ -7017,6 +7114,18 @@ html[data-theme="light"] .ui-check.is-mixed .ui-check__box {
   white-space: nowrap;
   font-weight: 500;
   color: var(--text-primary);
+}
+
+.composer-plus__suggested {
+  display: inline-flex;
+  margin-left: 6px;
+  padding: 1px 5px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 999px;
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 600;
+  vertical-align: 1px;
 }
 
 .composer-plus__desc {

@@ -85,6 +85,9 @@ function useHarness() {
   );
   const [draft, setDraft] = useState("");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [memoryPack, setMemoryPack] = useState<
+    ComposerRecoveryStateV1["memoryPack"]
+  >(null);
   const [queues, setQueues] = useState<Record<string, QueuedSend[]>>({});
   const [holds, setHolds] = useState<Record<string, boolean>>({});
   const queuesRef = useRef(queues);
@@ -135,6 +138,8 @@ function useHarness() {
     activeQueue: queues[recoveryKey] ?? [],
     setDraft,
     setAttachments,
+    memoryPack,
+    setMemoryPack,
     queue: { getSnapshot, hydrateKey, migrateDraft, dropKeys },
     debounceMs: 25,
   });
@@ -148,6 +153,8 @@ function useHarness() {
     holds,
     setDraft,
     hydrateKey,
+    memoryPack,
+    setMemoryPack,
   };
 }
 
@@ -217,6 +224,32 @@ describe("useComposerRecovery", () => {
     expect(result.current.holds[COMPOSER_RECOVERY_DRAFT_KEY]).toBe(true);
     expect(result.current.recovery.ready).toBe(true);
     expect(recoveryHost.put).not.toHaveBeenCalled();
+  });
+
+  it("restores a reviewed Memory pack identity without dropping the draft", async () => {
+    const pack = {
+      version: 1 as const,
+      selections: [
+        {
+          id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+          expectedContentHash: "ab".repeat(32),
+        },
+      ],
+    };
+    recoveryHost.get.mockResolvedValueOnce(
+      snapshot("session-memory", 2, {
+        ...state("keep draft"),
+        memoryPack: pack,
+      }),
+    );
+    const { result } = renderHook(() => useHarness());
+
+    await act(async () => {
+      await result.current.recovery.activate("session-memory");
+    });
+
+    expect(result.current.draft).toBe("keep draft");
+    expect(result.current.memoryPack).toEqual(pack);
   });
 
   it("does not let a stale session get overwrite a later switch", async () => {

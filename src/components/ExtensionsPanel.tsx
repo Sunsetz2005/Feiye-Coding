@@ -8,6 +8,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import * as api from "@/lib/api";
 import { createT, type Locale } from "@/i18n";
 import { GlassModal } from "@/components/GlassModal";
+import { SkillLearningPanel } from "@/components/SkillLearningPanel";
 import {
   IconExternalLink,
   IconFolder,
@@ -40,6 +41,8 @@ export interface ExtensionsPanelProps {
   locale: Locale;
   /** Active workbench project path (inspect cwd). */
   projectPath?: string | null;
+  /** Active session whose bounded Skill-use evidence can be reviewed. */
+  activeSessionId?: string | null;
   /** Whether CLI probe found a binary (for empty-state copy). */
   cliFound?: boolean;
   /** Navigate to Settings → Runtime when CLI is missing. */
@@ -51,6 +54,7 @@ export interface ExtensionsPanelProps {
 export function ExtensionsPanel({
   locale,
   projectPath = null,
+  activeSessionId = null,
   cliFound = true,
   onOpenRuntime,
   onSkillsPrefsChanged,
@@ -747,6 +751,13 @@ export function ExtensionsPanel({
           </ul>
         )}
       </div>
+
+      <SkillLearningPanel
+        locale={locale}
+        activeProjectPath={projectPath}
+        activeSessionId={activeSessionId}
+        disabled={!api.isTauri()}
+      />
 
       <p className="ext-footnote">
         <IconPuzzle size={13} />

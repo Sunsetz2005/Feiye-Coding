@@ -173,8 +173,9 @@ describe("useSendQueue recovery", () => {
       executeSend,
     });
 
+    const boundToken = `[[skill-v1:review|${"a".repeat(64)}|${"b".repeat(64)}|accepted_suggestion]]`;
     act(() => {
-      result.current.hydrateKey("session-1", [queued("q1")], {
+      result.current.hydrateKey("session-1", [queued("q1", boundToken)], {
         hold: false,
       });
     });
@@ -183,6 +184,9 @@ describe("useSendQueue recovery", () => {
 
     expect(persistQueuedState).toHaveBeenCalledTimes(1);
     expect(executeSendRef.current).toHaveBeenCalledTimes(1);
+    expect(executeSendRef.current).toHaveBeenCalledWith(
+      expect.objectContaining({ storedDisplay: boundToken }),
+    );
     expect(result.current.activeQueue).toEqual([]);
   });
 

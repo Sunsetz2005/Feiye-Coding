@@ -412,6 +412,7 @@
   margin: 0 auto -12px;
   padding: 6px 12px 15px;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   border: 0.5px solid var(--wb-line);
   border-bottom: 0;
@@ -467,6 +468,17 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 13px;
+}
+
+.composer-context-rail__instruction {
+  width: 100%;
+  margin: 0;
+  padding: 0 4px 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--text-secondary);
 }
 
 .composer-context-rail__spinner {

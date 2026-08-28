@@ -1,6 +1,6 @@
 /**
  * Contenteditable composer: plain text + inline skill chips.
- * Value is stored form with [[skill:name]] tokens.
+ * Value is stored form with legacy or identity-bound v1 Skill tokens.
  *
  * Slash filter: parent also derives query from `value` (draft). This editor
  * still emits caret-based slashQuery for mid-line tokens and live IME updates.
@@ -45,12 +45,15 @@ function appendTextWithBreaks(el: HTMLElement, text: string) {
   });
 }
 
-function makeSkillChipEl(name: string): HTMLElement {
+function makeSkillChipEl(
+  segment: Extract<DraftSegment, { type: "skill" }>,
+): HTMLElement {
   const wrap = document.createElement("span");
   wrap.className = "skill-chip skill-chip--sm skill-chip--editor";
   wrap.contentEditable = "false";
-  wrap.dataset.skill = name;
-  wrap.setAttribute("data-skill", name);
+  wrap.dataset.skill = segment.name;
+  wrap.dataset.skillToken = serializeStored([segment]);
+  wrap.setAttribute("data-skill", segment.name);
 
   const icon = document.createElement("span");
   icon.className = "skill-chip__glyph";
@@ -59,7 +62,7 @@ function makeSkillChipEl(name: string): HTMLElement {
 
   const label = document.createElement("span");
   label.className = "skill-chip__name";
-  label.textContent = name;
+  label.textContent = segment.name;
 
   wrap.appendChild(icon);
   wrap.appendChild(label);
@@ -72,7 +75,7 @@ function renderSegmentsInto(el: HTMLElement, segments: DraftSegment[]) {
     if (seg.type === "text") {
       appendTextWithBreaks(el, seg.text);
     } else {
-      el.appendChild(makeSkillChipEl(seg.name));
+      el.appendChild(makeSkillChipEl(seg));
     }
   }
 }
@@ -88,7 +91,23 @@ export function serializeDom(el: HTMLElement): string {
     if (node.nodeType !== Node.ELEMENT_NODE) return;
     const he = node as HTMLElement;
     if (he.dataset?.skill) {
-      segs.push({ type: "skill", name: he.dataset.skill });
+      const token = he.dataset.skillToken;
+      if (token) {
+        const parsed = parseStoredContent(token);
+        const skill = parsed.length === 1 ? parsed[0] : null;
+        if (
+          skill?.type === "skill" &&
+          skill.name === he.dataset.skill
+        ) {
+          segs.push(skill);
+        } else {
+          // A mutated/incomplete identity token must never downgrade into a
+          // valid unbound Skill invocation.
+          segs.push({ type: "text", text: token });
+        }
+      } else {
+        segs.push({ type: "skill", name: he.dataset.skill });
+      }
       return;
     }
     if (he.tagName === "BR") {
@@ -276,7 +295,7 @@ export function ComposerEditor({
     (el: HTMLElement) => {
       let stored = serializeDom(el);
       if (
-        /\[\[skill:[a-zA-Z0-9_.:-]+\]\]/.test(stored) &&
+        parseStoredContent(stored).some((segment) => segment.type === "skill") &&
         !el.querySelector("[data-skill]")
       ) {
         renderSegmentsInto(el, parseStoredContent(stored));

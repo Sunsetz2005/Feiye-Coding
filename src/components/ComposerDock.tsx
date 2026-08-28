@@ -2,6 +2,7 @@ import {
   useMemo,
   type CSSProperties,
   type Dispatch,
+  type ReactNode,
   type RefObject,
   type SetStateAction,
 } from "react";
@@ -9,6 +10,7 @@ import { createPortal } from "react-dom";
 import { createT, type Locale } from "@/i18n";
 import type { Attachment } from "@/lib/attachments";
 import { isImagePath } from "@/lib/attachments";
+import type { MemoryContextPackV1 } from "@/lib/api";
 import {
   isDraftEmpty,
   parseStoredContent,
@@ -53,6 +55,14 @@ import {
 } from "@/components/ComposerProjectMenu";
 import { ContextUsageChip } from "@/components/ContextUsageChip";
 import {
+  MemoryContextBadge,
+  type MemoryContextBadgeLabels,
+} from "@/components/MemoryContextBadge";
+import {
+  TaskProgressRail,
+  type TaskProgressRailProps,
+} from "@/components/lobe-chat/TaskProgressRail";
+import {
   IconClock,
   IconClose,
   IconImagine,
@@ -75,7 +85,7 @@ type SlashQuery = {
 
 export interface ComposerDockProps {
   locale: Locale;
-  taskProgressVisible: boolean;
+  welcomeSession?: boolean;
   goalMode: boolean;
   settingsLocked: boolean;
   sessionState: SessionState;
@@ -85,6 +95,12 @@ export interface ComposerDockProps {
   attachments: Attachment[];
   attachmentLabels: AttachmentCardLabels;
   contextUsage: ContextUsageDisplay;
+  /** Compact running-plan status rail. Replaces the project/goal rail. */
+  progress?: TaskProgressRailProps | null;
+  /** Permission prompt; rendered above the composer, never as a second decision dock. */
+  permission?: ReactNode;
+  /** Ask-user / plan-approval dock. Replaces the three-layer composer. */
+  takeover?: ReactNode;
   project: {
     active: ProjectOption | null;
     options: ProjectOption[];
@@ -106,6 +122,16 @@ export interface ComposerDockProps {
     onRemove: (id: string) => void;
     onRetry: () => void;
   };
+  memory?: {
+    pack: MemoryContextPackV1 | null;
+    labels: MemoryContextBadgeLabels;
+    onClear: () => void;
+  };
+  projectInstruction?: {
+    path: string;
+    truncated: boolean;
+    labels: { attached: string; truncated: string };
+  } | null;
   menu: {
     open: boolean;
     positioned: boolean;
@@ -143,6 +169,7 @@ export interface ComposerDockProps {
     onReset: () => void;
   };
   refs: {
+    wrap: RefObject<HTMLDivElement | null>;
     input: RefObject<HTMLDivElement | null>;
     shell: RefObject<HTMLDivElement | null>;
     plusTrigger: RefObject<HTMLButtonElement | null>;
@@ -163,13 +190,14 @@ export interface ComposerDockProps {
 }
 
 /**
- * Normal three-layer composer view. Runtime/Host orchestration and all state
- * stay with App; this component only renders the current values and delegates
- * user intent through explicit callbacks.
+ * Bottom composer dock: floating wrap, three-layer inputer, and the compact
+ * running-plan rail. Runtime/Host orchestration, permission resolution, and
+ * ask-user/plan decisions stay with App; this component renders current values
+ * and delegates user intent through explicit callbacks or slots.
  */
 export function ComposerDock({
   locale,
-  taskProgressVisible,
+  welcomeSession = false,
   goalMode,
   settingsLocked,
   sessionState,
@@ -179,8 +207,13 @@ export function ComposerDock({
   attachments,
   attachmentLabels,
   contextUsage,
+  progress,
+  permission,
+  takeover,
   project,
   queue,
+  memory,
+  projectInstruction = null,
   menu,
   preferences,
   refs,
@@ -229,7 +262,19 @@ export function ComposerDock({
     [attachments.length, draft],
   );
 
+  const taskProgressVisible = progress != null;
+
   return (
+    <div
+      ref={refs.wrap}
+      className={
+        "composer-wrap composer-wrap--float" +
+        (welcomeSession ? " composer-wrap--welcome" : "")
+      }
+    >
+      {progress ? <TaskProgressRail {...progress} /> : null}
+      {permission}
+      {takeover ?? (
     <div className="composer-dock">
       {!taskProgressVisible ? (
         <div className="composer-context-rail">
@@ -274,6 +319,21 @@ export function ComposerDock({
               onOpen={project.onOpen}
             />
           )}
+          {projectInstruction ? (
+            <p
+              className="composer-context-rail__instruction"
+              data-testid="project-instruction-chip"
+              title={
+                projectInstruction.truncated
+                  ? projectInstruction.labels.truncated
+                  : projectInstruction.labels.attached
+              }
+            >
+              {projectInstruction.truncated
+                ? projectInstruction.labels.truncated
+                : projectInstruction.labels.attached}
+            </p>
+          ) : null}
         </div>
       ) : null}
       <div
@@ -337,6 +397,15 @@ export function ComposerDock({
               ))}
             </ul>
           </div>
+        ) : null}
+        {memory ? (
+          <MemoryContextBadge
+            pack={memory.pack}
+            locale={locale}
+            labels={memory.labels}
+            disabled={connecting || !canType(sessionState)}
+            onClear={memory.onClear}
+          />
         ) : null}
         {attachments.length > 0 ? (
           <div
@@ -638,6 +707,8 @@ export function ComposerDock({
           )}
         </div>
       </div>
+    </div>
+      )}
     </div>
   );
 }

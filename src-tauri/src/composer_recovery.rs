@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 pub const COMPOSER_RECOVERY_VERSION: u8 = 1;
 pub const COMPOSER_DRAFT_KEY: &str = "__draft__";
 pub const COMPOSER_RECOVERY_MAX_QUEUE_ITEMS: usize = 20;
+pub const COMPOSER_MEMORY_PACK_MAX_SELECTIONS: usize = 8;
 
 const MAX_SESSION_ROWS: usize = 1024;
 const MAX_KEY_BYTES: usize = 128;
@@ -25,6 +26,7 @@ const MAX_ATTACHMENTS_PER_SESSION: usize = 256;
 const MAX_ATTACHMENT_PATH_BYTES: usize = 4096;
 const MAX_ATTACHMENT_NAME_BYTES: usize = 512;
 const MAX_STORE_BYTES: u64 = 16 * 1024 * 1024;
+const MEMORY_CONTENT_HASH_CHARS: usize = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -44,12 +46,29 @@ pub struct ComposerQueuedSendV1 {
     pub created_at: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ComposerMemorySelectionV1 {
+    pub id: String,
+    pub expected_content_hash: String,
+}
+
+/// Reviewed Memory pack identity only. Recovery never stores prompt fragments.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ComposerMemoryPackRefV1 {
+    pub version: u8,
+    pub selections: Vec<ComposerMemorySelectionV1>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ComposerRecoveryStateV1 {
     pub draft: String,
     pub attachments: Vec<ComposerAttachmentReferenceV1>,
     pub queue: Vec<ComposerQueuedSendV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_pack: Option<ComposerMemoryPackRefV1>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -183,6 +202,31 @@ pub fn delete(
     delete_at(&store_path(), request)
 }
 
+/// Remove recovery rows whose sessions no longer exist. Call only during Host
+/// startup, before a WebView can hold a stale revision. The global draft row is
+/// retained because it is not represented in the session index.
+pub fn prune_orphaned_rows_on_startup() -> Result<usize, String> {
+    let path = store_path();
+    if !path.exists() {
+        return Ok(0);
+    }
+    let live_keys = crate::store::load_sessions_index()
+        .into_iter()
+        .map(|session| session.id)
+        .collect::<HashSet<_>>();
+    prune_orphaned_rows_at(&path, &live_keys)
+}
+
+fn prune_orphaned_rows_at(path: &Path, live_keys: &HashSet<String>) -> Result<usize, String> {
+    update_store_at(path, |store| {
+        let before = store.sessions.len();
+        store
+            .sessions
+            .retain(|row| row.key == COMPOSER_DRAFT_KEY || live_keys.contains(row.key.as_str()));
+        Ok(before - store.sessions.len())
+    })
+}
+
 fn get_at(
     path: &Path,
     request: ComposerRecoveryGetRequestV1,
@@ -260,11 +304,7 @@ fn migrate_at(
             .iter()
             .find(|row| row.key == from_key)
             .cloned();
-        let to_row = store
-            .sessions
-            .iter()
-            .find(|row| row.key == to_key)
-            .cloned();
+        let to_row = store.sessions.iter().find(|row| row.key == to_key).cloned();
         let from_revision = from_row.as_ref().map(|row| row.revision).unwrap_or(0);
         let to_revision = to_row.as_ref().map(|row| row.revision).unwrap_or(0);
         require_revision(request.expected_from_revision, from_revision)?;
@@ -353,7 +393,9 @@ fn update_store_at<R>(
     crate::store_lock::update_json_locked(path, ComposerRecoveryStoreV1::default, |store| {
         validate_store(store)?;
         let result = update(store)?;
-        store.sessions.sort_by(|left, right| left.key.cmp(&right.key));
+        store
+            .sessions
+            .sort_by(|left, right| left.key.cmp(&right.key));
         validate_store(store)?;
         Ok(result)
     })
@@ -418,6 +460,9 @@ fn validate_store(store: &ComposerRecoveryStoreV1) -> Result<(), String> {
 fn validate_state(state: &ComposerRecoveryStateV1) -> Result<(), String> {
     validate_text("draft", &state.draft, MAX_DRAFT_BYTES)?;
     validate_attachment_list(&state.attachments)?;
+    if let Some(pack) = state.memory_pack.as_ref() {
+        validate_memory_pack(pack)?;
+    }
     if state.queue.len() > COMPOSER_RECOVERY_MAX_QUEUE_ITEMS {
         return Err("COMPOSER_RECOVERY_LIMIT: send queue exceeds maximum items".into());
     }
@@ -454,9 +499,35 @@ fn validate_state(state: &ComposerRecoveryStateV1) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_attachment_list(
-    attachments: &[ComposerAttachmentReferenceV1],
-) -> Result<(), String> {
+fn validate_memory_pack(pack: &ComposerMemoryPackRefV1) -> Result<(), String> {
+    if pack.version != COMPOSER_RECOVERY_VERSION {
+        return Err("COMPOSER_RECOVERY_INVALID: memory pack version".into());
+    }
+    if pack.selections.is_empty()
+        || pack.selections.len() > COMPOSER_MEMORY_PACK_MAX_SELECTIONS
+    {
+        return Err("COMPOSER_RECOVERY_LIMIT: memory pack selection count".into());
+    }
+    let mut ids = HashSet::with_capacity(pack.selections.len());
+    for selection in &pack.selections {
+        uuid::Uuid::parse_str(&selection.id)
+            .map_err(|_| "COMPOSER_RECOVERY_INVALID: memory candidate id".to_string())?;
+        if !ids.insert(selection.id.as_str()) {
+            return Err("COMPOSER_RECOVERY_INVALID: duplicate memory candidate id".into());
+        }
+        if selection.expected_content_hash.len() != MEMORY_CONTENT_HASH_CHARS
+            || !selection
+                .expected_content_hash
+                .chars()
+                .all(|character| character.is_ascii_hexdigit())
+        {
+            return Err("COMPOSER_RECOVERY_INVALID: memory content hash".into());
+        }
+    }
+    Ok(())
+}
+
+fn validate_attachment_list(attachments: &[ComposerAttachmentReferenceV1]) -> Result<(), String> {
     if attachments.len() > MAX_ATTACHMENTS_PER_ITEM {
         return Err("COMPOSER_RECOVERY_LIMIT: too many attachments on one item".into());
     }
@@ -631,15 +702,21 @@ fn merge_for_migration(
         }
     }
 
-    let mut queue_ids: HashSet<String> =
-        target.queue.iter().map(|item| item.id.clone()).collect();
+    let mut queue_ids: HashSet<String> = target.queue.iter().map(|item| item.id.clone()).collect();
     for item in source.queue {
         if !queue_ids.insert(item.id.clone()) {
-            return Err(
-                "COMPOSER_RECOVERY_MIGRATION_CONFLICT: duplicate queue id".into(),
-            );
+            return Err("COMPOSER_RECOVERY_MIGRATION_CONFLICT: duplicate queue id".into());
         }
         target.queue.push(item);
+    }
+    if source.memory_pack.is_some() {
+        if target.memory_pack.is_none() {
+            target.memory_pack = source.memory_pack;
+        } else if target.memory_pack != source.memory_pack {
+            return Err(
+                "COMPOSER_RECOVERY_MIGRATION_CONFLICT: destination memory pack differs".into(),
+            );
+        }
     }
     validate_state(&target)?;
     Ok(target)
@@ -717,11 +794,7 @@ mod tests {
     #[test]
     fn serde_rejects_unknown_fields_at_store_and_request_boundaries() {
         let path = test_path("unknown-fields");
-        fs::write(
-            &path,
-            r#"{"version":1,"sessions":[],"unexpected":true}"#,
-        )
-        .unwrap();
+        fs::write(&path, r#"{"version":1,"sessions":[],"unexpected":true}"#).unwrap();
         assert!(get_at(&path, get_request("session-1"), |_| true)
             .unwrap_err()
             .contains("COMPOSER_RECOVERY_PARSE"));
@@ -808,9 +881,11 @@ mod tests {
             draft: "x".repeat(MAX_DRAFT_BYTES + 1),
             ..ComposerRecoveryStateV1::default()
         };
-        assert!(put_at(&path, put_request("session-1", 0, oversized), |_| true)
-            .unwrap_err()
-            .contains("COMPOSER_RECOVERY_LIMIT"));
+        assert!(
+            put_at(&path, put_request("session-1", 0, oversized), |_| true)
+                .unwrap_err()
+                .contains("COMPOSER_RECOVERY_LIMIT")
+        );
         assert!(!path.exists());
 
         let overfull_queue = ComposerRecoveryStateV1 {
@@ -819,13 +894,11 @@ mod tests {
                 .collect(),
             ..ComposerRecoveryStateV1::default()
         };
-        assert!(put_at(
-            &path,
-            put_request("session-1", 0, overfull_queue),
-            |_| true
-        )
-        .unwrap_err()
-        .contains("COMPOSER_RECOVERY_LIMIT"));
+        assert!(
+            put_at(&path, put_request("session-1", 0, overfull_queue), |_| true)
+                .unwrap_err()
+                .contains("COMPOSER_RECOVERY_LIMIT")
+        );
         assert!(!path.exists());
         cleanup(&path);
     }
@@ -841,6 +914,7 @@ mod tests {
             draft: "draft".into(),
             attachments: vec![attachment("/allowed.txt"), attachment("/gone-draft.txt")],
             queue: vec![only_attachment, text_and_attachment],
+            ..ComposerRecoveryStateV1::default()
         };
         put_at(&path, put_request("session-1", 0, state), |_| true).unwrap();
 
@@ -859,9 +933,11 @@ mod tests {
             attachments: vec![attachment("/not-authorized.txt")],
             ..ComposerRecoveryStateV1::default()
         };
-        assert!(put_at(&path, put_request("session-2", 0, denied), |_| false)
-            .unwrap_err()
-            .contains("COMPOSER_RECOVERY_ATTACHMENT_DENIED"));
+        assert!(
+            put_at(&path, put_request("session-2", 0, denied), |_| false)
+                .unwrap_err()
+                .contains("COMPOSER_RECOVERY_ATTACHMENT_DENIED")
+        );
         assert_eq!(
             get_at(&path, get_request("session-2"), |_| true)
                 .unwrap()
@@ -878,6 +954,7 @@ mod tests {
             draft: "draft body".into(),
             attachments: vec![attachment("/draft.txt")],
             queue: vec![queued("q-draft", "draft follow-up")],
+            ..ComposerRecoveryStateV1::default()
         };
         let target_state = ComposerRecoveryStateV1 {
             queue: vec![queued("q-existing", "existing follow-up")],
@@ -985,6 +1062,129 @@ mod tests {
         assert!(put_at(&path, put_request("session-1", 1, state), |_| true)
             .unwrap_err()
             .contains("COMPOSER_RECOVERY_STALE"));
+        cleanup(&path);
+    }
+
+    #[test]
+    fn startup_prune_removes_only_orphaned_session_rows() {
+        let path = test_path("startup-prune");
+        for key in [COMPOSER_DRAFT_KEY, "session-live", "session-deleted"] {
+            let state = ComposerRecoveryStateV1 {
+                draft: key.into(),
+                ..ComposerRecoveryStateV1::default()
+            };
+            put_at(&path, put_request(key, 0, state), |_| true).unwrap();
+        }
+        delete_at(
+            &path,
+            ComposerRecoveryDeleteRequestV1 {
+                version: COMPOSER_RECOVERY_VERSION,
+                key: "session-deleted".into(),
+                expected_revision: 1,
+            },
+        )
+        .unwrap();
+
+        let live = HashSet::from(["session-live".to_string()]);
+        assert_eq!(prune_orphaned_rows_at(&path, &live).unwrap(), 1);
+        assert_eq!(
+            get_at(&path, get_request(COMPOSER_DRAFT_KEY), |_| true)
+                .unwrap()
+                .revision,
+            1
+        );
+        assert_eq!(
+            get_at(&path, get_request("session-live"), |_| true)
+                .unwrap()
+                .revision,
+            1
+        );
+        assert_eq!(
+            get_at(&path, get_request("session-deleted"), |_| true)
+                .unwrap()
+                .revision,
+            0
+        );
+        cleanup(&path);
+    }
+
+    #[test]
+    fn memory_pack_roundtrip_and_old_json_without_field() {
+        let path = test_path("memory-pack");
+        let pack = ComposerMemoryPackRefV1 {
+            version: COMPOSER_RECOVERY_VERSION,
+            selections: vec![ComposerMemorySelectionV1 {
+                id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee".into(),
+                expected_content_hash: "ab".repeat(32),
+            }],
+        };
+        let state = ComposerRecoveryStateV1 {
+            draft: "keep".into(),
+            memory_pack: Some(pack.clone()),
+            ..ComposerRecoveryStateV1::default()
+        };
+        put_at(&path, put_request("session-1", 0, state), |_| true).unwrap();
+        let loaded = get_at(&path, get_request("session-1"), |_| true).unwrap();
+        assert_eq!(loaded.state.memory_pack, Some(pack));
+
+        let raw = serde_json::json!({
+            "version": 1,
+            "sessions": [{
+                "version": 1,
+                "key": "session-old",
+                "revision": 1,
+                "tombstone": false,
+                "state": { "draft": "legacy", "attachments": [], "queue": [] }
+            }]
+        });
+        fs::write(&path, serde_json::to_vec(&raw).unwrap()).unwrap();
+        let legacy = get_at(&path, get_request("session-old"), |_| true).unwrap();
+        assert_eq!(legacy.state.draft, "legacy");
+        assert_eq!(legacy.state.memory_pack, None);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn memory_pack_rejects_invalid_hash_and_duplicate_ids() {
+        let path = test_path("memory-pack-invalid");
+        let mut pack = ComposerMemoryPackRefV1 {
+            version: COMPOSER_RECOVERY_VERSION,
+            selections: vec![ComposerMemorySelectionV1 {
+                id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee".into(),
+                expected_content_hash: "not-a-hash".into(),
+            }],
+        };
+        let err = put_at(
+            &path,
+            put_request(
+                "session-1",
+                0,
+                ComposerRecoveryStateV1 {
+                    memory_pack: Some(pack.clone()),
+                    ..ComposerRecoveryStateV1::default()
+                },
+            ),
+            |_| true,
+        )
+        .unwrap_err();
+        assert!(err.contains("memory content hash"));
+
+        pack.selections[0].expected_content_hash = "ab".repeat(32);
+        pack.selections.push(pack.selections[0].clone());
+        let dup = put_at(
+            &path,
+            put_request(
+                "session-1",
+                0,
+                ComposerRecoveryStateV1 {
+                    memory_pack: Some(pack),
+                    ..ComposerRecoveryStateV1::default()
+                },
+            ),
+            |_| true,
+        )
+        .unwrap_err();
+        assert!(dup.contains("duplicate memory candidate id"));
         cleanup(&path);
     }
 }

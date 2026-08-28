@@ -18,6 +18,14 @@ pub fn is_terminal_tool_status(status: &str) -> bool {
     )
 }
 
+/// Successful agent completion, as opposed to cancel/error stop reasons.
+pub fn is_successful_prompt_complete(stop_reason: &str) -> bool {
+    matches!(
+        stop_reason.trim().to_ascii_lowercase().as_str(),
+        "end_turn" | "end" | "completed" | "complete" | ""
+    )
+}
+
 /// Whether PromptComplete should wait before calling `end_stream`.
 pub fn should_defer_prompt_complete(
     awaiting_permission: bool,
@@ -49,5 +57,14 @@ mod tests {
         assert!(should_defer_prompt_complete(false, true, false, 0));
         assert!(should_defer_prompt_complete(false, false, true, 0));
         assert!(should_defer_prompt_complete(false, false, false, 2));
+    }
+
+    #[test]
+    fn successful_prompt_complete_excludes_cancel_and_error() {
+        assert!(is_successful_prompt_complete("end_turn"));
+        assert!(is_successful_prompt_complete("END_TURN"));
+        assert!(!is_successful_prompt_complete("cancelled"));
+        assert!(!is_successful_prompt_complete("stop"));
+        assert!(!is_successful_prompt_complete("error"));
     }
 }

@@ -10,10 +10,13 @@ import type { Attachment } from "@/lib/attachments";
 import {
   COMPOSER_RECOVERY_DRAFT_KEY,
   cloneComposerRecoveryStateV1,
+  cloneMemoryPack,
   composerRecoveryDeleteV1,
   composerRecoveryGetV1,
   composerRecoveryMigrateV1,
   composerRecoveryPutV1,
+  memoryPacksEqual,
+  type ComposerMemoryPackRefV1,
   type ComposerRecoveryRevisionV1,
   type ComposerRecoveryStateV1,
 } from "@/lib/composerRecovery";
@@ -43,6 +46,8 @@ export interface UseComposerRecoveryOptions {
   activeQueue: QueuedSend[];
   setDraft: Dispatch<SetStateAction<string>>;
   setAttachments: Dispatch<SetStateAction<Attachment[]>>;
+  memoryPack?: ComposerMemoryPackRefV1 | null;
+  setMemoryPack?: (value: ComposerMemoryPackRefV1 | null) => void;
   queue: ComposerRecoveryQueuePort;
   onError?: (error: unknown) => void;
   debounceMs?: number;
@@ -65,6 +70,7 @@ const EMPTY_STATE: ComposerRecoveryStateV1 = {
   draft: "",
   attachments: [],
   queue: [],
+  memoryPack: null,
 };
 
 function cloneAttachments(attachments: Attachment[]): Attachment[] {
@@ -114,7 +120,8 @@ function recoveryStateEqual(
   return (
     left.draft === right.draft &&
     attachmentsEqual(left.attachments, right.attachments) &&
-    queueEqual(left.queue, right.queue)
+    queueEqual(left.queue, right.queue) &&
+    memoryPacksEqual(left.memoryPack, right.memoryPack)
   );
 }
 
@@ -165,6 +172,8 @@ export function useComposerRecovery({
   activeQueue,
   setDraft,
   setAttachments,
+  memoryPack = null,
+  setMemoryPack,
   queue,
   onError,
   debounceMs = COMPOSER_RECOVERY_DEBOUNCE_MS,
@@ -176,6 +185,8 @@ export function useComposerRecovery({
   const enabledRef = useRef(enabled);
   const draftRef = useRef(draft);
   const attachmentsRef = useRef(attachments);
+  const memoryPackRef = useRef<ComposerMemoryPackRefV1 | null>(memoryPack);
+  const setMemoryPackRef = useRef(setMemoryPack);
   const queueRef = useRef(queue);
   const onErrorRef = useRef(onError);
   const debounceMsRef = useRef(debounceMs);
@@ -184,9 +195,19 @@ export function useComposerRecovery({
   enabledRef.current = enabled;
   draftRef.current = draft;
   attachmentsRef.current = attachments;
+  setMemoryPackRef.current = setMemoryPack;
   queueRef.current = queue;
   onErrorRef.current = onError;
   debounceMsRef.current = debounceMs;
+  const memoryPackPropRef = useRef(memoryPack);
+  const memoryPackPropChanged = !memoryPacksEqual(
+    memoryPackPropRef.current,
+    memoryPack,
+  );
+  if (memoryPackPropChanged) {
+    memoryPackPropRef.current = memoryPack;
+    memoryPackRef.current = cloneMemoryPack(memoryPack);
+  }
 
   const reportError = useCallback((error: unknown) => {
     onErrorRef.current?.(error);
@@ -216,6 +237,7 @@ export function useComposerRecovery({
       draft: draftRef.current,
       attachments: cloneAttachments(attachmentsRef.current),
       queue: cloneQueue(queueRef.current.getSnapshot(key)),
+      memoryPack: cloneMemoryPack(memoryPackRef.current),
     }),
     [],
   );
@@ -240,6 +262,8 @@ export function useComposerRecovery({
       setRecoveryKey(key);
       setDraft(next.draft);
       setAttachments(next.attachments);
+      memoryPackRef.current = cloneMemoryPack(next.memoryPack);
+      setMemoryPackRef.current?.(cloneMemoryPack(next.memoryPack));
     },
     [setAttachments, setDraft, setRecoveryKey],
   );
@@ -475,6 +499,7 @@ export function useComposerRecovery({
         draft: nextDraft,
         attachments: cloneAttachments(nextAttachments),
         queue: cloneQueue(queueRef.current.getSnapshot(key)),
+        memoryPack: cloneMemoryPack(memoryPackRef.current),
       };
       updateEntry(key, state);
     },
@@ -632,7 +657,7 @@ export function useComposerRecovery({
       if (previousDraftEntry) clearTimer(previousDraftEntry);
 
       const nextEntry = makeEntry(
-        { draft: seedDraft, attachments: [], queue: [] },
+        { draft: seedDraft, attachments: [], queue: [], memoryPack: null },
         { loaded: true, dirty: true },
       );
       entriesRef.current.set(COMPOSER_RECOVERY_DRAFT_KEY, nextEntry);
@@ -711,8 +736,9 @@ export function useComposerRecovery({
       draft,
       attachments: cloneAttachments(attachments),
       queue: cloneQueue(activeQueue),
+      memoryPack: cloneMemoryPack(memoryPackRef.current),
     });
-  }, [activeQueue, attachments, draft, recoveryKey, updateEntry]);
+  }, [activeQueue, attachments, draft, memoryPack, recoveryKey, updateEntry]);
 
   useEffect(() => {
     mountedRef.current = true;

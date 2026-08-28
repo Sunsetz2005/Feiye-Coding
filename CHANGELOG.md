@@ -1,7 +1,11 @@
 # Changelog
 
-## [UNRELEASED] — 2026-08-26
+## [UNRELEASED] — 2026-08-28
 
+- 已审阅记忆会显示在输入器上，并可随草稿恢复；发送时显式注入默认内核，设置页提供召回、稽核、导出和删除。
+- 技能芯片绑定库存身份，扩展页可审阅本会话使用记录和学习建议；过期 tree hash 不会悄悄装载正文。
+- 信任项目后，内建循环会有界读取 `AGENTS.md` / `Sunsetz.md` / `.sunsetz/instructions.md` / `CLAUDE.md`，并在输入器显示只读项目说明。
+- 默认内核单轮工具上限提高到 16 次，并在不确定仓库布局时先读文件；离线模型目录不再写死过期具体 ID。
 - 计划的 approved / executing / done 已作为可恢复的 `PlanArtifactV1` 产物，与 Permission 的 live RPC 生命周期分开，切会话后仍能回看正文且不会把死亡审阅重新打开。
 - Host 内建循环对显式选择的 Skill 读取库存已信任目录中的有界 `SKILL.md` 并写入该轮模型提示，不依赖 grok 二进制，也不把 GROK_HOME 当作产品内核。
 - Host 内建循环新增可信项目根内的 `write_file` 与 `run_command`，经现有权限条批准后才执行；`AcceptEdits` 不自动放行命令，权限预览不含文件正文。

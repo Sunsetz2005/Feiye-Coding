@@ -1178,6 +1178,29 @@ export async function openExternalUrl(url: string) {
   return invoke<void>("open_external_url", { url });
 }
 
+export interface ProjectInstructionInspectV1 {
+  version: 1;
+  relativePath: string | null;
+  truncated: boolean;
+  characterCount: number;
+}
+
+export async function projectInstructionInspectV1(
+  projectPath?: string | null,
+): Promise<ProjectInstructionInspectV1> {
+  if (!isTauri()) {
+    return {
+      version: 1,
+      relativePath: null,
+      truncated: false,
+      characterCount: 0,
+    };
+  }
+  return invoke<ProjectInstructionInspectV1>("project_instruction_inspect_v1", {
+    projectPath: projectPath ?? null,
+  });
+}
+
 export async function projectsList() {
   return invoke<
     Array<{

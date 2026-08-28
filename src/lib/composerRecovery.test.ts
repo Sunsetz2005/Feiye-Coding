@@ -47,6 +47,7 @@ function state(): ComposerRecoveryStateV1 {
         createdAt: 123,
       },
     ],
+    memoryPack: null,
   };
 }
 
@@ -257,6 +258,62 @@ describe("composer recovery v1", () => {
     });
     await expect(composerRecoveryGetV1("session-1")).rejects.toThrow(
       "Invalid composer recovery get response",
+    );
+  });
+
+  it("keeps drafts when a stored Memory pack is missing or invalid", () => {
+    const legacy = normalizeComposerRecoveryStateV1({
+      draft: "legacy",
+      attachments: [],
+      queue: [],
+    });
+    expect(legacy).toEqual({
+      draft: "legacy",
+      attachments: [],
+      queue: [],
+      memoryPack: null,
+    });
+
+    const invalid = normalizeComposerRecoveryStateV1({
+      draft: "keep draft",
+      attachments: [],
+      queue: [],
+      memoryPack: {
+        version: 1,
+        selections: [{ id: "not-a-uuid", expectedContentHash: "ab".repeat(32) }],
+      },
+    });
+    expect(invalid?.draft).toBe("keep draft");
+    expect(invalid?.memoryPack).toBeNull();
+  });
+
+  it("round-trips a bounded reviewed Memory pack identity", () => {
+    const pack = {
+      version: 1 as const,
+      selections: [
+        {
+          id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+          expectedContentHash: "ab".repeat(32),
+        },
+      ],
+    };
+    const normalized = normalizeComposerRecoveryStateV1({
+      draft: "",
+      attachments: [],
+      queue: [],
+      memoryPack: pack,
+    });
+    expect(normalized?.memoryPack).toEqual({
+      version: 1,
+      selections: [
+        {
+          id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+          expectedContentHash: "ab".repeat(32),
+        },
+      ],
+    });
+    expect(cloneComposerRecoveryStateV1(normalized!).memoryPack).toEqual(
+      normalized?.memoryPack,
     );
   });
 });

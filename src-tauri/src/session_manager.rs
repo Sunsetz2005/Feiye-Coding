@@ -5735,7 +5735,7 @@ impl SessionManager {
             user_prompt: agent_prompt,
             stop: Arc::clone(&stop),
             client,
-            max_tool_rounds: 8,
+            max_tool_rounds: agent_loop::MAX_TOOL_ROUNDS,
             permission_gate: Some(permission_gate),
         };
         let mgr = Arc::clone(self);

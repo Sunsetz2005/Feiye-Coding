@@ -632,6 +632,14 @@ fn normalize_composer_recovery_attachments(
 }
 
 #[tauri::command]
+pub fn project_instruction_inspect_v1(
+    project_path: Option<String>,
+) -> crate::agent_loop::ProjectInstructionInspectV1 {
+    let (root, trusted) = crate::agent_loop::resolve_trusted_root(project_path.as_deref());
+    crate::agent_loop::inspect_project_instruction(root.as_deref(), trusted)
+}
+
+#[tauri::command]
 pub async fn composer_recovery_get_v1(
     request: crate::composer_recovery::ComposerRecoveryGetRequestV1,
 ) -> Result<crate::composer_recovery::ComposerRecoverySnapshotV1, String> {

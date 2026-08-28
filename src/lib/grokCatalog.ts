@@ -51,25 +51,20 @@ export const COMPOSER_PREFS_SCOPES: ComposerPrefsScope[] = [
   "session",
 ];
 
-/**
- * Fallback catalog when Host has not returned live models yet.
- * Official OAuth currently exposes grok-4.5 only (2026-07 probe).
- * `grok-build` is NOT listed — CLI rejects it as unknown model id.
- */
+/** Fallback used only until the Host returns a live Runtime catalog. */
 export const GROK_BUILD_MODELS: ModelOption[] = [
   {
-    id: "grok-4.5",
-    label: "Sunsetz 4.5",
+    id: "grok",
+    label: "Sunsetz Runtime Default",
     isDefault: true,
     source: "official",
-    capabilities: {
-      reasoningEfforts: ["low", "medium", "high"],
-    },
+    // The Runtime may move this alias; do not guess model-specific controls.
+    capabilities: undefined,
   },
 ];
 
 export const DEFAULT_MODEL_ID =
-  GROK_BUILD_MODELS.find((m) => m.isDefault)?.id ?? "grok-4.5";
+  GROK_BUILD_MODELS.find((m) => m.isDefault)?.id ?? "grok";
 
 /** Reasoning effort flags: `--reasoning-effort` / `--effort` on grok agent. */
 export const GROK_BUILD_EFFORTS: EffortOption[] = [

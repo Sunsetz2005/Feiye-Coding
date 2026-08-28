@@ -678,6 +678,10 @@ export const zhTW: Record<MessageKey, string> = {
   "composer.memory.provenance": "來源：{sessionId} / {messageId}",
   "composer.memory.queueBlocked":
     "已審閱記憶只能立即傳送；請等待目前輪次結束，或先移除記憶上下文。",
+  "composer.memory.restoreFailed":
+    "已審閱記憶無法還原，因為所選內容已失效。",
+  "composer.projectInstruction.attached": "專案說明：{path}",
+  "composer.projectInstruction.truncated": "專案說明：{path}（已截斷）",
   "settings.cliPath": "CLI 路徑",
   "settings.cliPathDesc": "Sunsetz Runtime CLI 可執行檔路徑",
   "settings.cliNotFound": "（未找到）",

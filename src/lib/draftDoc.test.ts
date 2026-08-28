@@ -13,10 +13,21 @@ import {
   plainTextOf,
   previewStoredAsSlash,
   segmentsToPlainEditorText,
+  serializeDisplayForJournal,
   serializeForAgent,
   serializeStored,
   type DraftSegment,
+  type SkillBindingV1,
 } from "./draftDoc";
+
+const SKILL_ID = "a".repeat(64);
+const SKILL_TREE_HASH = "b".repeat(64);
+const EXPLICIT_BINDING: SkillBindingV1 = {
+  version: 1,
+  id: SKILL_ID,
+  expectedTreeHash: SKILL_TREE_HASH,
+  selection: "explicit",
+};
 
 describe("draftDoc empty / plain", () => {
   it("emptyDraft is empty", () => {
@@ -76,6 +87,78 @@ describe("draftDoc roundtrip", () => {
     const segs = parseStoredContent(raw);
     expect(segs.every((s) => s.type === "text")).toBe(true);
     expect(serializeStored(segs)).toBe(raw);
+  });
+
+  it("round-trips an identity-bound v1 Skill token", () => {
+    const raw = `before [[skill-v1:review|${SKILL_ID}|${SKILL_TREE_HASH}|accepted_suggestion]] after`;
+    const segments = parseStoredContent(raw);
+
+    expect(segments).toEqual([
+      { type: "text", text: "before " },
+      {
+        type: "skill",
+        name: "review",
+        binding: {
+          ...EXPLICIT_BINDING,
+          selection: "accepted_suggestion",
+        },
+      },
+      { type: "text", text: " after" },
+    ]);
+    expect(serializeStored(segments)).toBe(raw);
+    expect(segmentsToPlainEditorText(segments)).toBe(raw);
+    expect(serializeForAgent(segments)).toBe("/review\nbefore  after");
+  });
+
+  it("keeps legacy Skill tokens explicitly unbound", () => {
+    const [segment] = parseStoredContent("[[skill:review]]");
+
+    expect(segment).toEqual({ type: "skill", name: "review" });
+    expect(segment?.type === "skill" && "binding" in segment).toBe(false);
+  });
+
+  it("never downgrades malformed v1 tokens into unbound Skills", () => {
+    const invalidTokens = [
+      `[[skill-v1:review|${"a".repeat(63)}|${SKILL_TREE_HASH}|explicit]]`,
+      `[[skill-v1:review|${"g".repeat(64)}|${SKILL_TREE_HASH}|explicit]]`,
+      `[[skill-v1:review|${SKILL_ID}|${"b".repeat(63)}|explicit]]`,
+      `[[skill-v1:review|${SKILL_ID}|${"z".repeat(64)}|explicit]]`,
+      `[[skill-v1:review|${SKILL_ID}|${SKILL_TREE_HASH}|automatic]]`,
+      `[[skill-v1:review|${SKILL_ID}|${SKILL_TREE_HASH}]]`,
+      `[[skill-v1:bad name|${SKILL_ID}|${SKILL_TREE_HASH}|explicit]]`,
+      `[[skill-v1:review|${SKILL_ID}|${SKILL_TREE_HASH}|explicit|extra]]`,
+      `[[skill-v2:review|${SKILL_ID}|${SKILL_TREE_HASH}|explicit]]`,
+      `[[skill-v1:review|<script>alert(1)</script>|${SKILL_TREE_HASH}|explicit]]`,
+      `[[skill-v1:review|[[skill:legacy]]|${SKILL_TREE_HASH}|explicit]]`,
+    ];
+
+    for (const raw of invalidTokens) {
+      expect(parseStoredContent(raw)).toEqual([{ type: "text", text: raw }]);
+      expect(serializeStored(parseStoredContent(raw))).toBe(raw);
+    }
+  });
+
+  it("can parse a valid token after malformed v1-shaped text", () => {
+    const invalid = `[[skill-v1:review|short|${SKILL_TREE_HASH}|explicit]]`;
+    expect(parseStoredContent(`${invalid} [[skill:legacy]]`)).toEqual([
+      { type: "text", text: `${invalid} ` },
+      { type: "skill", name: "legacy" },
+    ]);
+  });
+
+  it("rejects invalid programmatic bindings instead of serializing a legacy token", () => {
+    const malformed = {
+      ...EXPLICIT_BINDING,
+      id: "not-a-hash",
+    } as unknown as SkillBindingV1;
+    const segments: DraftSegment[] = [
+      { type: "skill", name: "review", binding: malformed },
+    ];
+
+    expect(() => serializeStored(segments)).toThrow("invalid Skill binding");
+    expect(() => serializeDisplayForJournal(segments)).toThrow(
+      "invalid Skill binding",
+    );
   });
 });
 
@@ -143,6 +226,35 @@ describe("previewStoredAsSlash", () => {
     );
     expect(previewStoredAsSlash("[[skill:a]][[skill:b]] x")).toBe("/a/b x");
   });
+
+  it("supports bound v1 and legacy tokens without hiding invalid text", () => {
+    const validV1 = `[[skill-v1:review|${SKILL_ID}|${SKILL_TREE_HASH}|explicit]]`;
+    const invalidV1 = `[[skill-v1:unsafe|short|${SKILL_TREE_HASH}|explicit]]`;
+    const nestedLegacy = `[[skill-v1:unsafe|[[skill:legacy]]|${SKILL_TREE_HASH}|explicit]]`;
+
+    expect(
+      previewStoredAsSlash(
+        `${validV1} [[skill:legacy]] ${invalidV1} ${nestedLegacy}`,
+      ),
+    ).toBe(`/review /legacy ${invalidV1} ${nestedLegacy}`);
+  });
+});
+
+describe("serializeDisplayForJournal", () => {
+  it("always strips binding metadata into the legacy display marker", () => {
+    const segments: DraftSegment[] = [
+      { type: "text", text: "Use " },
+      { type: "skill", name: "review", binding: EXPLICIT_BINDING },
+      { type: "text", text: " now" },
+      { type: "skill", name: "legacy" },
+    ];
+
+    expect(serializeDisplayForJournal(segments)).toBe(
+      "Use [[skill:review]] now[[skill:legacy]]",
+    );
+    expect(serializeDisplayForJournal(segments)).not.toContain(SKILL_ID);
+    expect(serializeStored(segments)).toContain("[[skill-v1:review|");
+  });
 });
 
 describe("serializeForAgent", () => {
@@ -193,6 +305,24 @@ describe("applySkillAtSlash", () => {
   it("works at start", () => {
     expect(applySkillAtSlash("/aih", 0, 4, "aihot")).toBe("[[skill:aihot]] ");
   });
+
+  it("writes a v1 token when an exact binding is provided", () => {
+    expect(applySkillAtSlash("/rev", 0, 4, "review", EXPLICIT_BINDING)).toBe(
+      `[[skill-v1:review|${SKILL_ID}|${SKILL_TREE_HASH}|explicit]] `,
+    );
+  });
+
+  it("rejects a runtime-invalid optional binding instead of downgrading", () => {
+    expect(() =>
+      applySkillAtSlash(
+        "/rev",
+        0,
+        4,
+        "review",
+        null as unknown as SkillBindingV1,
+      ),
+    ).toThrow("invalid Skill binding");
+  });
 });
 
 describe("mergeAdjacentText", () => {
@@ -220,6 +350,7 @@ describe("hydrateDisplayContent", () => {
     );
     const segs = parseUserMessageContent(raw);
     expect(segs[0]).toEqual({ type: "skill", name: "xhx-media-gen" });
+    expect(segs[0]?.type === "skill" && "binding" in segs[0]).toBe(false);
   });
 
   it("converts multi-skill first line", () => {
@@ -230,6 +361,11 @@ describe("hydrateDisplayContent", () => {
 
   it("leaves [[skill:]] alone", () => {
     const raw = "[[skill:x]] hi";
+    expect(hydrateDisplayContent(raw)).toBe(raw);
+  });
+
+  it("leaves v1 storage tokens alone instead of hydrating another Skill", () => {
+    const raw = `/other\n[[skill-v1:review|${SKILL_ID}|${SKILL_TREE_HASH}|explicit]]`;
     expect(hydrateDisplayContent(raw)).toBe(raw);
   });
 

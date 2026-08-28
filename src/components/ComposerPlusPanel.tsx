@@ -452,7 +452,14 @@ export function ComposerPlusPanel({
             <span className="composer-plus__ico" aria-hidden>
               {slashItemIcon(item)}
             </span>
-            <span className="composer-plus__title">{title}</span>
+            <span className="composer-plus__title">
+              {title}
+              {item.kind === "skill" && item.suggested ? (
+                <span className="composer-plus__suggested">
+                  {tr("composer.skillSuggested")}
+                </span>
+              ) : null}
+            </span>
             {right ? (
               <span className="composer-plus__desc">{right}</span>
             ) : null}

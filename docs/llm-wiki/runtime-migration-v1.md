@@ -55,13 +55,19 @@ JSON journal 仍是事实源。`session-search.v1.sqlite3` 是可删除、可重
 
 只有完成且实际使用工具的任务才可能生成 Host-owned pending candidate。候选记录来源 session/message、来源内容哈希、审阅内容哈希、所有权和有界去敏审计；用户审阅后才复用 `skill_draft_save` 的原子保存。V2 决策用 expected hash 拒绝陈旧窗口，编辑后的最终草稿另以 final hash 绑定。目标 Skill 的所有权检查、树 hash 和替换位于目标级事务边界内；候选状态提交失败必须回滚或由恢复记录重放。自动流程不能覆盖用户、插件或外部 Skill；覆盖冲突必须再次明确确认。
 
-Host 内核路径在用户显式选择 Skill 后，从库存已经信任的用户/项目/插件 Skill 目录读取有界 `SKILL.md`，按 tree hash 复核后写入该轮模型提示，不写入可见 journal。清单 DTO 仍不含正文或本地路径。默认内核不 spawn grok 二进制，也不把 GROK_HOME 当作产品内核；ACP legacy 路径仍可用 Runtime inspect。Ranking 只是 suggestion。单轮最多 8 个 Skill、合计 16,000 字；哈希过期、符号链接、逃出可信目录或敏感材料 fail-closed。
+Host 内核路径在用户显式选择 Skill 后，从库存已经信任的用户/项目/插件 Skill 目录读取有界 `SKILL.md`，按 tree hash 复核后写入该轮模型提示，不写入可见 journal。清单 DTO 仍不含正文或本地路径。默认内核不 spawn grok 二进制，也不把 GROK_HOME 当作产品内核；ACP legacy 路径仍可用 Runtime inspect。Ranking 只是 suggestion，必须用户接受才变成 `accepted_suggestion`。扩展页的 Skill learning 面板只展示本会话使用证据和改进建议，不能直接写 Skill。单轮最多 8 个 Skill、合计 16,000 字；哈希过期、符号链接、逃出可信目录或敏感材料 fail-closed。
+
+### 项目说明文件
+
+信任项目根内按顺序读取第一个普通文件（非符号链接）：`AGENTS.md`、`Sunsetz.md`、`.sunsetz/instructions.md`、`CLAUDE.md`。上限 16,000 字，写入该轮 system 提示，并标明不能覆盖权限或逃出根目录。输入器只显示相对路径和是否截断。读失败、空文件、非 UTF-8 或超限截断不得把会话打成 error。命令：`project_instruction_inspect_v1`。
+
+默认内核单轮最多 16 次工具调用。
 
 ### 有界 Memory 候选
 
 `memory-candidates.v1.json` 是独立的待审事实源，只接受 `user_preference | project_fact | workflow_hint`，状态为 `pending | approved | rejected | superseded`。创建必须引用 Host 已持久化的真实 user 消息；内容限制为 2,000 字符、总量限制为 256 条，并在写入前拒绝 API key、token、私钥、带密码数据库 URL 和 JWT 等敏感材料。批准、拒绝、替代和删除都使用内容 hash CAS。
 
-批准只表示用户确认了候选；当前不会自动注入 Runtime prompt、工具上下文或 FTS，会话检索也不会被称作长期记忆。用户可显式选择已批准且 hash 未变化的候选，通过 `memory_context_pack_build_v1` 构建确定性只读 JSON：最多 8 条、单条 1,000 字、总计 4,000 字。Host 在锁定快照内重新校验 approved、CAS、来源、所有权和敏感材料；UI 只预览/复制，没有 `session_send`、ACP 或 Runtime 注入调用。后续若接 Runtime memory，必须另建能力契约、可见注入点和删除/导出路径。
+批准只表示用户确认了候选；不会自动注入 Runtime prompt、工具上下文或 FTS，会话检索也不会被称作长期记忆。用户可显式选择已批准且 hash 未变化的候选，通过 `memory_context_pack_build_v1` 构建确定性只读 JSON：最多 8 条、单条 1,000 字、总计 4,000 字。Host 在锁定快照内重新校验 approved、CAS、来源、所有权和敏感材料。选用后输入器显示 `MemoryContextBadge`；`session_send_v2` 把有界 `prompt_fragment` 写入该轮 Sunsetz 内核提示，journal 只留 `memory_injection` marker。注入账本状态为 prepared / dispatching / applied / failed / removed，可反馈或删除。Composer recovery 只存候选 id 与 hash，恢复时重新构建 pack。
 
 ### 自动化
 
@@ -85,7 +91,7 @@ Heartbeat 只能证明近期有 Runtime 进度，不能证明过期 Runtime 已�
 4. `media://` 是受 provenance 校验的兼容通道；全部调用方迁移到 ResourceHandle 后再删除。
 5. 旧 `session://*` 事件至少保留一个完整版本周期；移除必须单独立项并更新契约 golden。
 6. SQLite 索引可在崩溃后短暂落后，下一次搜索会按 journal 指纹重建并清理已删除会话；不得把索引当事实源或备份。
-7. Memory 候选目前是可审阅事实源，显式上下文包也只供预览/复制，不是 Runtime 长时记忆；未实现可见注入前不得宣传为自动记忆。
+7. Memory 对 Sunsetz 内核是显式、可见、可审计注入，不是自动长时记忆；未审阅的 FTS 证据不得进入 pack。信任项目的 `AGENTS.md` / `Sunsetz.md` / `.sunsetz/instructions.md` / `CLAUDE.md` 作为有界项目说明进入 system 提示，符号链接和超限失败则跳过。
 8. Automation 已有 Runtime 进度 heartbeat，但 lease 过期仍采取不重试策略以避免重复副作用；安全 replacement/retry 与系统级常驻调度仍需单独里程碑。
 
 ## 验证入口

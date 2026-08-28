@@ -138,39 +138,32 @@ pub fn list_available_models() -> AvailableModelsResult {
         }
     }
 
-    // Hard fallback — known-good official default when cache is empty / offline.
+    // Offline fallback is the Runtime's stable default alias. Do not freeze a
+    // dated concrete model id in the desktop shell.
     if by_id.is_empty() {
+        let runtime_default = crate::providers::OFFICIAL_DEFAULT_MODEL.to_string();
         by_id.insert(
-            "grok-4.5".into(),
+            runtime_default.clone(),
             AvailableModel {
-                id: "grok-4.5".into(),
-                label: "Sunsetz 4.5".into(),
+                id: runtime_default,
+                label: "Sunsetz Runtime Default".into(),
                 source: "official".into(),
                 is_default: true,
-                capabilities: known_model_capabilities("grok-4.5"),
+                // The alias can point to a newer model after a Runtime update;
+                // unknown controls must stay hidden until capabilities are live.
+                capabilities: None,
             },
         );
     }
 
-    // Prefer catalog default over a stale settings.model_id that might be a
-    // provider route id (e.g. "yunyi") from an older build.
-    let preferred = by_id
-        .keys()
-        .find(|k| k.as_str() == "grok-4.5")
-        .cloned()
-        .or_else(|| {
-            settings
-                .model_id
-                .clone()
-                .filter(|s| by_id.contains_key(s))
-        })
-        .unwrap_or_else(|| {
-            by_id
-                .keys()
-                .next()
-                .cloned()
-                .unwrap_or_else(|| "grok-4.5".into())
-        });
+    // Keep a valid user selection; otherwise use the first Runtime-reported
+    // catalog entry (or the generic alias inserted above).
+    let preferred = settings
+        .model_id
+        .clone()
+        .filter(|model_id| by_id.contains_key(model_id))
+        .or_else(|| by_id.keys().next().cloned())
+        .unwrap_or_else(|| crate::providers::OFFICIAL_DEFAULT_MODEL.into());
 
     let mut models: Vec<AvailableModel> = by_id.into_values().collect();
     models.sort_by(|a, b| a.id.cmp(&b.id));
@@ -192,10 +185,7 @@ mod tests {
 
     #[test]
     fn read_cache_parses_official_entry() {
-        let dir = std::env::temp_dir().join(format!(
-            "sunsetz-models-test-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("sunsetz-models-test-{}", std::process::id()));
         let _ = fs::create_dir_all(&dir);
         let path = dir.join("models_cache.json");
         fs::write(
