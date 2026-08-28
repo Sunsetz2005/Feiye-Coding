@@ -16,6 +16,8 @@ const CLAIM_LEASE_MINUTES: i64 = 10;
 const MAX_LEDGER_ROWS: usize = 512;
 const MISSED_RUN_AFTER_SECONDS: i64 = 90;
 const LEASE_EXPIRED_ERROR: &str = "claim lease expired before scheduler completion";
+const PROCESS_EXITED_ERROR: &str = "runtime process exited before scheduler completion";
+const MAX_PROCESS_ID_CHARS: usize = 256;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -46,6 +48,46 @@ pub struct AutomationRunLedgerEntryV1 {
     pub last_heartbeat_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub last_runtime_session_sequence: Option<u64>,
+    #[serde(default)]
+    pub runtime_process_identity: Option<AutomationRuntimeProcessIdentityV1>,
+    #[serde(default)]
+    pub replaces_claim_id: Option<String>,
+    #[serde(default)]
+    pub replacement_claim_id: Option<String>,
+    #[serde(default)]
+    pub termination_proof: Option<AutomationTerminationProofV1>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AutomationTerminationProofKindV1 {
+    ProcessExit,
+    CancelAck,
+}
+
+/// Host-observed evidence that the Runtime process which owned a claim can no
+/// longer produce side effects for it. Missing heartbeat is not this proof.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AutomationTerminationProofV1 {
+    pub version: u8,
+    pub proof_id: String,
+    pub kind: AutomationTerminationProofKindV1,
+    pub claim_id: String,
+    pub session_id: String,
+    pub process_id: String,
+    pub runtime_session_sequence: u64,
+    pub observed_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AutomationRuntimeProcessIdentityV1 {
+    pub version: u8,
+    pub session_id: String,
+    pub process_id: String,
+    pub first_runtime_session_sequence: u64,
+    pub bound_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -67,6 +109,7 @@ pub struct AutomationRuntimeHeartbeatV1 {
     pub version: u8,
     pub claim_id: String,
     pub session_id: String,
+    pub process_id: String,
     pub runtime_session_sequence: u64,
 }
 
@@ -182,7 +225,52 @@ fn is_lease_interruption(entry: &AutomationRunLedgerEntryV1) -> bool {
     entry.status == AutomationRunStatusV1::Interrupted
         && matches!(
             entry.error.as_deref(),
-            Some(LEASE_EXPIRED_ERROR | "claim lease expired before WebView completion")
+            Some(
+                LEASE_EXPIRED_ERROR
+                    | PROCESS_EXITED_ERROR
+                    | "claim lease expired before WebView completion"
+            )
+        )
+}
+
+fn valid_process_id(process_id: &str) -> bool {
+    !process_id.is_empty()
+        && process_id.len() <= MAX_PROCESS_ID_CHARS
+        && process_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+fn retryable_interrupted_original<'a>(
+    ledger: &'a [AutomationRunLedgerEntryV1],
+    automation_id: &str,
+    scheduled_for: DateTime<Utc>,
+) -> Option<&'a AutomationRunLedgerEntryV1> {
+    ledger.iter().find(|entry| {
+        entry.automation_id == automation_id
+            && entry.scheduled_for == scheduled_for
+            && is_lease_interruption(entry)
+            && entry.replacement_claim_id.is_none()
+            && termination_proof_authorizes_replacement(entry)
+    })
+}
+
+fn termination_proof_authorizes_replacement(entry: &AutomationRunLedgerEntryV1) -> bool {
+    let Some(identity) = entry.runtime_process_identity.as_ref() else {
+        return false;
+    };
+    let Some(proof) = entry.termination_proof.as_ref() else {
+        return false;
+    };
+    proof.version == 1
+        && proof.claim_id == entry.claim_id
+        && proof.session_id == identity.session_id
+        && proof.process_id == identity.process_id
+        && proof.runtime_session_sequence >= identity.first_runtime_session_sequence
+        && matches!(
+            proof.kind,
+            AutomationTerminationProofKindV1::ProcessExit
+                | AutomationTerminationProofKindV1::CancelAck
         )
 }
 
@@ -270,7 +358,50 @@ fn new_claim_entry(
         error: None,
         last_heartbeat_at: None,
         last_runtime_session_sequence: None,
+        runtime_process_identity: None,
+        replaces_claim_id: None,
+        replacement_claim_id: None,
+        termination_proof: None,
     }
+}
+
+fn replace_interrupted_claim_in_ledger(
+    ledger: &mut Vec<AutomationRunLedgerEntryV1>,
+    original_claim_id: &str,
+    now: DateTime<Utc>,
+) -> Result<AutomationRunLedgerEntryV1, String> {
+    let original_index = ledger
+        .iter()
+        .position(|entry| entry.claim_id == original_claim_id)
+        .ok_or_else(|| "automation claim not found".to_string())?;
+    let original = ledger[original_index].clone();
+    if !is_lease_interruption(&original) {
+        return Err("automation claim is not a retryable interruption".into());
+    }
+    if original.replacement_claim_id.is_some() {
+        return Err("automation claim already has a replacement".into());
+    }
+    if !termination_proof_authorizes_replacement(&original) {
+        return Err("automation termination proof does not authorize replacement".into());
+    }
+    if ledger
+        .iter()
+        .any(|entry| entry.status == AutomationRunStatusV1::Claimed)
+    {
+        return Err("another automation claim is still active".into());
+    }
+
+    let mut replacement = new_claim_entry(
+        &original.automation_id,
+        original.scheduled_for,
+        now,
+        true,
+    );
+    replacement.replaces_claim_id = Some(original.claim_id.clone());
+    ledger[original_index].replacement_claim_id = Some(replacement.claim_id.clone());
+    ledger.push(replacement.clone());
+    trim_ledger(ledger);
+    Ok(replacement)
 }
 
 enum LedgerClaimDecision {
@@ -296,9 +427,22 @@ fn claim_occurrence_in_ledger(
     }
 
     if recovery {
-        // A fixed lease cannot prove that the Runtime stopped executing. A
-        // replacement claim could therefore duplicate external side effects.
-        // Keep the interrupted original as the only claim for this occurrence.
+        if policy == MissedRunPolicyV2::Skip {
+            trim_ledger(ledger);
+            return LedgerClaimDecision::Suppressed;
+        }
+        if let Some(original_id) = retryable_interrupted_original(ledger, automation_id, scheduled_for)
+            .map(|entry| entry.claim_id.clone())
+        {
+            match replace_interrupted_claim_in_ledger(ledger, &original_id, now) {
+                Ok(replacement) => return LedgerClaimDecision::Claimed(replacement),
+                Err(_) => {
+                    trim_ledger(ledger);
+                    return LedgerClaimDecision::Suppressed;
+                }
+            }
+        }
+        // A fixed lease cannot prove that the Runtime stopped executing.
         trim_ledger(ledger);
         return LedgerClaimDecision::Suppressed;
     }
@@ -327,6 +471,10 @@ fn claim_occurrence_in_ledger(
             error: Some("missed run skipped by policy".into()),
             last_heartbeat_at: None,
             last_runtime_session_sequence: None,
+            runtime_process_identity: None,
+            replaces_claim_id: None,
+            replacement_claim_id: None,
+            termination_proof: None,
         });
         trim_ledger(ledger);
         return LedgerClaimDecision::Suppressed;
@@ -556,6 +704,10 @@ fn apply_runtime_heartbeat_v1(
     if heartbeat.runtime_session_sequence == 0 {
         return Err("runtime session sequence must be positive".into());
     }
+    if !valid_process_id(&heartbeat.process_id) || heartbeat.process_id.trim() != heartbeat.process_id
+    {
+        return Err("invalid automation process id".into());
+    }
 
     let entry = ledger
         .iter_mut()
@@ -569,6 +721,24 @@ fn apply_runtime_heartbeat_v1(
     }
     if entry.session_id.as_deref() != Some(heartbeat.session_id.as_str()) {
         return Err("automation heartbeat session binding mismatch".into());
+    }
+    match entry.runtime_process_identity.as_ref() {
+        Some(identity)
+            if identity.session_id != heartbeat.session_id
+                || identity.process_id != heartbeat.process_id =>
+        {
+            return Err("automation heartbeat process identity mismatch".into());
+        }
+        Some(_) => {}
+        None => {
+            entry.runtime_process_identity = Some(AutomationRuntimeProcessIdentityV1 {
+                version: 1,
+                session_id: heartbeat.session_id.clone(),
+                process_id: heartbeat.process_id.clone(),
+                first_runtime_session_sequence: heartbeat.runtime_session_sequence,
+                bound_at: now,
+            });
+        }
     }
     if entry
         .last_runtime_session_sequence
@@ -628,6 +798,7 @@ fn active_claim_id_for_heartbeat_session(
 pub fn record_runtime_heartbeat_for_session_v1(
     session_id: &str,
     runtime_session_sequence: u64,
+    process_id: &str,
 ) -> Result<Option<AutomationRuntimeHeartbeatAckV1>, String> {
     let session_id = session_id.trim();
     if !valid_session_id(session_id) {
@@ -640,9 +811,102 @@ pub fn record_runtime_heartbeat_for_session_v1(
         version: 1,
         claim_id,
         session_id: session_id.to_string(),
+        process_id: process_id.to_string(),
         runtime_session_sequence,
     })
     .map(Some)
+}
+
+fn apply_process_termination_in_ledger(
+    ledger: &mut [AutomationRunLedgerEntryV1],
+    session_id: &str,
+    process_id: &str,
+    runtime_session_sequence: u64,
+    kind: AutomationTerminationProofKindV1,
+    now: DateTime<Utc>,
+) -> Result<bool, String> {
+    if !valid_session_id(session_id) {
+        return Err("invalid automation session id".into());
+    }
+    if !valid_process_id(process_id) {
+        return Err("invalid automation process id".into());
+    }
+    if runtime_session_sequence == 0 {
+        return Err("runtime session sequence must be positive".into());
+    }
+
+    let matches = ledger
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| {
+            (entry.status == AutomationRunStatusV1::Claimed || is_lease_interruption(entry))
+                && entry.session_id.as_deref() == Some(session_id)
+        })
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let index = match matches.as_slice() {
+        [] => return Ok(false),
+        [index] => *index,
+        _ => return Err("multiple active automation claims for session".into()),
+    };
+    let entry = &mut ledger[index];
+    let Some(identity) = entry.runtime_process_identity.as_ref() else {
+        // A termination event cannot establish process identity retroactively.
+        return Ok(false);
+    };
+    if identity.session_id != session_id || identity.process_id != process_id {
+        return Err("automation termination process identity mismatch".into());
+    }
+    if runtime_session_sequence < identity.first_runtime_session_sequence {
+        return Err("automation termination sequence precedes process identity".into());
+    }
+    if let Some(existing) = entry.termination_proof.as_ref() {
+        return Ok(existing.process_id == process_id && existing.session_id == session_id);
+    }
+
+    entry.termination_proof = Some(AutomationTerminationProofV1 {
+        version: 1,
+        proof_id: format!("automation-term-v1-{}", Uuid::new_v4()),
+        kind,
+        claim_id: entry.claim_id.clone(),
+        session_id: session_id.to_string(),
+        process_id: process_id.to_string(),
+        runtime_session_sequence,
+        observed_at: now,
+    });
+    if entry.status == AutomationRunStatusV1::Claimed
+        && kind == AutomationTerminationProofKindV1::ProcessExit
+    {
+        entry.status = AutomationRunStatusV1::Interrupted;
+        entry.completed_at = Some(now);
+        entry.error = Some(PROCESS_EXITED_ERROR.into());
+    }
+    Ok(true)
+}
+
+/// Record Host-observed Runtime process death for the bound automation claim.
+/// This is not a WebView retry token and cannot create a replacement by itself.
+pub fn record_process_termination_for_session_v1(
+    session_id: &str,
+    process_id: &str,
+    runtime_session_sequence: u64,
+    kind: AutomationTerminationProofKindV1,
+) -> Result<bool, String> {
+    let now = Utc::now();
+    crate::store_lock::update_json_locked(
+        &crate::paths::automation_runs_file(),
+        Vec::<AutomationRunLedgerEntryV1>::new,
+        |ledger| {
+            apply_process_termination_in_ledger(
+                ledger,
+                session_id.trim(),
+                process_id.trim(),
+                runtime_session_sequence,
+                kind,
+                now,
+            )
+        },
+    )
 }
 
 fn active_claim_id_for_session(
@@ -687,6 +951,9 @@ fn complete_entry_in_ledger(
         .iter_mut()
         .find(|entry| entry.claim_id == claim_id)
         .ok_or_else(|| "automation claim not found".to_string())?;
+    if entry.replacement_claim_id.is_some() {
+        return Err("replaced automation claim cannot accept a late completion".into());
+    }
     if entry.status != AutomationRunStatusV1::Claimed && !is_lease_interruption(entry) {
         return Err("automation claim already completed".into());
     }
@@ -791,6 +1058,7 @@ mod tests {
             version: 1,
             claim_id: claim_id.into(),
             session_id: session_id.into(),
+            process_id: "proc-1".into(),
             runtime_session_sequence,
         }
     }
@@ -1102,6 +1370,171 @@ mod tests {
         ));
         assert_eq!(ledger.len(), 1);
         assert_eq!(ledger[0].claim_id, "crashed-claim");
+        assert_eq!(ledger[0].status, AutomationRunStatusV1::Interrupted);
+    }
+
+    #[test]
+    fn heartbeat_binds_process_identity_and_termination_proof_cannot_create_it() {
+        let now = fixed_now();
+        let mut claim = new_claim_entry("identity", now, now, false);
+        claim.claim_id = "identity-claim".into();
+        claim.session_id = Some("runtime-session".into());
+        let mut ledger = vec![claim];
+
+        apply_runtime_heartbeat_v1(
+            &mut ledger,
+            &heartbeat("identity-claim", "runtime-session", 3),
+            now,
+        )
+        .unwrap();
+        let identity = ledger[0].runtime_process_identity.clone().unwrap();
+        assert_eq!(identity.process_id, "proc-1");
+        assert_eq!(identity.first_runtime_session_sequence, 3);
+
+        let mut unbound = new_claim_entry("unbound", now, now, false);
+        unbound.claim_id = "unbound-claim".into();
+        unbound.session_id = Some("runtime-session".into());
+        let mut unbound_ledger = vec![unbound];
+        assert_eq!(
+            apply_process_termination_in_ledger(
+                &mut unbound_ledger,
+                "runtime-session",
+                "proc-1",
+                3,
+                AutomationTerminationProofKindV1::ProcessExit,
+                now,
+            )
+            .unwrap(),
+            false
+        );
+        assert!(unbound_ledger[0].termination_proof.is_none());
+        assert_eq!(unbound_ledger[0].status, AutomationRunStatusV1::Claimed);
+    }
+
+    #[test]
+    fn process_exit_proof_authorizes_exactly_one_replacement() {
+        let now = fixed_now();
+        let scheduled_for = now - ChronoDuration::minutes(5);
+        let mut claim = new_claim_entry("recover", scheduled_for, now, false);
+        claim.claim_id = "crashed-claim".into();
+        claim.session_id = Some("runtime-session".into());
+        let mut ledger = vec![claim];
+        apply_runtime_heartbeat_v1(
+            &mut ledger,
+            &heartbeat("crashed-claim", "runtime-session", 1),
+            now,
+        )
+        .unwrap();
+        assert!(apply_process_termination_in_ledger(
+            &mut ledger,
+            "runtime-session",
+            "proc-1",
+            4,
+            AutomationTerminationProofKindV1::ProcessExit,
+            now + ChronoDuration::seconds(1),
+        )
+        .unwrap());
+        assert_eq!(ledger[0].status, AutomationRunStatusV1::Interrupted);
+        assert!(ledger[0].termination_proof.is_some());
+
+        let replacement = claimed_entry(claim_occurrence_in_ledger(
+            &mut ledger,
+            "recover",
+            scheduled_for,
+            now + ChronoDuration::minutes(1),
+            MissedRunPolicyV2::RunOnce,
+            true,
+        ));
+        assert_eq!(ledger.len(), 2);
+        assert_eq!(replacement.replaces_claim_id.as_deref(), Some("crashed-claim"));
+        assert_eq!(
+            ledger[0].replacement_claim_id.as_deref(),
+            Some(replacement.claim_id.as_str())
+        );
+        assert_eq!(ledger[1].status, AutomationRunStatusV1::Claimed);
+
+        assert!(matches!(
+            claim_occurrence_in_ledger(
+                &mut ledger,
+                "recover",
+                scheduled_for,
+                now + ChronoDuration::minutes(2),
+                MissedRunPolicyV2::RunOnce,
+                true,
+            ),
+            LedgerClaimDecision::Existing(_)
+        ));
+        assert_eq!(ledger.len(), 2);
+    }
+
+    #[test]
+    fn skip_policy_and_missing_proof_never_replace() {
+        let now = fixed_now();
+        let scheduled_for = now - ChronoDuration::minutes(5);
+        let mut with_proof = new_claim_entry("skip-me", scheduled_for, now, false);
+        with_proof.claim_id = "skip-claim".into();
+        with_proof.session_id = Some("runtime-session".into());
+        let mut ledger = vec![with_proof];
+        apply_runtime_heartbeat_v1(
+            &mut ledger,
+            &heartbeat("skip-claim", "runtime-session", 1),
+            now,
+        )
+        .unwrap();
+        apply_process_termination_in_ledger(
+            &mut ledger,
+            "runtime-session",
+            "proc-1",
+            2,
+            AutomationTerminationProofKindV1::ProcessExit,
+            now,
+        )
+        .unwrap();
+        assert!(matches!(
+            claim_occurrence_in_ledger(
+                &mut ledger,
+                "skip-me",
+                scheduled_for,
+                now,
+                MissedRunPolicyV2::Skip,
+                true,
+            ),
+            LedgerClaimDecision::Suppressed
+        ));
+        assert_eq!(ledger.len(), 1);
+        assert!(ledger[0].replacement_claim_id.is_none());
+    }
+
+    #[test]
+    fn replaced_original_rejects_late_completion() {
+        let now = fixed_now();
+        let scheduled_for = now - ChronoDuration::minutes(5);
+        let mut claim = new_claim_entry("recover", scheduled_for, now, false);
+        claim.claim_id = "original".into();
+        claim.session_id = Some("runtime-session".into());
+        let mut ledger = vec![claim];
+        apply_runtime_heartbeat_v1(&mut ledger, &heartbeat("original", "runtime-session", 1), now)
+            .unwrap();
+        apply_process_termination_in_ledger(
+            &mut ledger,
+            "runtime-session",
+            "proc-1",
+            2,
+            AutomationTerminationProofKindV1::ProcessExit,
+            now,
+        )
+        .unwrap();
+        let _ = claimed_entry(claim_occurrence_in_ledger(
+            &mut ledger,
+            "recover",
+            scheduled_for,
+            now,
+            MissedRunPolicyV2::RunOnce,
+            true,
+        ));
+        let late = complete_entry_in_ledger(&mut ledger, "original", true, None, now)
+            .unwrap_err();
+        assert!(late.contains("replaced"));
         assert_eq!(ledger[0].status, AutomationRunStatusV1::Interrupted);
     }
 

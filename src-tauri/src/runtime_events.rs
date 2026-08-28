@@ -322,12 +322,28 @@ pub fn emit(
         payload: sanitize_payload(&payload),
     };
     let _ = app.emit("session://runtime_event_v1", envelope.clone());
+    if envelope.event_type == "process_exited" {
+        if let Err(error) = crate::automation_scheduler::record_process_termination_for_session_v1(
+            session_id,
+            process_id,
+            envelope.sequence,
+            crate::automation_scheduler::AutomationTerminationProofKindV1::ProcessExit,
+        ) {
+            tracing::warn!(
+                session_id,
+                process_id,
+                sequence = envelope.sequence,
+                "automation Runtime termination proof rejected: {error}"
+            );
+        }
+    }
     if is_automation_progress_event(&envelope.event_type)
         && should_record_automation_heartbeat(session_id, occurred_at)
     {
         if let Err(error) = crate::automation_scheduler::record_runtime_heartbeat_for_session_v1(
             session_id,
             envelope.sequence,
+            process_id,
         ) {
             tracing::warn!(
                 session_id,

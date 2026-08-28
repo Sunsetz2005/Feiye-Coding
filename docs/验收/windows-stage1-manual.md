@@ -41,3 +41,25 @@ pwsh -File .\scripts\windows-stage1-manual.ps1 `
 验收者必须人工确认 Windows 显示设置确为 200%。`GetDpiForSystem` 的记录用于辅助核对，不单独证明每显示器缩放。
 
 只有七项全部通过、截图无敏感信息且 `manifest.json` 对应当前提交时，才能把阶段一的 Windows 实机门禁标记为完成。
+
+## 从 macOS 开发机怎么做
+
+当前 Sunsetz 开发机是 macOS。下面这些**不能**把本门禁标为完成：UTM / Parallels / ARM 虚拟机、GitHub Actions `windows-native-smoke`、本机 Playwright。
+
+可行路径只有一条：把与待验收提交一致的调试包拿到**物理 Windows PC**，显示器缩放到 200%，运行上面的 `windows-stage1-manual.ps1`。
+
+建议步骤：
+
+1. 在 macOS 记下提交：`git rev-parse HEAD`。
+2. 在 Windows 上检出同一提交，或拷贝已构建的 `sunsetz.exe`。
+3. Windows 上构建调试包（若没有现成 exe）：
+
+```powershell
+pnpm install
+pnpm tauri build --debug
+```
+
+4. 关闭无关窗口，缩放 200%，还原窗口运行验收脚本。
+5. 把 `test-results/windows-stage1-manual-*` 拷回（该目录已被 gitignore）。七项 PASS 后再改阶段状态。
+
+CI 原生 smoke 仍应跑，作为额外诊断，不是本页的完成证明。

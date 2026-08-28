@@ -75,7 +75,7 @@ Rust Host 每 30 秒通过可独立调用的 `tick_once` 检查到期任务，�
 
 绑定会话产生真实 Runtime 进度事件时，Host 使用单会话严格递增 sequence 作为 heartbeat 证据，同一 session 最多每 30 秒原子记录一次，并把 lease 重设为 Host 当前时间后 10 分钟。只有 stream、tool call、plan、ask-user、permission、retry、compact 和 usage 算进度；错误、stderr、process exit 与 unknown event 不续租。普通会话没有绑定 claim 时不写账本，新字段均可选，旧 JSON 无需迁移。
 
-Heartbeat 只能证明近期有 Runtime 进度，不能证明过期 Runtime 已终止。因此无进度到期的 claim 只标记为 interrupted，不自动创建 replacement；晚到 completion 仍只能结算原 claim，且重复完成 fail-closed。这优先保证不会并发重复执行外部副作用。可靠 retry 仍需进程终止证明与 replacement CAS，不能仅凭墙钟或缺失 heartbeat 启用。
+Heartbeat 只能证明近期有 Runtime 进度，不能证明过期 Runtime 已终止。第一次进度 heartbeat 会把 claim 钉到 `session_id + process_id`；`process_exited` 才能写入终止证明。无证明的 lease 过期仍只标记 interrupted。有证明且 `missedRunPolicy=run_once` 时，Host 用 CAS 生成恰好一条 replacement claim；`skip` 仍不补跑。已被替换的原 claim 拒绝晚到 completion，避免双跑副作用。应用关闭后的系统服务仍是独立里程碑。
 
 该调度器只在应用进程存活时运行。应用关闭后的系统服务、launchd、Task Scheduler 或 headless 常驻仍是独立里程碑。
 
@@ -92,7 +92,7 @@ Heartbeat 只能证明近期有 Runtime 进度，不能证明过期 Runtime 已�
 5. 旧 `session://*` 事件至少保留一个完整版本周期；移除必须单独立项并更新契约 golden。
 6. SQLite 索引可在崩溃后短暂落后，下一次搜索会按 journal 指纹重建并清理已删除会话；不得把索引当事实源或备份。
 7. Memory 对 Sunsetz 内核是显式、可见、可审计注入，不是自动长时记忆；未审阅的 FTS 证据不得进入 pack。信任项目的 `AGENTS.md` / `Sunsetz.md` / `.sunsetz/instructions.md` / `CLAUDE.md` 作为有界项目说明进入 system 提示，符号链接和超限失败则跳过。
-8. Automation 已有 Runtime 进度 heartbeat，但 lease 过期仍采取不重试策略以避免重复副作用；安全 replacement/retry 与系统级常驻调度仍需单独里程碑。
+8. Automation 已有进程终止证明与 replacement CAS；无证明的过期 claim 仍不重试。系统级常驻调度仍需单独里程碑。
 
 ## 验证入口
 
