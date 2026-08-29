@@ -104,9 +104,11 @@ pub fn save_current_account(label: Option<String>) -> Result<SavedAccount, Strin
     let now = Utc::now().to_rfc3339();
 
     // Prefer update by matching email
-    if let Some(existing) = idx.profiles.iter_mut().find(|a| {
-        email.is_some() && a.email.as_ref() == email.as_ref()
-    }) {
+    if let Some(existing) = idx
+        .profiles
+        .iter_mut()
+        .find(|a| email.is_some() && a.email.as_ref() == email.as_ref())
+    {
         let id = existing.id.clone();
         let dest = profile_auth_path(&id);
         fs::create_dir_all(dest.parent().unwrap()).map_err(|e| e.to_string())?;
@@ -170,7 +172,9 @@ pub fn switch_account(id: &str) -> Result<AccountProfile, String> {
     }
 
     // Write to both default CLI auth and agent-home
-    let cli_auth = crate::process_util::user_home().join(".grok").join("auth.json");
+    let cli_auth = crate::process_util::user_home()
+        .join(".grok")
+        .join("auth.json");
     if let Some(parent) = cli_auth.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
@@ -191,7 +195,9 @@ pub fn switch_account(id: &str) -> Result<AccountProfile, String> {
 
     let profile = account::read_auth_profile();
     if !profile.signed_in {
-        return Err("Switched auth file but profile still unsigned-in. Snapshot may be corrupt.".into());
+        return Err(
+            "Switched auth file but profile still unsigned-in. Snapshot may be corrupt.".into(),
+        );
     }
     info!("account_profiles: switched to id={id}");
     Ok(profile)
@@ -235,7 +241,9 @@ pub fn rename_account(id: &str, label: &str) -> Result<SavedAccount, String> {
 }
 
 fn current_auth_source() -> Result<PathBuf, String> {
-    let primary = crate::process_util::user_home().join(".grok").join("auth.json");
+    let primary = crate::process_util::user_home()
+        .join(".grok")
+        .join("auth.json");
     if primary.is_file() {
         return Ok(primary);
     }

@@ -67,6 +67,15 @@ pub async fn session_send(
                 .into(),
         );
     }
+    if !crate::connectors::connector_ids_from_display(display_text.as_deref())
+        .unwrap_or_default()
+        .is_empty()
+    {
+        return Err(
+            "CONNECTOR_USE_UNVERIFIED: connector markers require session_send_v2 verification"
+                .into(),
+        );
+    }
     let expected_session_id = mgr
         .snapshot()
         .session_id
@@ -87,6 +96,20 @@ pub struct SessionSendRequestV2 {
     pub memory_retry: Option<crate::memory_injection::MemoryInjectionRetryRequestV1>,
     #[serde(default)]
     pub skill_selections: Vec<crate::skill_feedback::SkillSelectionRequestV1>,
+    #[serde(default)]
+    pub connector_selections: Vec<ConnectorSelectionV1>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ConnectorSelectionV1 {
+    pub id: String,
+    #[serde(default = "default_explicit_selection")]
+    pub selection: String,
+}
+
+fn default_explicit_selection() -> String {
+    "explicit".into()
 }
 
 fn skill_names_from_display_text(display_text: Option<&str>) -> Result<Vec<String>, String> {
@@ -456,6 +479,40 @@ pub async fn session_send_v2(
         }
     }
 
+    let connector_ids = {
+        let mut ids = Vec::new();
+        for row in &request.connector_selections {
+            if row.selection != "explicit" {
+                return Err(
+                    "CONNECTOR_USE_INVALID: only explicit connector selections are supported"
+                        .into(),
+                );
+            }
+            let id = row.id.trim();
+            if !id.is_empty() {
+                ids.push(id.to_string());
+            }
+        }
+        ids
+    };
+    let explicit_connectors = match crate::connectors::verify_connector_selections(
+        &connector_ids,
+        request.display_text.as_deref(),
+    ) {
+        Ok(ids) => ids,
+        Err(error) => {
+            let prepared = prepared_skill_uses.clone();
+            let _ = tauri::async_runtime::spawn_blocking(move || {
+                transition_skill_use_records(
+                    &prepared,
+                    crate::skill_feedback::SkillUseStatusV1::Interrupted,
+                )
+            })
+            .await;
+            return Err(error);
+        }
+    };
+
     let result = mgr
         .send_message_v2(
             app,
@@ -466,6 +523,7 @@ pub async fn session_send_v2(
             request.attachments,
             memory,
             prepared_skill_uses.clone(),
+            explicit_connectors,
         )
         .await;
     if result.is_err() && !prepared_skill_uses.is_empty() {
@@ -535,6 +593,14 @@ pub async fn session_stop(
     mgr: State<'_, Arc<SessionManager>>,
 ) -> Result<SessionSnapshot, String> {
     mgr.stop(app).await
+}
+
+#[tauri::command]
+pub async fn session_subagent_get(
+    mgr: State<'_, Arc<SessionManager>>,
+    id: String,
+) -> Result<crate::session_manager::SubagentView, String> {
+    mgr.subagent_get(&id).await
 }
 
 /// Approve / revise / abandon pending plan (`_x.ai/exit_plan_mode`).
@@ -1132,7 +1198,7 @@ pub async fn project_add(path: String, trust: bool) -> Result<Project, String> {
 
 #[tauri::command]
 pub async fn project_remove(id: String) -> Result<(), String> {
-    // Unlink from app only — disk folder + sessions retained.
+    // Unlink from the app and delete chats. Disk folder is kept.
     store::remove_project(&id)
 }
 
@@ -1168,6 +1234,12 @@ pub async fn project_set_permission_policy(
 #[tauri::command]
 pub async fn project_rename(id: String, name: String) -> Result<Project, String> {
     store::rename_project(&id, &name)
+}
+
+/// Rebind a project's source folder. Sessions keep the same project id.
+#[tauri::command]
+pub async fn project_set_path(id: String, path: String) -> Result<Project, String> {
+    store::set_project_path(&id, &path)
 }
 
 #[tauri::command]
@@ -2196,9 +2268,13 @@ pub async fn doctor_report() -> Result<serde_json::Value, String> {
             "auth",
             "warn",
             "Authentication",
-            format!(
-                "No CLI auth (~/.grok/auth.json), official API key, or relay configured. Path: {auth_path}"
-            ),
+            if crate::agent_loop::is_sunsetz_backend(&backend_default) {
+                "No API key configured. Add a custom provider in Settings → My models, or an official key.".into()
+            } else {
+                format!(
+                    "No CLI auth (~/.grok/auth.json), official API key, or relay configured. Path: {auth_path}"
+                )
+            },
             serde_json::json!({
                 "cliAuthJson": auth_ok,
                 "authPath": auth_path,
@@ -2250,10 +2326,18 @@ pub async fn doctor_report() -> Result<serde_json::Value, String> {
     let (backend_level, backend_detail) = if backend_default == "mock_acp" {
         (
             "warn",
-            "Using mock ACP backend (dev). Production uses grok_agent_stdio.".to_string(),
+            "Developer mock is on. The built-in Sunsetz kernel is the product runtime; this process is not reading the project.".to_string(),
+        )
+    } else if crate::agent_loop::is_sunsetz_backend(&backend_default) {
+        (
+            "ok",
+            "Agent backend: sunsetz (built-in kernel on this computer)".to_string(),
         )
     } else {
-        ("ok", format!("Agent backend: {backend_default}"))
+        (
+            "ok",
+            format!("Agent backend: {backend_default} (legacy Grok ACP adapter)"),
+        )
     };
     checks.push(doctor_check(
         "backend",
@@ -5426,6 +5510,26 @@ pub async fn session_import_transcript_file(
     Ok(Some(meta))
 }
 
+#[tauri::command]
+pub fn connectors_list() -> Result<Vec<crate::connectors::ConnectorStateV1>, String> {
+    crate::connectors::list_connectors()
+}
+
+#[tauri::command]
+pub async fn connectors_connect(
+    id: String,
+    credential: Option<String>,
+) -> Result<crate::connectors::ConnectorStateV1, String> {
+    crate::connectors::connect_connector(id.trim(), credential.as_deref()).await
+}
+
+#[tauri::command]
+pub async fn connectors_disconnect(
+    id: String,
+) -> Result<crate::connectors::ConnectorStateV1, String> {
+    crate::connectors::disconnect_connector(id.trim()).await
+}
+
 // ── Custom providers (agent-home config.toml) ───────────────────────────────
 
 #[tauri::command]
@@ -5451,8 +5555,6 @@ pub async fn providers_activate(
     provider_id: Option<String>,
 ) -> Result<crate::providers::ProvidersListResult, String> {
     let result = crate::providers::activate_provider(&source, provider_id.as_deref())?;
-    // Composer model stays a catalog id (UI). Channel is `[models].default`.
-    // When leaving a custom route, drop stale provider ids from settings.
     let cur = store::load_settings().model_id.unwrap_or_default();
     let next_model = if result.active_source == "official" {
         if cur.is_empty()
@@ -5464,25 +5566,7 @@ pub async fn providers_activate(
             None
         }
     } else if result.active_source == "custom" {
-        // Keep catalog model in settings for the model picker; spawn resolves route id.
-        if cur.is_empty() || crate::providers::is_custom_provider_id(&cur) {
-            if let Some(p) = result
-                .active_provider_id
-                .as_ref()
-                .and_then(|id| result.providers.iter().find(|x| x.id == *id))
-            {
-                let upstream = p.model.trim();
-                Some(if upstream.is_empty() {
-                    crate::providers::OFFICIAL_CATALOG_MODEL.into()
-                } else {
-                    upstream.to_string()
-                })
-            } else {
-                Some(crate::providers::OFFICIAL_CATALOG_MODEL.to_string())
-            }
-        } else {
-            None
-        }
+        result.active_provider_id.clone()
     } else {
         None
     };
@@ -5526,14 +5610,7 @@ pub async fn providers_upsert(
         // Do not copy api_key into secrets (stays only in config.toml).
         let _ = store::save_secrets(&secrets);
         if set_as_default.unwrap_or(false) {
-            // Composer shows upstream request model, not the route slug.
-            let upstream = p.model.trim();
-            let model_id = if upstream.is_empty() {
-                crate::providers::OFFICIAL_CATALOG_MODEL.into()
-            } else {
-                upstream.to_string()
-            };
-            let _ = store::patch_settings_v1(serde_json::json!({"modelId": model_id}));
+            let _ = store::patch_settings_v1(serde_json::json!({"modelId": p.id}));
         }
     }
     Ok(result)
@@ -5557,20 +5634,10 @@ pub async fn providers_set_default(
         crate::providers::activate_provider("official", None)?
     };
     let model_id = if result.active_source == "custom" {
-        if let Some(p) = result
+        result
             .active_provider_id
-            .as_ref()
-            .and_then(|pid| result.providers.iter().find(|x| x.id == *pid))
-        {
-            let upstream = p.model.trim();
-            if upstream.is_empty() {
-                crate::providers::OFFICIAL_CATALOG_MODEL.into()
-            } else {
-                upstream.to_string()
-            }
-        } else {
-            crate::providers::OFFICIAL_CATALOG_MODEL.into()
-        }
+            .clone()
+            .unwrap_or_else(|| crate::providers::OFFICIAL_CATALOG_MODEL.into())
     } else {
         crate::providers::OFFICIAL_CATALOG_MODEL.into()
     };

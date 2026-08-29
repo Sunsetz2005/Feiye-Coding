@@ -10,6 +10,7 @@ import "./styles/setup-wizard.css";
 import "./styles/apple.css";
 import "./styles/composer-surfaces.css";
 import "./styles/workbench.css";
+import "./shared/ui/kit.css";
 import {
   applyNativeWindowTheme,
   applyThemeToDocument,

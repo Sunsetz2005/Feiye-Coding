@@ -4,51 +4,42 @@ Product rules for the **full-screen initialization wizard** before the workbench
 
 ## Goals
 
-1. **Hard gate:** Grok Build CLI must be found and runnable before entering home.
-2. **Soft gate:** Official login / API key / custom relay may be **skipped**.
-3. Match app chrome (tokens, logo, dark/light); **no scrollbars** on the gate page.
-4. Install uses **multi-mirror** download with retries (same bases as official `install.sh`).
+1. **Soft gate:** Sign in with a Sunsetz account, or skip into the workbench.
+2. Custom APIs live in Settings → My models. Official unified models are a later slice.
+3. Grok CLI, console.x.ai keys, custom relay, and legacy companion import are **not** part of first-run.
+4. Match app chrome (tokens, logo, dark/light); **no scrollbars** on the gate page.
 
 ## Flow
 
 ```
-boot → probe CLI
-  ├─ no CLI → SetupWizard step Runtime (install required)
-  ├─ CLI ok + !setupWizardCompleted → Account step (skippable)
-  └─ CLI ok + setupWizardCompleted → home
+boot → load settings
+  ├─ !setupWizardCompleted && !legacyDone → SetupWizard (sign in or skip)
+  └─ setupWizardCompleted | onboardingDone | setupSkipped → home
 ```
 
-### Step 1 — Runtime (cannot skip)
+Entering home does **not** require a grok binary. Default `runtimeBackend` is `sunsetz`.
 
-| Action | Host |
-|--------|------|
-| Detect | `probe_cli` — mac + Windows (see below) |
-| Auto install | `cli_install_latest` + event `setup://cli-install-progress` |
-| Manual path | `pick_cli_binary` → `manualCliPath` |
-| Fallback | Copy official install command / open docs |
+### Sign in (skippable)
 
-Mirrors (order):
+One entry: **Sign in with Sunsetz** (`account_login` OAuth). Busy state can cancel. **Skip for now** always enters the workbench even if the OAuth backend is unready.
 
-1. `https://storage.googleapis.com/grok-build-public-artifacts/cli` (preferred — more reliable in CN)
-2. `https://x.ai/cli`
+Persists:
 
-Each mirror is tried multiple times before failing over.
-
-### Step 2 — Account (skippable)
-
-OAuth, official key, relay, and compatible CLI or legacy provider import. No `window.prompt`.
-
-### Step 3 — Ready → Enter
-
-Persists `setupWizardCompleted: true`. If account skipped: `authSetupDeferred: true`.
+| Field | After sign-in | After skip |
+|-------|---------------|------------|
+| `setupWizardCompleted` | true | true |
+| `onboardingDone` | true | true |
+| `authSetupDeferred` | false | true |
+| `setupSkipped` | false | true |
+| `runtimeBackend` | `sunsetz` | `sunsetz` |
 
 ## Settings fields
 
 | Field | Role |
 |-------|------|
-| `setupWizardCompleted` | Wizard finished with CLI ready |
-| `authSetupDeferred` | User skipped account step |
-| `onboardingDone` / `setupSkipped` | Legacy; migrated when CLI present |
+| `setupWizardCompleted` | Wizard finished |
+| `authSetupDeferred` | User skipped account |
+| `onboardingDone` / `setupSkipped` | Legacy; treated as done so the gate does not reappear |
 
 ## UI
 
@@ -56,32 +47,14 @@ Persists `setupWizardCompleted: true`. If account skipped: `authSetupDeferred: t
 - Styles: `src/styles/setup-wizard.css` (overflow hidden, no scrollbars)
 - i18n: `setup.*` keys in `src/i18n/messages.ts`
 
-## CLI probe (mac + Windows)
+## Commands still used by the host
 
-`cli_probe::probe_cli` must work when the app is launched from Dock / Explorer (sparse PATH):
-
-| Source | macOS | Windows |
-|--------|-------|---------|
-| Official install | `~/.grok/bin/grok` (+ downloads) | `%USERPROFILE%\.grok\bin\grok.exe` (+ downloads) |
-| Package managers | Homebrew `/opt/homebrew`, `/usr/local` | WinGet Links, Scoop shims, Chocolatey |
-| PATH | process PATH + enriched PATH scan | same; names `grok.exe` / `.cmd` / `.bat` |
-| Manual | `~` expansion | `~` / `%USERPROFILE%` / auto-append `.exe` |
-| Home dir | `$HOME` | **`USERPROFILE` first** (not MSYS `$HOME`) |
-
-`--version` is preferred; a runnable binary without version still counts as found.
-
-## Commands
+CLI probe and install commands remain for Settings → Runtime (legacy fold). They are not a first-run hard gate. The Runtime page presents the built-in kernel first.
 
 | Command | Role |
 |---------|------|
-| `probe_cli` | Detect binary (cross-platform) |
-| `cli_install_latest` | Download + link into `~/.grok` |
+| `probe_cli` | Detect binary (legacy / Settings) |
+| `cli_install_latest` | Download + link (legacy) |
 | `cli_install_commands` | Platform shell command + docs URL |
 | `pick_cli_binary` | File picker |
-| `open_external_url` | Open install docs |
-
-## Non-goals
-
-- Embedding the CLI binary in the app package (B04).
-- Silent download without multi-mirror retry.
-- Forcing project selection before home.
+| `account_login` / `account_login_cancel` | Sunsetz account OAuth |

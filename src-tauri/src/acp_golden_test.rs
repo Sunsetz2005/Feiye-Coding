@@ -41,10 +41,7 @@ fn handshake_initialize_params_match_fixture() {
         "wire_initialize_params drifted from handshake_initialize.json"
     );
 
-    assert_eq!(
-        actual["protocolVersion"],
-        fx["expect"]["protocolVersion"]
-    );
+    assert_eq!(actual["protocolVersion"], fx["expect"]["protocolVersion"]);
     assert_eq!(
         actual["clientInfo"]["name"].as_str(),
         fx["expect"]["clientName"].as_str()
@@ -188,10 +185,7 @@ fn permission_request_decode_and_option_mapping() {
             ..
         } => {
             assert_eq!(rid, fx["expect"]["rpcId"].as_u64().unwrap());
-            assert_eq!(
-                tool_call_id,
-                fx["expect"]["toolCallId"].as_str().unwrap()
-            );
+            assert_eq!(tool_call_id, fx["expect"]["toolCallId"].as_str().unwrap());
             assert_eq!(tool_name, fx["expect"]["toolName"].as_str().unwrap());
             assert_eq!(title, fx["expect"]["title"].as_str().unwrap());
 
@@ -217,8 +211,10 @@ fn permission_request_decode_and_option_mapping() {
     );
     assert_eq!(selected, fx["hostReplySelected"]);
 
-    let cancelled =
-        wire_jsonrpc_result(rpc_id, wire_permission_result(&PermissionOutcome::Cancelled));
+    let cancelled = wire_jsonrpc_result(
+        rpc_id,
+        wire_permission_result(&PermissionOutcome::Cancelled),
+    );
     assert_eq!(cancelled, fx["hostReplyCancelled"]);
 
     // Underscore optionIds (shell-style)
@@ -289,8 +285,7 @@ fn ask_user_question_parse_and_replies_match_fixture() {
     );
     assert_eq!(accepted, fx["hostReplyAccepted"]);
 
-    let cancelled =
-        wire_jsonrpc_result(rpc_id, wire_ask_user_result(&AskUserOutcome::Cancelled));
+    let cancelled = wire_jsonrpc_result(rpc_id, wire_ask_user_result(&AskUserOutcome::Cancelled));
     assert_eq!(cancelled, fx["hostReplyCancelled"]);
 }
 
@@ -423,14 +418,9 @@ async fn mock_stream_emits_fixture_chunks_then_done() {
     handle.join.await.unwrap();
 
     assert!(last_done);
-    assert!(
-        texts.len() >= fx["expect"]["minChunks"].as_u64().unwrap() as usize
-    );
+    assert!(texts.len() >= fx["expect"]["minChunks"].as_u64().unwrap() as usize);
     assert_eq!(texts, expected);
-    assert_eq!(
-        texts.concat(),
-        fx["expectedFullText"].as_str().unwrap()
-    );
+    assert_eq!(texts.concat(), fx["expectedFullText"].as_str().unwrap());
 }
 
 /// Helper: print regenerated mock_stream chunk list when regenerating fixtures.

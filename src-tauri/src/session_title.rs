@@ -112,10 +112,7 @@ fn llm_title_via_cli(message: &str) -> Option<String> {
         cmd.env("PATH", path_env);
     }
 
-    let output = std::thread::spawn(move || cmd.output())
-        .join()
-        .ok()?
-        .ok()?;
+    let output = std::thread::spawn(move || cmd.output()).join().ok()?.ok()?;
 
     if !output.status.success() {
         tracing::debug!(
@@ -166,8 +163,7 @@ pub fn refine_title_in_background(
                 return;
             };
             let heuristic = heuristic_title(&first_message);
-            let can_overwrite =
-                is_placeholder_title(&current.title) || current.title == heuristic;
+            let can_overwrite = is_placeholder_title(&current.title) || current.title == heuristic;
             if !can_overwrite {
                 return;
             }

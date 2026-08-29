@@ -143,17 +143,22 @@ vi.mock("@/components/ComposerPlusPanel", () => ({
 }));
 
 vi.mock("@/components/ComposerProjectMenu", () => ({
+  ComposerWorktreeMenu: () => null,
   ComposerProjectMenu: ({
     activeProject,
     projects,
     worktrees,
     disabled,
+    instructionTip,
     onSelect,
     onAdd,
     onSwitchWorktree,
     onOpen,
   }: ProjectMenuProps) => (
     <div data-testid="project-menu" data-disabled={disabled ? "true" : "false"}>
+      {instructionTip ? (
+        <span data-testid="project-instruction-chip">{instructionTip}</span>
+      ) : null}
       <span>{activeProject?.name ?? "No project"}</span>
       <button type="button" onClick={() => onSelect(projects[0] ?? null)}>select project</button>
       <button type="button" onClick={onAdd}>add project</button>
@@ -166,9 +171,8 @@ vi.mock("@/components/ComposerProjectMenu", () => ({
 }));
 
 vi.mock("@/components/ComposerModelMenu", () => ({
-  ComposerAccessMenu: ({ onMode, onPolicy }: AccessMenuProps) => (
+  ComposerAccessMenu: ({ onPolicy }: AccessMenuProps) => (
     <div>
-      <button type="button" onClick={() => onMode("plan")}>choose plan</button>
       <button type="button" onClick={() => onPolicy("always_approve")}>choose policy</button>
     </div>
   ),
@@ -262,6 +266,9 @@ function makeProps(overrides: DockOverrides = {}): ComposerDockProps {
     onClear: vi.fn(),
     onRemove: vi.fn(),
     onRetry: vi.fn(),
+    onSteer: vi.fn(),
+    onEdit: vi.fn(),
+    onPause: vi.fn(),
     ...overrides.queue,
   } satisfies ComposerDockProps["queue"];
   const menu = {
@@ -407,13 +414,14 @@ describe("ComposerDock", () => {
     });
 
     expect(screen.getByLabelText("1 queued in this chat")).toBeTruthy();
-    expect(screen.getByText(/\/review/).getAttribute("title")).toContain("/review");
-    await user.click(screen.getByRole("button", { name: "Clear all" }));
-    await user.click(screen.getByRole("button", { name: "Retry" }));
+    expect(screen.getByText("1").closest(".composer__queue-count")?.getAttribute("title")).toContain("/review");
+    await user.click(screen.getByRole("button", { name: "Steer" }));
     await user.click(screen.getByRole("button", { name: "Remove from queue" }));
-    expect(props.queue.onClear).toHaveBeenCalledOnce();
-    expect(props.queue.onRetry).toHaveBeenCalledOnce();
+    expect(props.queue.onSteer).toHaveBeenCalledOnce();
     expect(props.queue.onRemove).toHaveBeenCalledWith("q1");
+    await user.click(screen.getByRole("button", { name: "More" }));
+    await user.click(screen.getByRole("menuitem", { name: "Edit message" }));
+    expect(props.queue.onEdit).toHaveBeenCalledWith("q1");
 
     const card = screen.getByTestId("attachment-a.png");
     expect(card.getAttribute("data-gallery")).toBe("/tmp/a.png|/tmp/b.jpg");
@@ -430,7 +438,6 @@ describe("ComposerDock", () => {
     await user.click(screen.getByRole("button", { name: "add project" }));
     await user.click(screen.getByRole("button", { name: "switch worktree" }));
     await user.click(screen.getByRole("button", { name: "open project" }));
-    await user.click(screen.getByRole("button", { name: "choose plan" }));
     await user.click(screen.getByRole("button", { name: "choose policy" }));
     await user.click(screen.getByRole("button", { name: "disable plan" }));
     await user.click(screen.getByRole("button", { name: "choose model" }));
@@ -441,7 +448,6 @@ describe("ComposerDock", () => {
     expect(projectView.props.project.onAdd).toHaveBeenCalledOnce();
     expect(projectView.props.project.onSwitchWorktree).toHaveBeenCalledOnce();
     expect(projectView.props.project.onOpen).toHaveBeenCalledOnce();
-    expect(projectView.props.preferences.onMode).toHaveBeenCalledWith("plan");
     expect(projectView.props.preferences.onPolicy).toHaveBeenCalledWith("always_approve");
     expect(projectView.props.preferences.onDisablePlan).toHaveBeenCalledOnce();
     expect(projectView.props.preferences.onModel).toHaveBeenCalledWith("model-b");

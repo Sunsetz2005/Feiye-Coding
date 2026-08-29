@@ -11,7 +11,7 @@ afterEach(cleanup);
 
 const contextLabels: ContextUsageChipLabels = {
   aria: "Context",
-  menuTitle: "Context usage",
+  menuTitle: "Context window",
   used: "Used",
   remaining: "Remaining",
   total: "Total",
@@ -31,18 +31,13 @@ const contextLabels: ContextUsageChipLabels = {
   compactAction: "Compact now",
   auto: "Auto",
   manual: "Manual",
+  hoverUsedRemain: "{used}% used ({remain}% remaining)",
+  hoverTokens: "Used {used} tokens, {total} total",
 };
 
 const accessLabels = {
   access: "Access",
   accessHint: "Runtime settings",
-  mode: "Mode",
-  modeAgent: "Agent",
-  modePlan: "Plan",
-  modeAsk: "Ask",
-  modeAgentDesc: "Run tasks",
-  modePlanDesc: "Plan first",
-  modeAskDesc: "Ask first",
   permission: "Permission",
   policyAsk: "Ask",
   policyAcceptEdits: "Accept edits",
@@ -89,8 +84,9 @@ describe("composer settings lock", () => {
     );
 
     const tooltip = screen.getByRole("tooltip");
-    expect(tooltip.textContent).toContain("67%");
-    expect(tooltip.textContent).toContain("173k / 258k");
+    expect(tooltip.textContent).toContain("Context window");
+    expect(tooltip.textContent).toContain("67% used (33% remaining)");
+    expect(tooltip.textContent).toContain("Used 173k tokens, 258k total");
     expect(
       screen.getByRole("button", { name: /Context: 67%/ }).getAttribute(
         "aria-describedby",
@@ -115,7 +111,7 @@ describe("composer settings lock", () => {
     await user.click(trigger);
 
     const dialog = await screen.findByRole("dialog", {
-      name: "Context usage",
+      name: "Context window",
     });
     const compact = within(dialog).getByRole("button", {
       name: "Compact now",
@@ -125,17 +121,14 @@ describe("composer settings lock", () => {
     expect(onCompact).not.toHaveBeenCalled();
   });
 
-  it("keeps access inspectable without allowing mode or policy changes", async () => {
+  it("keeps access inspectable without allowing policy changes", async () => {
     const user = userEvent.setup();
-    const onMode = vi.fn();
     const onPolicy = vi.fn();
     render(
       <ComposerAccessMenu
-        mode="agent"
         policy="ask"
         disabled
         labels={accessLabels}
-        onMode={onMode}
         onPolicy={onPolicy}
       />,
     );
@@ -145,37 +138,34 @@ describe("composer settings lock", () => {
     await user.click(trigger);
 
     const dialog = await screen.findByRole("dialog", { name: "Access" });
-    const planButton = within(dialog).getByText("Plan").closest("button");
+    expect(within(dialog).queryByText("Plan")).toBeNull();
     const fullAccessButton = within(dialog)
       .getByText("Full access")
       .closest("button");
-    expect(planButton?.getAttribute("aria-disabled")).toBe("true");
     expect(fullAccessButton?.getAttribute("aria-disabled")).toBe("true");
 
-    await user.click(planButton!);
     await user.click(fullAccessButton!);
-    expect(onMode).not.toHaveBeenCalled();
     expect(onPolicy).not.toHaveBeenCalled();
   });
 
-  it("closes access settings after choosing a mode", async () => {
+  it("closes access settings after choosing a policy", async () => {
     const user = userEvent.setup();
-    const onMode = vi.fn();
+    const onPolicy = vi.fn();
     render(
       <ComposerAccessMenu
-        mode="agent"
         policy="ask"
         labels={accessLabels}
-        onMode={onMode}
-        onPolicy={vi.fn()}
+        onPolicy={onPolicy}
       />,
     );
 
     await user.click(screen.getByRole("button", { name: "Access" }));
     const dialog = await screen.findByRole("dialog", { name: "Access" });
-    await user.click(within(dialog).getByText("Plan").closest("button")!);
+    await user.click(
+      within(dialog).getByText("Accept edits").closest("button")!,
+    );
 
-    expect(onMode).toHaveBeenCalledWith("plan");
+    expect(onPolicy).toHaveBeenCalledWith("accept_edits");
     expect(screen.queryByRole("dialog", { name: "Access" })).toBeNull();
   });
 });

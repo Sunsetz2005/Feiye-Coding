@@ -73,6 +73,16 @@ function createProps(
         expandProject: "Expand project",
         untrusted: "Untrusted",
         menu: "More",
+        organize: "Organize sidebar",
+        groupByProject: "By project",
+        groupByList: "In a list",
+        chatSort: "Chat sort",
+        sortPriority: "Priority",
+        sortRecent: "Recently updated",
+        newConversation: "New conversation",
+        editProject: "Edit project",
+        collapseProjects: "Collapse projects",
+        expandProjects: "Expand projects",
         trustProject: "Trust project",
         noChats: "No tasks",
         otherSessions: "Other tasks",
@@ -150,10 +160,15 @@ function createProps(
         },
       ],
       orphanSessions: [],
+      groupBy: "project",
+      sessionSort: "recent",
       onToggleProjects: vi.fn(),
       onAddProject: vi.fn(),
       onToggleProject: vi.fn(),
       onSelectProject: vi.fn(),
+      onNewSessionInProject: vi.fn(),
+      onEditProject: vi.fn(),
+      onOrganize: vi.fn(),
       onTrustProject: vi.fn(),
       onProjectMenu: vi.fn(),
       onToggleHistory: vi.fn(),
@@ -241,6 +256,10 @@ function projectPreview(): HTMLElement | null {
   );
 }
 
+function projectRowFrom(name = "Sunsetz"): HTMLElement {
+  return screen.getByRole("button", { name }).closest(".tree-l2")!;
+}
+
 async function advanceTimers(ms: number): Promise<void> {
   await act(async () => {
     vi.advanceTimersByTime(ms);
@@ -313,13 +332,37 @@ describe("SidebarNavigator", () => {
     expect(projects.getAttribute("aria-expanded")).toBe("true");
     expect(projects.getAttribute("aria-controls")).toBeTruthy();
 
-    const projectDisclosure = screen.getByRole("button", {
-      name: "Collapse project",
-    });
-    expect(projectDisclosure.getAttribute("aria-expanded")).toBe("true");
-    expect(projectDisclosure.getAttribute("aria-controls")).toBeTruthy();
-    await user.click(projectDisclosure);
+    const projectRow = screen.getByRole("button", { name: "Sunsetz" });
+    expect(projectRow.getAttribute("aria-expanded")).toBe("true");
+    expect(projectRow.getAttribute("aria-controls")).toBeTruthy();
+    await user.click(projectRow);
+    expect(props.tree.onSelectProject).toHaveBeenCalledWith("project-1");
     expect(props.tree.onToggleProject).toHaveBeenCalledWith("project-1", false);
+  });
+
+  it("shows a working spinner on a collapsed project that has a running chat", () => {
+    const base = createProps();
+    render(
+      <SidebarNavigator
+        {...createProps({
+          tree: {
+            ...base.tree,
+            busySessionId: "session-1",
+            projects: [
+              {
+                ...base.tree.projects[0]!,
+                open: false,
+              },
+            ],
+          },
+        })}
+      />,
+    );
+    const row = projectRowFrom();
+    expect(row.className).toContain("tree-l2--working");
+    expect(
+      within(row).getByLabelText("Working"),
+    ).toBeTruthy();
   });
 
   it("uses a native current-page button for tasks", async () => {
@@ -457,14 +500,11 @@ describe("SidebarNavigator", () => {
 
     const projectSelect = screen.getByRole("button", { name: "Sunsetz" });
     expect(projectSelect.getAttribute("aria-current")).toBe("page");
-    expect(projectSelect.hasAttribute("disabled")).toBe(true);
+    expect(projectSelect.hasAttribute("disabled")).toBe(false);
+    expect(projectSelect.getAttribute("aria-expanded")).toBe("false");
     expect(screen.getByText("Untrusted")).toBeTruthy();
-    expect(
-      screen.getByRole("button", { name: "Expand project" }).getAttribute(
-        "aria-expanded",
-      ),
-    ).toBe("false");
-    await user.click(screen.getByRole("button", { name: "Expand project" }));
+    await user.click(projectSelect);
+    expect(props.tree.onSelectProject).toHaveBeenCalledWith("project-1");
     expect(props.tree.onToggleProject).toHaveBeenCalledWith("project-1", true);
 
     const projectRow = container.querySelector<HTMLElement>(".tree-l2")!;
@@ -475,6 +515,10 @@ describe("SidebarNavigator", () => {
     );
     await user.click(within(projectRow).getByRole("button", { name: "More" }));
     expect(props.tree.onProjectMenu).toHaveBeenCalledTimes(2);
+    await user.click(
+      within(projectRow).getByRole("button", { name: "New conversation" }),
+    );
+    expect(props.tree.onNewSessionInProject).toHaveBeenCalledWith("project-1");
 
     const openUntrusted = createProps({
       tree: {
@@ -773,6 +817,36 @@ describe("SidebarNavigator", () => {
     expect(props.tree.onSessionMenu).toHaveBeenCalledTimes(1);
   });
 
+  it("places the project preview outside the project row action slot", async () => {
+    vi.useFakeTimers();
+    const props = createProps();
+    render(<SidebarNavigator {...props} />);
+    const row = projectRowFrom();
+    row.getBoundingClientRect = () =>
+      ({
+        x: 0,
+        y: 80,
+        left: 0,
+        right: 248,
+        top: 80,
+        bottom: 108,
+        width: 248,
+        height: 28,
+        toJSON() {
+          return {};
+        },
+      }) as DOMRect;
+    fireEvent.mouseEnter(row);
+    await advanceTimers(450);
+    const preview = projectPreview();
+    expect(preview).not.toBeNull();
+    expect(Number.parseFloat(preview!.style.left)).toBeGreaterThanOrEqual(248);
+    const actions = row.querySelector(".tree-l2__actions");
+    expect(actions).toBeTruthy();
+    fireEvent.click(within(row).getByRole("button", { name: "More" }));
+    expect(props.tree.onProjectMenu).toHaveBeenCalled();
+  });
+
   it("waits 450ms, renders project facts first, then loads Git summary", async () => {
     vi.useFakeTimers();
     const pending = deferred<ProjectGitSummaryV1 | null>();
@@ -795,7 +869,7 @@ describe("SidebarNavigator", () => {
     expect(projectPreview()).toBeNull();
     expect(loadProjectGitSummary).not.toHaveBeenCalled();
 
-    fireEvent.mouseLeave(project);
+    fireEvent.mouseLeave(projectRowFrom());
     await advanceTimers(1_000);
     expect(projectPreview()).toBeNull();
     expect(loadProjectGitSummary).not.toHaveBeenCalled();
@@ -843,7 +917,8 @@ describe("SidebarNavigator", () => {
 
       fireEvent.mouseEnter(project);
       await advanceTimers(450);
-      fireEvent.mouseLeave(project);
+      fireEvent.mouseLeave(projectRowFrom());
+      await advanceTimers(160);
       fireEvent.mouseEnter(project);
       await advanceTimers(450);
       expect(loadProjectGitSummary).toHaveBeenCalledTimes(1);
@@ -854,13 +929,14 @@ describe("SidebarNavigator", () => {
       });
       expect(projectPreview()?.textContent).toContain("Git · main");
 
-      fireEvent.mouseLeave(project);
+      fireEvent.mouseLeave(projectRowFrom());
+      await advanceTimers(160);
       fireEvent.mouseEnter(project);
       await advanceTimers(450);
       expect(loadProjectGitSummary).toHaveBeenCalledTimes(1);
       expect(projectPreview()?.textContent).toContain("Git · main");
 
-      fireEvent.mouseLeave(project);
+      fireEvent.mouseLeave(projectRowFrom());
       await advanceTimers(5_001);
       fireEvent.mouseEnter(project);
       await advanceTimers(450);
@@ -939,6 +1015,7 @@ describe("SidebarNavigator", () => {
 
     await act(async () => {
       fireEvent.blur(project);
+      await new Promise((resolve) => window.setTimeout(resolve, 180));
       fireEvent.focus(project);
       await Promise.resolve();
       await Promise.resolve();
@@ -971,7 +1048,10 @@ describe("SidebarNavigator", () => {
     expect(projectPreview()).not.toBeNull();
 
     if (cancellation === "mouse leave") {
-      fireEvent.mouseLeave(project);
+      fireEvent.mouseLeave(projectRowFrom());
+      await act(async () => {
+        await new Promise((resolve) => window.setTimeout(resolve, 180));
+      });
     } else if (cancellation === "scroll") {
       fireEvent.scroll(
         view.container.querySelector(".overlay-scroll__viewport")!,
@@ -979,9 +1059,7 @@ describe("SidebarNavigator", () => {
     } else if (cancellation === "sidebar collapse") {
       view.rerender(<SidebarNavigator {...props} collapsed />);
     } else if (cancellation === "project collapse") {
-      fireEvent.click(
-        screen.getByRole("button", { name: "Collapse project" }),
-      );
+      fireEvent.click(project);
     } else {
       fireEvent.click(
         within(project.closest<HTMLElement>(".tree-l2")!).getByRole("button", {

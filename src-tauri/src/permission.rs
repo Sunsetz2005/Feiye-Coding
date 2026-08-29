@@ -55,8 +55,62 @@ impl PermissionPolicy {
     }
 }
 
+const CONNECTOR_PREFIXES: &[&str] = &[
+    "github_",
+    "gmail_",
+    "google-drive_",
+    "google-calendar_",
+    "notion_",
+    "slack_",
+    "granola_",
+    "fireflies_",
+    "outlook_",
+    "plaud_",
+];
+
+/// Marketplace / Open Connector tools. Never treated as project file edits.
+pub fn is_connector_tool(tool_name: &str) -> bool {
+    let t = tool_name.to_lowercase();
+    if matches!(
+        t.as_str(),
+        "read_file"
+            | "list_directory"
+            | "grep"
+            | "write_file"
+            | "search_replace"
+            | "run_command"
+            | "spawn_agent"
+            | "agent_output"
+            | "kill_agent"
+    ) {
+        return false;
+    }
+    CONNECTOR_PREFIXES
+        .iter()
+        .any(|prefix| t.starts_with(prefix))
+}
+
+/// Connector tools that mutate remote state. AcceptEdits and session cache
+/// never auto-allow these; AlwaysApprove still does.
+pub fn is_connector_write_tool(tool_name: &str) -> bool {
+    if !is_connector_tool(tool_name) {
+        return false;
+    }
+    let t = tool_name.to_lowercase();
+    t == "github_create_issue"
+        || t.contains("_create_")
+        || t.contains("_send_")
+        || t.contains("_write_")
+        || t.contains("_delete_")
+        || t.contains("_update_")
+        || t.contains("_post_")
+}
+
 /// Tools treated as file edits for `acceptEdits` mode (aligned with Grok Build docs).
 pub fn is_edit_tool(tool_name: &str) -> bool {
+    if is_connector_tool(tool_name) {
+        return false;
+    }
     let t = tool_name.to_lowercase();
     matches!(
         t.as_str(),
@@ -305,6 +359,16 @@ pub fn may_auto_allow(
 
     if matches!(policy, PermissionPolicy::Deny | PermissionPolicy::DontAsk) {
         return false;
+    }
+
+    if is_connector_tool(tool_name) {
+        if matches!(policy, PermissionPolicy::AlwaysApprove) {
+            return true;
+        }
+        if is_connector_write_tool(tool_name) {
+            return false;
+        }
+        return !scope.ends_with(":*") && cache.is_allowed(scope);
     }
 
     // A Runtime payload shape we do not understand must not turn AcceptEdits
@@ -693,6 +757,41 @@ mod tests {
             Some(&root),
             &inside.to_string_lossy(),
             "write_file",
+            "",
+        ));
+    }
+
+    #[test]
+    fn accept_edits_does_not_auto_allow_connector_writes() {
+        let c = SessionAllowCache::default();
+        assert!(!is_edit_tool("github_create_issue"));
+        assert!(is_connector_tool("github_create_issue"));
+        assert!(is_connector_write_tool("github_create_issue"));
+        assert!(!may_auto_allow(
+            PermissionPolicy::AcceptEdits,
+            &c,
+            "github_create_issue:acme/app",
+            None,
+            "",
+            "github_create_issue",
+            "",
+        ));
+        assert!(!may_auto_allow(
+            PermissionPolicy::Ask,
+            &c,
+            "github_list_issues:acme/app",
+            None,
+            "",
+            "github_list_issues",
+            "",
+        ));
+        assert!(may_auto_allow(
+            PermissionPolicy::AlwaysApprove,
+            &c,
+            "github_create_issue:acme/app",
+            None,
+            "",
+            "github_create_issue",
             "",
         ));
     }

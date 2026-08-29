@@ -27,9 +27,7 @@ import {
 } from "@/components/ui/conversation";
 import {
   Message,
-  MessageActions,
   MessageContent,
-  MessageToolbar,
 } from "@/components/ui/message";
 import { MessageResponse } from "@/components/ui/message-response";
 import {
@@ -39,11 +37,8 @@ import {
 } from "@/components/ui/reasoning";
 import { Spinner } from "@/components/ui/spinner";
 import { Button } from "@/components/ui/button";
-import { Tip } from "@/components/ui/tooltip";
 import {
   IconCheck,
-  IconCopy,
-  IconExportMd,
   IconPlan,
 } from "@/components/icons";
 import { cn } from "@/lib/utils";
@@ -53,8 +48,8 @@ import { hydrateDisplayContent, parseStoredContent } from "@/lib/draftDoc";
 /** Render user message text with inline skill chips. */
 function UserMessageBody({ content }: { content: string }) {
   const segs = parseStoredContent(hydrateDisplayContent(content));
-  const hasSkill = segs.some((s) => s.type === "skill");
-  if (!hasSkill) {
+  const hasChip = segs.some((s) => s.type === "skill" || s.type === "connector");
+  if (!hasChip) {
     return <>{content}</>;
   }
   return (
@@ -62,6 +57,16 @@ function UserMessageBody({ content }: { content: string }) {
       {segs.map((s, i) =>
         s.type === "skill" ? (
           <SkillChip key={`sk-${i}-${s.name}`} name={s.name} size="sm" />
+        ) : s.type === "connector" ? (
+          <span
+            key={`cn-${i}-${s.id}`}
+            className="skill-chip skill-chip--sm connector-chip"
+          >
+            <span className="skill-chip__glyph" aria-hidden>
+              @
+            </span>
+            <span className="skill-chip__name">{s.id}</span>
+          </span>
         ) : (
           <span key={`t-${i}`}>{s.text}</span>
         ),
@@ -300,46 +305,6 @@ export function ConversationThread({
                         />
                       ))}
                     </div>
-                  ) : null}
-                  {!m.streaming && m.content.trim() ? (
-                    <MessageToolbar>
-                      <MessageActions className="opacity-100">
-                        <Tip label={tr("message.copy")}>
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="icon"
-                            aria-label={tr("message.copy")}
-                            onClick={() =>
-                              void navigator.clipboard.writeText(m.content)
-                            }
-                          >
-                            <IconCopy size={15} />
-                          </Button>
-                        </Tip>
-                        <Tip label={tr("message.exportMd")}>
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="icon"
-                            aria-label={tr("message.exportMd")}
-                            onClick={() => {
-                              const blob = new Blob([m.content], {
-                                type: "text/markdown;charset=utf-8",
-                              });
-                              const url = URL.createObjectURL(blob);
-                              const a = document.createElement("a");
-                              a.href = url;
-                              a.download = `grok-${m.id.slice(0, 8)}.md`;
-                              a.click();
-                              URL.revokeObjectURL(url);
-                            }}
-                          >
-                            <IconExportMd size={15} />
-                          </Button>
-                        </Tip>
-                      </MessageActions>
-                    </MessageToolbar>
                   ) : null}
                 </Message>
                 );

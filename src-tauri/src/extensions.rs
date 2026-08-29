@@ -15,9 +15,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::paths::{
-    agent_config_toml, ensure_app_dirs, extensions_file, resolve_agent_grok_home,
-};
+use crate::paths::{agent_config_toml, ensure_app_dirs, extensions_file, resolve_agent_grok_home};
 use crate::store;
 
 const MCP_LIST_TIMEOUT_SECS: u64 = 8;
@@ -245,7 +243,9 @@ pub fn list_mcp_server_defs(project_cwd: Option<&str>) -> Vec<McpServerDef> {
     let settings = store::load_settings();
     let config_path = resolve_agent_grok_home(&settings.session_data_mode).join("config.toml");
     // Also watch user ~/.grok/config.toml — list often sources from there.
-    let user_config = crate::process_util::user_home().join(".grok").join("config.toml");
+    let user_config = crate::process_util::user_home()
+        .join(".grok")
+        .join("config.toml");
     let mtime = file_mtime_ms(&config_path).max(file_mtime_ms(&user_config));
 
     {
@@ -463,7 +463,12 @@ fn parse_toml_string(raw: &str) -> Option<String> {
 }
 
 fn parse_toml_bool(raw: &str) -> Option<bool> {
-    match raw.trim().trim_end_matches(',').to_ascii_lowercase().as_str() {
+    match raw
+        .trim()
+        .trim_end_matches(',')
+        .to_ascii_lowercase()
+        .as_str()
+    {
         "true" => Some(true),
         "false" => Some(false),
         _ => None,
@@ -1133,14 +1138,15 @@ enabled = true
             )
         );
         assert_eq!(
-            chrome.env.as_ref().and_then(|e| e.get("PATH")).map(|s| s.as_str()),
+            chrome
+                .env
+                .as_ref()
+                .and_then(|e| e.get("PATH"))
+                .map(|s| s.as_str()),
             Some("/usr/local/bin:/usr/bin")
         );
         let http = defs.iter().find(|d| d.name == "cloudflare-api").unwrap();
-        assert_eq!(
-            http.url.as_deref(),
-            Some("https://mcp.cloudflare.com/mcp")
-        );
+        assert_eq!(http.url.as_deref(), Some("https://mcp.cloudflare.com/mcp"));
 
         // ACP mapping must not yield empty array when prefs default-on.
         let prefs = ExtensionsPrefs::default();
@@ -1148,6 +1154,8 @@ enabled = true
         let a = arr.as_array().unwrap();
         assert_eq!(a.len(), 2);
         assert!(a.iter().any(|v| v["name"] == "chrome-devtools"));
-        assert!(a.iter().any(|v| v["name"] == "cloudflare-api" && v["type"] == "http"));
+        assert!(a
+            .iter()
+            .any(|v| v["name"] == "cloudflare-api" && v["type"] == "http"));
     }
 }

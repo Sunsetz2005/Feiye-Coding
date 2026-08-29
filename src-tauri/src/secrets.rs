@@ -146,6 +146,26 @@ fn keychain_delete(account: &str) -> Result<(), String> {
     }
 }
 
+/// Named secrets for connector tokens. Missing OS store is not an error;
+/// callers keep a 0600 file fallback. Never logs values.
+pub fn named_secret_get(account: &str) -> Option<String> {
+    if account.trim().is_empty() || !keychain_platform_ok() {
+        return None;
+    }
+    keychain_get(account)
+}
+
+/// Best-effort Keychain write. File fallback is owned by the caller.
+pub fn named_secret_set(account: &str, value: Option<&str>) -> Result<(), String> {
+    if account.trim().is_empty() || !keychain_platform_ok() {
+        return Ok(());
+    }
+    match value.map(str::trim).filter(|token| !token.is_empty()) {
+        Some(token) => keychain_set(account, token),
+        None => keychain_delete(account),
+    }
+}
+
 fn non_empty(s: &Option<String>) -> bool {
     s.as_ref().map(|v| !v.is_empty()).unwrap_or(false)
 }
@@ -657,7 +677,10 @@ mod tests {
         let disk = strip_keys_for_disk(&s);
         assert!(disk.official_api_key.is_none());
         assert!(disk.relay_api_key.is_none());
-        assert_eq!(disk.relay_base_url.as_deref(), Some("https://relay.example"));
+        assert_eq!(
+            disk.relay_base_url.as_deref(),
+            Some("https://relay.example")
+        );
         assert_eq!(disk.default_model.as_deref(), Some("grok-4"));
         assert!(disk.keychain_has_official);
         assert!(disk.keychain_has_relay);
@@ -731,19 +754,14 @@ mod tests {
         entry.set_password("unit-test-secret").expect("set");
         assert_eq!(entry.get_password().unwrap(), "unit-test-secret");
         entry.delete_credential().expect("delete");
-        assert!(matches!(
-            entry.get_password(),
-            Err(keyring::Error::NoEntry)
-        ));
+        assert!(matches!(entry.get_password(), Err(keyring::Error::NoEntry)));
     }
 
     #[test]
     fn soft_probe_does_not_require_write() {
         // Soft probe must not create credentials; leftover probe accounts should stay absent.
         let _ = probe_keychain();
-        if let Ok(entry) =
-            keyring::Entry::new(KEYRING_SERVICE, "__sunsetz_keychain_probe__")
-        {
+        if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, "__sunsetz_keychain_probe__") {
             // After soft probe, either NoEntry or we cleaned a legacy probe write.
             match entry.get_password() {
                 Err(keyring::Error::NoEntry) => {}
@@ -778,10 +796,7 @@ mod tests {
 
     #[test]
     fn file_write_preserves_keys_when_using_full_payload() {
-        let tmp = std::env::temp_dir().join(format!(
-            "sunsetz-secrets-file-{}",
-            std::process::id()
-        ));
+        let tmp = std::env::temp_dir().join(format!("sunsetz-secrets-file-{}", std::process::id()));
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(&tmp).unwrap();
         let path = tmp.join("secrets.json");

@@ -49,11 +49,13 @@ Run only the Web UI:
 pnpm dev:ui
 ```
 
-Use the local mock Runtime:
+For UI-only smoke tests you can use the local mock Runtime (it does not read the project or run tools):
 
 ```bash
 SUNSETZ_ACP=mock pnpm dev
 ```
+
+For real local work, run `pnpm dev` and add a model in Settings → My models. The default kernel is the in-app `agent_loop`; Grok CLI is not required.
 
 Set `SUNSETZ_HOME` to override the application data directory.
 

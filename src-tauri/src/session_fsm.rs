@@ -258,10 +258,7 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(fsm.state(), SessionState::Disconnected);
-        assert_eq!(
-            fsm.last_error().unwrap().code,
-            AgentErrorCode::CliNotFound
-        );
+        assert_eq!(fsm.last_error().unwrap().code, AgentErrorCode::CliNotFound);
     }
 
     #[test]
@@ -278,9 +275,6 @@ mod tests {
         fsm.begin_stream().unwrap();
         fsm.crash("mock agent crashed").unwrap();
         assert_eq!(fsm.state(), SessionState::Disconnected);
-        assert_eq!(
-            fsm.last_error().unwrap().code,
-            AgentErrorCode::AgentCrashed
-        );
+        assert_eq!(fsm.last_error().unwrap().code, AgentErrorCode::AgentCrashed);
     }
 }

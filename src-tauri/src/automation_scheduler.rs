@@ -391,12 +391,8 @@ fn replace_interrupted_claim_in_ledger(
         return Err("another automation claim is still active".into());
     }
 
-    let mut replacement = new_claim_entry(
-        &original.automation_id,
-        original.scheduled_for,
-        now,
-        true,
-    );
+    let mut replacement =
+        new_claim_entry(&original.automation_id, original.scheduled_for, now, true);
     replacement.replaces_claim_id = Some(original.claim_id.clone());
     ledger[original_index].replacement_claim_id = Some(replacement.claim_id.clone());
     ledger.push(replacement.clone());
@@ -431,8 +427,9 @@ fn claim_occurrence_in_ledger(
             trim_ledger(ledger);
             return LedgerClaimDecision::Suppressed;
         }
-        if let Some(original_id) = retryable_interrupted_original(ledger, automation_id, scheduled_for)
-            .map(|entry| entry.claim_id.clone())
+        if let Some(original_id) =
+            retryable_interrupted_original(ledger, automation_id, scheduled_for)
+                .map(|entry| entry.claim_id.clone())
         {
             match replace_interrupted_claim_in_ledger(ledger, &original_id, now) {
                 Ok(replacement) => return LedgerClaimDecision::Claimed(replacement),
@@ -704,7 +701,8 @@ fn apply_runtime_heartbeat_v1(
     if heartbeat.runtime_session_sequence == 0 {
         return Err("runtime session sequence must be positive".into());
     }
-    if !valid_process_id(&heartbeat.process_id) || heartbeat.process_id.trim() != heartbeat.process_id
+    if !valid_process_id(&heartbeat.process_id)
+        || heartbeat.process_id.trim() != heartbeat.process_id
     {
         return Err("invalid automation process id".into());
     }
@@ -1446,7 +1444,10 @@ mod tests {
             true,
         ));
         assert_eq!(ledger.len(), 2);
-        assert_eq!(replacement.replaces_claim_id.as_deref(), Some("crashed-claim"));
+        assert_eq!(
+            replacement.replaces_claim_id.as_deref(),
+            Some("crashed-claim")
+        );
         assert_eq!(
             ledger[0].replacement_claim_id.as_deref(),
             Some(replacement.claim_id.as_str())
@@ -1513,8 +1514,12 @@ mod tests {
         claim.claim_id = "original".into();
         claim.session_id = Some("runtime-session".into());
         let mut ledger = vec![claim];
-        apply_runtime_heartbeat_v1(&mut ledger, &heartbeat("original", "runtime-session", 1), now)
-            .unwrap();
+        apply_runtime_heartbeat_v1(
+            &mut ledger,
+            &heartbeat("original", "runtime-session", 1),
+            now,
+        )
+        .unwrap();
         apply_process_termination_in_ledger(
             &mut ledger,
             "runtime-session",
@@ -1532,8 +1537,7 @@ mod tests {
             MissedRunPolicyV2::RunOnce,
             true,
         ));
-        let late = complete_entry_in_ledger(&mut ledger, "original", true, None, now)
-            .unwrap_err();
+        let late = complete_entry_in_ledger(&mut ledger, "original", true, None, now).unwrap_err();
         assert!(late.contains("replaced"));
         assert_eq!(ledger[0].status, AutomationRunStatusV1::Interrupted);
     }

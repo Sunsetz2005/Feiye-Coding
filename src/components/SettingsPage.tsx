@@ -26,6 +26,7 @@ import {
   IconSearch,
   IconSettings,
   IconShield,
+  IconSparkles,
   IconTrash,
   IconUser,
 } from "@/components/icons";
@@ -62,6 +63,10 @@ import {
   normalizeSandboxProfile,
   sandboxStateMessageKey,
 } from "@/lib/runtimeMigrationUi";
+import {
+  isDeveloperMockBackend,
+  isLegacyGrokBackend,
+} from "@/lib/session";
 
 export type { SettingsSectionId } from "@/lib/settingsRegistry";
 
@@ -104,6 +109,9 @@ export interface SettingsPageProps {
   /** API mode: loopback ACP server `localhost:port` (empty = local CLI spawn). */
   acpServerAddr: string;
   onAcpServerAddr: (v: string) => void;
+  /** Live session kernel: `sunsetz`, `mock_acp`, or `grok_agent_stdio`. */
+  kernelBackend?: string;
+  onKernelBackend?: (v: "sunsetz" | "grok_acp") => void;
   /** Max warm/live agent processes (I02). */
   maxConcurrentAgents?: number;
   onMaxConcurrentAgents?: (v: number) => void;
@@ -179,6 +187,7 @@ function NavIcon({
 }) {
   if (name === "appearance") return <IconAppearance size={size} />;
   if (name === "user") return <IconUser size={size} />;
+  if (name === "models") return <IconSparkles size={size} />;
   if (name === "archive") return <IconArchive size={size} />;
   if (name === "extensions") return <IconPuzzle size={size} />;
   if (name === "doctor") return <IconDoctor size={size} />;
@@ -389,6 +398,8 @@ export function SettingsPage({
   onCliBlur,
   acpServerAddr,
   onAcpServerAddr,
+  kernelBackend = "sunsetz",
+  onKernelBackend,
   maxConcurrentAgents = 3,
   onMaxConcurrentAgents,
   agentIdleMinutes = 30,
@@ -433,8 +444,8 @@ export function SettingsPage({
   onUseMemoryContext,
 }: SettingsPageProps) {
   const [query, setQuery] = useState("");
-  const [accountTab, setAccountTab] = useState<"official" | "providers">(
-    "official",
+  const [legacyRuntimeOpen, setLegacyRuntimeOpen] = useState(
+    () => acpServerAddr.trim().length > 0,
   );
   const [editors, setEditors] = useState<DetectedEditor[]>([]);
   const [runtimeCapabilities, setRuntimeCapabilities] =
@@ -454,6 +465,8 @@ export function SettingsPage({
     box: MarqueeBox;
     pointerId: number;
   } | null>(null);
+  const mockKernel = isDeveloperMockBackend(kernelBackend);
+  const legacyKernel = isLegacyGrokBackend(kernelBackend);
   // Full catalog via createT — do not depend on App's partial `labels` whitelist
   // (missing keys used to render raw "settings.acpServer" etc.).
   const tr = useMemo(() => createT(resolveLocale(locale)), [locale]);
@@ -1003,54 +1016,25 @@ export function SettingsPage({
           </div>
         )}
 
+        {section === "models" && (
+          <>
+            <p className="settings-page__lead">{t("settings.models.lead")}</p>
+            <ProvidersPanel
+              locale={resolveLocale(locale)}
+              officialAvailable={
+                !!(
+                  account?.profile?.signedIn ||
+                  account?.cliAuthPresent ||
+                  account?.hasOfficialKey
+                )
+              }
+              onProviderActivated={onProviderActivated}
+            />
+          </>
+        )}
+
         {section === "account" && (
           <>
-            <div className="settings-account-tabs" role="tablist">
-              <div className="settings-seg settings-seg--lg" role="presentation">
-                <button
-                  type="button"
-                  role="tab"
-                  className={
-                    "settings-seg__btn" +
-                    (accountTab === "official" ? " is-on" : "")
-                  }
-                  aria-selected={accountTab === "official"}
-                  onClick={() => setAccountTab("official")}
-                >
-                  {t("settings.tabOfficial")}
-                </button>
-                <button
-                  type="button"
-                  role="tab"
-                  className={
-                    "settings-seg__btn" +
-                    (accountTab === "providers" ? " is-on" : "")
-                  }
-                  aria-selected={accountTab === "providers"}
-                  onClick={() => setAccountTab("providers")}
-                >
-                  {t("settings.tabProviders")}
-                </button>
-              </div>
-              {accountTab === "official" ? (
-                <p className="settings-account-tabs__hint">
-                  {t("settings.tabOfficialHint")}
-                </p>
-              ) : null}
-            </div>
-            {accountTab === "providers" ? (
-              <ProvidersPanel
-                locale={resolveLocale(locale)}
-                officialAvailable={
-                  !!(
-                    account?.profile?.signedIn ||
-                    account?.cliAuthPresent ||
-                    account?.hasOfficialKey
-                  )
-                }
-                onProviderActivated={onProviderActivated}
-              />
-            ) : (
           <AccountPanel
             status={account}
             loading={accountLoading}
@@ -1134,7 +1118,6 @@ export function SettingsPage({
             onRemoveAccount={onRemoveAccount}
             onImportChat={onImportChat}
           />
-            )}
           </>
         )}
 
@@ -1324,7 +1307,7 @@ export function SettingsPage({
             locale={resolveLocale(locale)}
             projectPath={projectPath}
             activeSessionId={activeSessionId}
-            cliFound={cliInfo.found}
+            cliFound={!legacyKernel || cliInfo.found}
             onOpenRuntime={() => onSection("runtime")}
             onSkillsPrefsChanged={onSkillsPrefsChanged}
           />
@@ -1332,6 +1315,51 @@ export function SettingsPage({
 
         {section === "runtime" && (
           <div className="settings-card">
+            <p className="settings-page__lead">{t("settings.runtime.lead")}</p>
+            <div className="settings-row settings-row--stack">
+              <div className="settings-row__text">
+                <div className="settings-row__label">
+                  {mockKernel
+                    ? t("settings.runtime.kernelMock")
+                    : legacyKernel
+                      ? t("settings.runtime.kernelLegacy")
+                      : t("settings.runtime.kernel")}
+                </div>
+                <div className="settings-row__desc">
+                  {mockKernel
+                    ? t("settings.runtime.kernelMockDesc")
+                    : legacyKernel
+                      ? t("settings.runtime.kernelLegacyDesc")
+                      : t("settings.runtime.kernelDesc")}
+                </div>
+              </div>
+              {legacyKernel && !mockKernel ? (
+                <button
+                  type="button"
+                  className="btn btn--primary btn--sm"
+                  onClick={() => onKernelBackend?.("sunsetz")}
+                >
+                  {t("settings.runtime.useBuiltIn")}
+                </button>
+              ) : null}
+            </div>
+            <details
+              className="settings-legacy"
+              open={legacyRuntimeOpen}
+              onToggle={(event) =>
+                setLegacyRuntimeOpen(
+                  (event.currentTarget as HTMLDetailsElement).open,
+                )
+              }
+            >
+              <summary className="settings-legacy__summary">
+                <span className="settings-row__label">
+                  {t("settings.runtime.legacy")}
+                </span>
+                <span className="settings-row__desc">
+                  {t("settings.runtime.legacyDesc")}
+                </span>
+              </summary>
             <div className="settings-row settings-row--stack">
               <div className="settings-row__text">
                 <div className="settings-row__label">
@@ -1366,6 +1394,23 @@ export function SettingsPage({
               onChange={onAcpServerAddr}
               t={t}
             />
+            {!legacyKernel && !mockKernel ? (
+              <div className="settings-row">
+                <div className="settings-row__text">
+                  <div className="settings-row__label">
+                    {t("settings.runtime.useLegacy")}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  className="btn btn--ghost btn--sm"
+                  onClick={() => onKernelBackend?.("grok_acp")}
+                >
+                  {t("settings.runtime.useLegacy")}
+                </button>
+              </div>
+            ) : null}
+            </details>
             <div className="settings-row settings-row--stack">
               <div className="settings-row__text">
                 <div className="settings-row__label">

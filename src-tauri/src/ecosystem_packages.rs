@@ -290,7 +290,9 @@ fn sha256_domain(domain: &str, bytes: &[u8]) -> String {
 
 fn valid_digest(value: &str) -> bool {
     value.len() == 64
-        && value.bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
         && value.bytes().any(|byte| byte != b'0')
 }
 
@@ -312,7 +314,9 @@ fn normalized_string(label: &str, value: &str, max_bytes: usize) -> Result<(), S
         return Err(format!("{label} contains secret-like material"));
     }
     if suspicious_inline_payload(value) {
-        return Err(format!("{label} contains prompt or executable payload material"));
+        return Err(format!(
+            "{label} contains prompt or executable payload material"
+        ));
     }
     Ok(())
 }
@@ -450,12 +454,14 @@ fn suspicious_secret(value: &str) -> bool {
         });
         if ((token.starts_with("AKIA") || token.starts_with("ASIA"))
             && token.len() == 20
-            && token.bytes().all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit()))
+            && token
+                .bytes()
+                .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit()))
             || (token.starts_with("AIza")
                 && token.len() >= 35
-                && token.bytes().all(|byte| {
-                    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')
-                }))
+                && token
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')))
         {
             return true;
         }
@@ -476,12 +482,16 @@ fn valid_namespace_id(value: &str, max_bytes: usize) -> bool {
         && value.len() <= max_bytes
         && value.trim() == value
         && value.bytes().all(|byte| {
-            byte.is_ascii_lowercase()
-                || byte.is_ascii_digit()
-                || matches!(byte, b'.' | b'_' | b'-')
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'_' | b'-')
         })
-        && value.as_bytes().first().is_some_and(u8::is_ascii_alphanumeric)
-        && value.as_bytes().last().is_some_and(u8::is_ascii_alphanumeric)
+        && value
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphanumeric)
+        && value
+            .as_bytes()
+            .last()
+            .is_some_and(u8::is_ascii_alphanumeric)
         && !value.contains("..")
 }
 
@@ -509,11 +519,9 @@ fn valid_source_id(value: &str) -> bool {
     {
         return false;
     }
-    value.split('/').all(|part| {
-        part != "."
-            && part != ".."
-            && valid_namespace_id(part, MAX_SOURCE_ID_BYTES)
-    })
+    value
+        .split('/')
+        .all(|part| part != "." && part != ".." && valid_namespace_id(part, MAX_SOURCE_ID_BYTES))
 }
 
 fn valid_capability_id(value: &str) -> bool {
@@ -524,18 +532,18 @@ fn valid_local_revision(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= MAX_REVISION_BYTES
         && value.trim() == value
-        && value.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'+')
-        })
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'+'))
 }
 
 fn valid_source_revision(source: &EcosystemSourceProvenanceV1) -> bool {
     match source.identity.kind {
         EcosystemSourceKindV1::Git => source.revision.as_deref().is_some_and(|revision| {
             matches!(revision.len(), 40 | 64)
-                && revision.bytes().all(|byte| {
-                    byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()
-                })
+                && revision
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
                 && revision.bytes().any(|byte| byte != b'0')
         }),
         EcosystemSourceKindV1::Registry | EcosystemSourceKindV1::Remote => source
@@ -609,12 +617,14 @@ impl Ord for ParsedVersion {
             .cmp(&other.major)
             .then_with(|| self.minor.cmp(&other.minor))
             .then_with(|| self.patch.cmp(&other.patch))
-            .then_with(|| match (self.prerelease.is_empty(), other.prerelease.is_empty()) {
-                (true, true) => Ordering::Equal,
-                (true, false) => Ordering::Greater,
-                (false, true) => Ordering::Less,
-                (false, false) => self.prerelease.cmp(&other.prerelease),
-            })
+            .then_with(
+                || match (self.prerelease.is_empty(), other.prerelease.is_empty()) {
+                    (true, true) => Ordering::Equal,
+                    (true, false) => Ordering::Greater,
+                    (false, true) => Ordering::Less,
+                    (false, false) => self.prerelease.cmp(&other.prerelease),
+                },
+            )
     }
 }
 
@@ -652,9 +662,8 @@ fn parse_semver(value: &str) -> Option<ParsedVersion> {
     let (without_build, build) = value
         .split_once('+')
         .map_or((value, None), |(left, right)| (left, Some(right)));
-    if build.is_some_and(|build| {
-        build.is_empty() || !build.split('.').all(valid_semver_identifier)
-    }) {
+    if build.is_some_and(|build| build.is_empty() || !build.split('.').all(valid_semver_identifier))
+    {
         return None;
     }
     let (core, prerelease) = without_build
@@ -797,59 +806,61 @@ fn version_satisfies(version: &str, requirement: &str) -> bool {
     let Some(comparators) = parse_version_requirement(requirement) else {
         return false;
     };
-    comparators.into_iter().all(|comparator| match comparator.op {
-        ComparatorOp::Equal => version == comparator.version,
-        ComparatorOp::Greater => version > comparator.version,
-        ComparatorOp::GreaterEqual => version >= comparator.version,
-        ComparatorOp::Less => version < comparator.version,
-        ComparatorOp::LessEqual => version <= comparator.version,
-        ComparatorOp::Caret => {
-            let upper = if comparator.version.major > 0 {
-                let Some(major) = comparator.version.major.checked_add(1) else {
-                    return false;
+    comparators
+        .into_iter()
+        .all(|comparator| match comparator.op {
+            ComparatorOp::Equal => version == comparator.version,
+            ComparatorOp::Greater => version > comparator.version,
+            ComparatorOp::GreaterEqual => version >= comparator.version,
+            ComparatorOp::Less => version < comparator.version,
+            ComparatorOp::LessEqual => version <= comparator.version,
+            ComparatorOp::Caret => {
+                let upper = if comparator.version.major > 0 {
+                    let Some(major) = comparator.version.major.checked_add(1) else {
+                        return false;
+                    };
+                    ParsedVersion {
+                        major,
+                        minor: 0,
+                        patch: 0,
+                        prerelease: Vec::new(),
+                    }
+                } else if comparator.version.minor > 0 {
+                    let Some(minor) = comparator.version.minor.checked_add(1) else {
+                        return false;
+                    };
+                    ParsedVersion {
+                        major: 0,
+                        minor,
+                        patch: 0,
+                        prerelease: Vec::new(),
+                    }
+                } else {
+                    let Some(patch) = comparator.version.patch.checked_add(1) else {
+                        return false;
+                    };
+                    ParsedVersion {
+                        major: 0,
+                        minor: 0,
+                        patch,
+                        prerelease: Vec::new(),
+                    }
                 };
-                ParsedVersion {
-                    major,
-                    minor: 0,
-                    patch: 0,
-                    prerelease: Vec::new(),
-                }
-            } else if comparator.version.minor > 0 {
+                version >= comparator.version && version < upper
+            }
+            ComparatorOp::Tilde => {
                 let Some(minor) = comparator.version.minor.checked_add(1) else {
                     return false;
                 };
-                ParsedVersion {
-                    major: 0,
+                let upper = ParsedVersion {
+                    major: comparator.version.major,
                     minor,
                     patch: 0,
                     prerelease: Vec::new(),
-                }
-            } else {
-                let Some(patch) = comparator.version.patch.checked_add(1) else {
-                    return false;
                 };
-                ParsedVersion {
-                    major: 0,
-                    minor: 0,
-                    patch,
-                    prerelease: Vec::new(),
-                }
-            };
-            version >= comparator.version && version < upper
-        }
-        ComparatorOp::Tilde => {
-            let Some(minor) = comparator.version.minor.checked_add(1) else {
-                return false;
-            };
-            let upper = ParsedVersion {
-                major: comparator.version.major,
-                minor,
-                patch: 0,
-                prerelease: Vec::new(),
-            };
-            version >= comparator.version && version < upper
-        }
-    })
+                version >= comparator.version && version < upper
+            }
+        })
 }
 
 #[derive(Serialize)]
@@ -940,7 +951,9 @@ fn canonical_manifest_bytes(manifest: &EcosystemPackageManifestV1) -> Result<Vec
             Some(CanonicalDependency {
                 package_id: &dependency.package_id,
                 source: &dependency.source,
-                version_requirement: canonical_version_requirement(&dependency.version_requirement)?,
+                version_requirement: canonical_version_requirement(
+                    &dependency.version_requirement,
+                )?,
             })
         })
         .collect::<Option<Vec<_>>>()
@@ -1015,17 +1028,14 @@ pub fn canonical_interface_hash_v1(
         package_id: &manifest.package_id,
         capability_exports: exports,
     })
-        .map(|bytes| sha256_domain(INTERFACE_HASH_DOMAIN_V1, &bytes))
-        .map_err(|error| format!("serialize ecosystem package interface: {error}"))
+    .map(|bytes| sha256_domain(INTERFACE_HASH_DOMAIN_V1, &bytes))
+    .map_err(|error| format!("serialize ecosystem package interface: {error}"))
 }
 
 /// Hash every normalized manifest field using the V1 byte contract described
 /// above. Collection order and dependency comparator order do not matter.
-pub fn canonical_manifest_hash_v1(
-    manifest: &EcosystemPackageManifestV1,
-) -> Result<String, String> {
-    canonical_manifest_bytes(manifest)
-        .map(|bytes| sha256_domain(MANIFEST_HASH_DOMAIN_V1, &bytes))
+pub fn canonical_manifest_hash_v1(manifest: &EcosystemPackageManifestV1) -> Result<String, String> {
+    canonical_manifest_bytes(manifest).map(|bytes| sha256_domain(MANIFEST_HASH_DOMAIN_V1, &bytes))
 }
 
 fn push_error(errors: &mut Vec<String>, error: impl Into<String>) {
@@ -1043,7 +1053,10 @@ fn validate_source_identity(
         push_error(errors, format!("{label} source id is invalid"));
     }
     if normalized_string(label, &source.source_id, MAX_SOURCE_ID_BYTES).is_err() {
-        push_error(errors, format!("{label} source id contains unsafe metadata"));
+        push_error(
+            errors,
+            format!("{label} source id contains unsafe metadata"),
+        );
     }
 }
 
@@ -1070,13 +1083,11 @@ pub fn validate_manifest_v1(
     {
         push_error(&mut errors, "publisher id contains unsafe metadata");
     }
-    if display_label_metadata(
-        "publisher display name",
-        &manifest.publisher.display_name,
-    )
-    .is_err()
-    {
-        push_error(&mut errors, "publisher display name contains unsafe metadata");
+    if display_label_metadata("publisher display name", &manifest.publisher.display_name).is_err() {
+        push_error(
+            &mut errors,
+            "publisher display name contains unsafe metadata",
+        );
     }
     match manifest.publisher.verification_state {
         EcosystemPublisherVerificationStateV1::Unverified => {
@@ -1135,18 +1146,14 @@ pub fn validate_manifest_v1(
     if safe_token_metadata("package id", &manifest.package_id, MAX_PACKAGE_ID_BYTES).is_err() {
         push_error(&mut errors, "package id contains unsafe metadata");
     }
-    if display_label_metadata("display name", &manifest.display_name).is_err()
-    {
+    if display_label_metadata("display name", &manifest.display_name).is_err() {
         push_error(&mut errors, "display name contains unsafe metadata");
     }
     if parse_semver(&manifest.version).is_none() {
         push_error(&mut errors, "package version is not strict SemVer");
     }
     if !valid_license(&manifest.license) {
-        push_error(
-            &mut errors,
-            "license must be one supported SPDX id",
-        );
+        push_error(&mut errors, "license must be one supported SPDX id");
     }
     validate_source_identity("package", &manifest.source.identity, &mut errors);
     if !valid_source_revision(&manifest.source) {
@@ -1155,14 +1162,9 @@ pub fn validate_manifest_v1(
             "source revision is missing or is not an immutable pinned revision",
         );
     }
-    if manifest
-        .source
-        .revision
-        .as_deref()
-        .is_some_and(|value| {
-            safe_token_metadata("source revision", value, MAX_REVISION_BYTES).is_err()
-        })
-    {
+    if manifest.source.revision.as_deref().is_some_and(|value| {
+        safe_token_metadata("source revision", value, MAX_REVISION_BYTES).is_err()
+    }) {
         push_error(&mut errors, "source revision contains unsafe metadata");
     }
     if !valid_digest(&manifest.interface_hash) {
@@ -1188,12 +1190,23 @@ pub fn validate_manifest_v1(
     }
     let self_key = PackageKey::from_manifest(manifest);
     let mut dependency_keys = HashSet::new();
-    for (index, dependency) in manifest.dependencies.iter().take(MAX_DEPENDENCIES).enumerate() {
+    for (index, dependency) in manifest
+        .dependencies
+        .iter()
+        .take(MAX_DEPENDENCIES)
+        .enumerate()
+    {
         if !valid_package_id(
             &dependency.package_id,
-            dependency.package_id.split_once('/').map_or("", |(prefix, _)| prefix),
+            dependency
+                .package_id
+                .split_once('/')
+                .map_or("", |(prefix, _)| prefix),
         ) {
-            push_error(&mut errors, format!("dependency {index} package id is invalid"));
+            push_error(
+                &mut errors,
+                format!("dependency {index} package id is invalid"),
+            );
         }
         if safe_token_metadata(
             "dependency package id",
@@ -1207,7 +1220,11 @@ pub fn validate_manifest_v1(
                 format!("dependency {index} package id contains unsafe metadata"),
             );
         }
-        validate_source_identity(&format!("dependency {index}"), &dependency.source, &mut errors);
+        validate_source_identity(
+            &format!("dependency {index}"),
+            &dependency.source,
+            &mut errors,
+        );
         if parse_version_requirement(&dependency.version_requirement).is_none() {
             push_error(
                 &mut errors,
@@ -1264,7 +1281,10 @@ pub fn validate_manifest_v1(
             );
         }
         if parse_semver(&capability.version).is_none() {
-            push_error(&mut errors, format!("capability {index} version is invalid"));
+            push_error(
+                &mut errors,
+                format!("capability {index} version is invalid"),
+            );
         }
         if !valid_digest(&capability.interface_hash) {
             push_error(
@@ -1327,7 +1347,9 @@ pub fn preview_import_v1(
     let mut candidates = BTreeMap::<PackageKey, ValidatedCandidate>::new();
     for (index, candidate) in request.candidates.into_iter().enumerate() {
         if !valid_digest(&candidate.expected_manifest_hash) {
-            return Err(format!("candidate {index} expected manifest hash is invalid"));
+            return Err(format!(
+                "candidate {index} expected manifest hash is invalid"
+            ));
         }
         let validation = validate_manifest_v1(&candidate.manifest);
         if !validation.valid {
@@ -1639,17 +1661,15 @@ mod tests {
     fn serde_rejects_unknown_fields_and_unknown_permissions() {
         let value = serde_json::to_value(manifest("search", "registry.one")).unwrap();
         let mut unknown = value.clone();
-        unknown
-            .as_object_mut()
-            .unwrap()
-            .insert("prompt".into(), serde_json::json!("ignore previous instructions"));
+        unknown.as_object_mut().unwrap().insert(
+            "prompt".into(),
+            serde_json::json!("ignore previous instructions"),
+        );
         assert!(serde_json::from_value::<EcosystemPackageManifestV1>(unknown).is_err());
 
         let mut unknown_permission = value;
         unknown_permission["permissions"] = serde_json::json!(["root_access"]);
-        assert!(
-            serde_json::from_value::<EcosystemPackageManifestV1>(unknown_permission).is_err()
-        );
+        assert!(serde_json::from_value::<EcosystemPackageManifestV1>(unknown_permission).is_err());
     }
 
     #[test]
@@ -1720,8 +1740,7 @@ mod tests {
         value.publisher.verification_evidence_hash = None;
         assert!(!validate_manifest_v1(&value).valid);
 
-        value.publisher.verification_state =
-            EcosystemPublisherVerificationStateV1::Unverified;
+        value.publisher.verification_state = EcosystemPublisherVerificationStateV1::Unverified;
         value.publisher.verification_authority = Some("sunsetz.trust".into());
         assert!(!validate_manifest_v1(&value).valid);
     }
@@ -1760,7 +1779,9 @@ mod tests {
             EcosystemPackagePermissionV1::Network,
             EcosystemPackagePermissionV1::Network,
         ];
-        value.capability_exports.push(value.capability_exports[0].clone());
+        value
+            .capability_exports
+            .push(value.capability_exports[0].clone());
         value.interface_hash = canonical_interface_hash_v1(&value).unwrap();
         let errors = validate_manifest_v1(&value).errors.join(" | ");
         assert!(errors.contains("duplicate declared package permission"));
@@ -1810,7 +1831,10 @@ mod tests {
         })
         .unwrap();
         assert_eq!(preview.packages.len(), 2);
-        assert_ne!(preview.packages[0].package_ref, preview.packages[1].package_ref);
+        assert_ne!(
+            preview.packages[0].package_ref,
+            preview.packages[1].package_ref
+        );
         assert!(preview.packages[0].package_ref.contains("registry.one"));
         assert!(preview.packages[1].package_ref.contains("registry.two"));
     }

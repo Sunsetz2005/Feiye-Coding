@@ -13,6 +13,7 @@ mod cli_install;
 mod cli_probe;
 mod cli_sessions;
 mod commands;
+mod connectors;
 mod context_usage;
 mod editors;
 mod error;
@@ -222,6 +223,7 @@ pub fn run() {
             commands::session_send,
             commands::session_send_v2,
             commands::session_stop,
+            commands::session_subagent_get,
             commands::session_disconnect,
             commands::session_reattach,
             commands::session_resolve_permission,
@@ -279,6 +281,7 @@ pub fn run() {
             commands::project_trust,
             commands::project_set_permission_policy,
             commands::project_rename,
+            commands::project_set_path,
             commands::project_set_pinned,
             commands::project_reveal,
             commands::project_archive_sessions,
@@ -389,6 +392,9 @@ pub fn run() {
             commands::providers_activate,
             commands::providers_ping,
             commands::providers_list_models,
+            commands::connectors_list,
+            commands::connectors_connect,
+            commands::connectors_disconnect,
             commands::editors_list,
             commands::open_in_editor,
         ])

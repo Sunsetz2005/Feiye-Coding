@@ -1,0 +1,3 @@
+# Public Google OAuth 2.0 Desktop client ID for Sunsetz (PKCE; not a secret).
+# Put the `.apps.googleusercontent.com` value on its own line for one-click
+# Gmail connect. Tests override with SUNSETZ_GOOGLE_OAUTH_CLIENT_ID.

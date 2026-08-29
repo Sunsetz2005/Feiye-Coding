@@ -170,11 +170,13 @@ fn parse_markdown_transcript(raw: &str) -> Result<Vec<(String, String)>, String>
                 || hl.starts_with("assistant")
             {
                 flush(&cur_role, &mut buf, &mut out);
-                cur_role = Some(if hl.contains("user") || hl.contains("human") || hl == "me" {
-                    "user".into()
-                } else {
-                    "assistant".into()
-                });
+                cur_role = Some(
+                    if hl.contains("user") || hl.contains("human") || hl == "me" {
+                        "user".into()
+                    } else {
+                        "assistant".into()
+                    },
+                );
                 continue;
             }
         }
@@ -232,17 +234,14 @@ pub fn import_transcript_as_session(
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .or_else(|| {
-            pairs
-                .iter()
-                .find(|(r, _)| r == "user")
-                .map(|(_, c)| {
-                    let line = c.lines().next().unwrap_or(c).trim();
-                    let mut t: String = line.chars().take(40).collect();
-                    if line.chars().count() > 40 {
-                        t.push('…');
-                    }
-                    t
-                })
+            pairs.iter().find(|(r, _)| r == "user").map(|(_, c)| {
+                let line = c.lines().next().unwrap_or(c).trim();
+                let mut t: String = line.chars().take(40).collect();
+                if line.chars().count() > 40 {
+                    t.push('…');
+                }
+                t
+            })
         })
         .unwrap_or_else(|| "Imported chat".into());
 

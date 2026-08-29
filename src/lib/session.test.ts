@@ -12,6 +12,8 @@ import {
   errorCopy,
   formatTurnErrorBody,
   splitThoughtPhases,
+  isDeveloperMockBackend,
+  isLegacyGrokBackend,
   isSessionBusy,
   parseCompactContent,
   parseToolStepContent,
@@ -684,5 +686,21 @@ describe("tool activity", () => {
       status: "in_progress",
     });
     expect(m[0]?.content).toBe("npm test");
+  });
+});
+
+describe("runtime backend labels", () => {
+  it("treats mock_acp as a developer stub, not the product kernel", () => {
+    expect(isDeveloperMockBackend("mock_acp")).toBe(true);
+    expect(isDeveloperMockBackend("mock")).toBe(true);
+    expect(isDeveloperMockBackend("sunsetz")).toBe(false);
+    expect(isDeveloperMockBackend("grok_acp")).toBe(false);
+  });
+
+  it("treats grok ACP identifiers as the legacy adapter", () => {
+    expect(isLegacyGrokBackend("grok_acp")).toBe(true);
+    expect(isLegacyGrokBackend("grok_agent_stdio")).toBe(true);
+    expect(isLegacyGrokBackend("sunsetz")).toBe(false);
+    expect(isLegacyGrokBackend("mock_acp")).toBe(false);
   });
 });

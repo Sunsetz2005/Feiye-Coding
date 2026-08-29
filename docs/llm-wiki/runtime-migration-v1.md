@@ -4,7 +4,7 @@
 
 `Tauri 工作台 → Host 会话层 → Sunsetz agent loop（默认）`
 
-默认不再 spawn `grok agent stdio`。Grok ACP 适配器保留在显式 legacy 开关后（`runtimeBackend=grok_acp` / `SUNSETZ_RUNTIME_BACKEND=grok_acp`），本切片不删除。Host 工具是可信项目根内的 `read_file`、`list_directory`、`write_file` 与 `run_command`。读写以外的写入和命令必须经过现有权限条（或明确自动放行策略）才执行；`AcceptEdits` 只自动放行根内 `write_file`，不能自动放行 `run_command`。权限预览只有相对路径加字节数，或精确命令加相对 cwd，不得带文件正文。逃出根目录、拒绝和 Stop 不得有副作用。`run_command` 本切片无沙箱，只靠信任根、权限闸、cwd 钉死和 60 秒超时。第三方项目只作为设计与契约研究材料；本轮没有复制 OpenWork `/ee` 或其他受限源码。
+默认不再 spawn `grok agent stdio`。Grok ACP 适配器保留在显式 legacy 开关后（`runtimeBackend=grok_acp` / `SUNSETZ_RUNTIME_BACKEND=grok_acp`），本切片不删除。Host 工具是可信项目根内的 `read_file`、`list_directory`、`grep`、`write_file`、`search_replace`、`run_command`，以及父会话的 `spawn_agent` / `agent_output` / `kill_agent`。`grep` 只读。子代理是同一进程内的 `run_turn`，深度上限 1，不 spawn grok、不创建 worktree。explore / plan 只有读工具；general 的写和命令走父会话同一条权限条。写入、替换和命令必须经过现有权限条（或明确自动放行策略）才执行；`AcceptEdits` 只自动放行根内 `write_file` / `search_replace`，不能自动放行 `run_command`。权限预览只有相对路径加字节数或替换次数，或精确命令加相对 cwd，不得带文件正文。相同工具加相同参数连续 3 次会被打断并把错误交回模型。逃出根目录、拒绝和 Stop 不得有副作用。`run_command` 本切片无沙箱，只靠信任根、权限闸、cwd 钉死和 60 秒超时。第三方项目只作为设计与契约研究材料；本轮没有复制 OpenWork `/ee` 或其他受限源码。
 
 ## 交互生命周期
 

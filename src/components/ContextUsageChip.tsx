@@ -1,8 +1,8 @@
 /**
  * Exact model context meter in the composer row.
  *
- * The compact ring opens only on deliberate click. Values come from
- * Runtime/provider telemetry; this component never estimates tokens.
+ * Compact ring: hover shows a three-line summary; click opens details.
+ * Values come from Runtime/provider telemetry; this never estimates tokens.
  */
 
 import {
@@ -43,6 +43,8 @@ export type ContextUsageChipLabels = {
   compactAction: string;
   auto: string;
   manual: string;
+  hoverUsedRemain: string;
+  hoverTokens: string;
 };
 
 type Props = {
@@ -87,6 +89,11 @@ function formatUpdatedAt(value: string | undefined): string {
   return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
+function roundedPercent(percent: number): number {
+  if (percent > 0 && percent < 1) return 0;
+  return Math.round(percent);
+}
+
 function ContextRing({
   percent,
   size,
@@ -96,39 +103,42 @@ function ContextRing({
   size: number;
   strokeWidth: number;
 }) {
-  const normalized =
-    percent == null || !Number.isFinite(percent)
-      ? 0
-      : Math.min(100, Math.max(0, percent));
-  const radius = 10 - strokeWidth / 2;
+  const hasValue = percent != null && Number.isFinite(percent);
+  const normalized = hasValue
+    ? Math.min(100, Math.max(0, percent))
+    : 0;
+  const radius = size / 2 - strokeWidth / 2;
   const circumference = 2 * Math.PI * radius;
   const offset = circumference * (1 - normalized / 100);
+  const center = size / 2;
   return (
     <svg
-      className={`ctx-ring${percent == null ? " is-unknown" : ""}`}
+      className={`ctx-ring${hasValue ? "" : " is-unknown"}`}
       width={size}
       height={size}
-      viewBox="0 0 20 20"
+      viewBox={`0 0 ${size} ${size}`}
       aria-hidden
     >
       <circle
         className="ctx-ring__track"
-        cx="10"
-        cy="10"
+        cx={center}
+        cy={center}
         r={radius}
         fill="none"
         strokeWidth={strokeWidth}
       />
-      <circle
-        className="ctx-ring__value"
-        cx="10"
-        cy="10"
-        r={radius}
-        fill="none"
-        strokeWidth={strokeWidth}
-        strokeDasharray={circumference}
-        strokeDashoffset={offset}
-      />
+      {hasValue ? (
+        <circle
+          className="ctx-ring__value"
+          cx={center}
+          cy={center}
+          r={radius}
+          fill="none"
+          strokeWidth={strokeWidth}
+          strokeDasharray={circumference}
+          strokeDashoffset={offset}
+        />
+      ) : null}
     </svg>
   );
 }
@@ -170,6 +180,28 @@ export function ContextUsageChip({
 
   const usedPercent = display.percentUsed;
   const percentLabel = formatPercent(usedPercent);
+  const usedRounded =
+    usedPercent == null || !Number.isFinite(usedPercent)
+      ? null
+      : roundedPercent(usedPercent);
+  const remainRounded =
+    usedRounded == null ? null : Math.max(0, 100 - usedRounded);
+  const hoverPercentLine =
+    usedRounded == null || remainRounded == null
+      ? null
+      : labels.hoverUsedRemain
+          .replace("{used}", String(usedRounded))
+          .replace("{remain}", String(remainRounded));
+  const hoverTokensLine =
+    display.source === "runtime" &&
+    display.tokens != null &&
+    display.contextWindowTokens != null
+      ? labels.hoverTokens
+          .replace("{used}", formatTokenCount(display.tokens))
+          .replace("{total}", formatTokenCount(display.contextWindowTokens))
+      : display.source === "runtime" && display.tokens != null
+        ? `${formatTokenCount(display.tokens)} ${labels.used}`
+        : labels.waiting;
   const accessibleLabel = useMemo(() => {
     if (display.source !== "runtime") return `${labels.aria}: ${labels.waiting}`;
     if (display.contextWindowTokens == null) {
@@ -181,12 +213,6 @@ export function ContextUsageChip({
     ? formatLastCompactDetail(display.lastCompact, labels)
     : labels.lastCompactNone;
   const runtime = display.runtime;
-  const summaryValue =
-    display.source === "runtime" && display.tokens != null
-      ? display.contextWindowTokens == null
-        ? `${formatTokenCount(display.tokens)} ${labels.used}`
-        : `${formatTokenCount(display.tokens)} / ${formatTokenCount(display.contextWindowTokens)}`
-      : labels.waiting;
 
   return (
     <div ref={rootRef} className={`ctx-chip${open ? " is-open" : ""}`}>
@@ -201,7 +227,7 @@ export function ContextUsageChip({
         aria-describedby={open ? undefined : summaryId}
         onClick={() => setOpen((value) => !value)}
       >
-        <ContextRing percent={usedPercent} size={20} strokeWidth={2.4} />
+        <ContextRing percent={usedPercent} size={14} strokeWidth={1.7} />
       </button>
       <div
         id={summaryId}
@@ -210,8 +236,10 @@ export function ContextUsageChip({
         aria-hidden={open || undefined}
       >
         <span className="ctx-chip__summary-label">{labels.menuTitle}</span>
-        <strong>{percentLabel}</strong>
-        <span>{summaryValue}</span>
+        {hoverPercentLine ? (
+          <strong>{hoverPercentLine}</strong>
+        ) : null}
+        <span>{hoverTokensLine}</span>
       </div>
       {open &&
         pos &&
@@ -226,7 +254,7 @@ export function ContextUsageChip({
           >
             <header className="ctx-chip__head">
               <div className="ctx-chip__hero-ring">
-                <ContextRing percent={usedPercent} size={34} strokeWidth={2} />
+                <ContextRing percent={usedPercent} size={28} strokeWidth={2} />
               </div>
               <div className="ctx-chip__hero-copy">
                 <h3>{labels.menuTitle}</h3>

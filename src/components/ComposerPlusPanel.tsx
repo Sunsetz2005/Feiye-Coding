@@ -24,6 +24,7 @@ import {
   IconCircleDashed,
   IconClipboardList,
   IconDoctor,
+  IconHandStop,
   IconNewChat,
   IconPlug,
   IconPuzzle,
@@ -49,6 +50,7 @@ export type ComposerPlusEntry =
         | "project"
         | "goal"
         | "plan"
+        | "ask"
         | "record-skill";
       title: string;
       description?: string;
@@ -56,7 +58,16 @@ export type ComposerPlusEntry =
       feedback?: boolean;
       disabled?: boolean;
     }
-  | { id: string; kind: "slash"; item: SlashItem };
+  | { id: string; kind: "slash"; item: SlashItem }
+  | {
+      id: string;
+      kind: "connector";
+      connectorId: string;
+      title: string;
+      description?: string;
+      connected: boolean;
+      disabled?: boolean;
+    };
 
 /** Visual row including section headers (headers are not in keyboard nav). */
 export type ComposerPlusRow =
@@ -151,6 +162,19 @@ export function buildComposerPlusRows(
       continue;
     }
 
+    if (entry.kind === "connector") {
+      if (!addedSkillSection) {
+        rows.push({
+          type: "section",
+          id: "sec-connectors",
+          label: labels.plugins ?? labels.skills,
+        });
+        addedSkillSection = true;
+      }
+      rows.push({ type: "entry", entry, navIndex: navIndex++ });
+      continue;
+    }
+
     if (entry.item.kind === "skill") {
       if (!addedSkillSection) {
         rows.push({
@@ -188,6 +212,8 @@ function composerActionIcon(
       return <IconTarget size={ICON_SIZE} />;
     case "plan":
       return <IconClipboardList size={ICON_SIZE} />;
+    case "ask":
+      return <IconHandStop size={ICON_SIZE} />;
     case "record-skill":
       return <IconActivity size={ICON_SIZE} />;
   }
@@ -225,12 +251,14 @@ export function ComposerPlusPanel({
   panelRef,
   entries,
   filterQuery,
+  filterLead = "/",
   skillsLoading,
   activeIndex,
   onActiveIndexChange,
   onSelectUpload,
   onSelectAction,
   onSelectSlash,
+  onSelectConnector,
   resolveTitle,
   resolveDescription,
 }: {
@@ -247,6 +275,7 @@ export function ComposerPlusPanel({
   entries: ComposerPlusEntry[];
   /** Live filter string (shown in header when non-empty). */
   filterQuery?: string;
+  filterLead?: "/" | "@";
   skillsLoading?: boolean;
   activeIndex: number;
   onActiveIndexChange: (i: number) => void;
@@ -255,6 +284,9 @@ export function ComposerPlusPanel({
     entry: Extract<ComposerPlusEntry, { kind: "action" }>,
   ) => void;
   onSelectSlash: (item: SlashItem) => void;
+  onSelectConnector?: (
+    entry: Extract<ComposerPlusEntry, { kind: "connector" }>,
+  ) => void;
   resolveTitle: (item: SlashItem) => string;
   resolveDescription: (item: SlashItem) => string;
 }) {
@@ -327,7 +359,7 @@ export function ComposerPlusPanel({
     >
       {mode === "slash" && q ? (
         <div className="composer-plus__filter" aria-live="polite">
-          <span className="composer-plus__filter-label">/</span>
+          <span className="composer-plus__filter-label">{filterLead}</span>
           <span className="composer-plus__filter-q">{q}</span>
           <span className="composer-plus__filter-count">
             {entries.length}
@@ -423,6 +455,37 @@ export function ComposerPlusPanel({
                   {entry.description}
                 </span>
               ) : null}
+            </button>
+          );
+        }
+
+        if (entry.kind === "connector") {
+          return (
+            <button
+              key={`${entry.id}-${navIndex}`}
+              id={`plus-opt-${navIndex}`}
+              type="button"
+              role={mode === "slash" ? "option" : "menuitem"}
+              aria-selected={mode === "slash" ? active : undefined}
+              aria-disabled={entry.disabled || undefined}
+              disabled={entry.disabled}
+              data-plus-idx={navIndex}
+              className={
+                "composer-plus__item" +
+                (active ? " is-active" : "") +
+                (entry.disabled ? " is-disabled" : "")
+              }
+              onMouseEnter={() => onActiveIndexChange(navIndex)}
+              onClick={() => onSelectConnector?.(entry)}
+            >
+              <span className="composer-plus__ico" aria-hidden>
+                <IconPlug size={ICON_SIZE} />
+              </span>
+              <span className="composer-plus__title">{entry.title}</span>
+              <span className="composer-plus__desc">
+                {entry.description ??
+                  (entry.connected ? `@${entry.connectorId}` : "")}
+              </span>
             </button>
           );
         }

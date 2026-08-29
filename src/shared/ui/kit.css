@@ -1,0 +1,149 @@
+/* Production kit — tokens only, Apple press, reduced-motion. */
+
+.ui-banner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  pointer-events: auto;
+}
+
+.ui-banner__body {
+  min-width: 0;
+}
+
+.ui-banner[data-tone="warning"] {
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--glass-border));
+}
+
+.ui-banner[data-tone="danger"] {
+  border-color: color-mix(in srgb, var(--danger) 40%, var(--glass-border));
+}
+
+.ui-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 32px 20px;
+  text-align: center;
+  color: var(--text-secondary);
+}
+
+.ui-empty__title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.ui-empty__desc {
+  margin: 0;
+  max-width: 36rem;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.ui-skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 8px 0;
+}
+
+.ui-skeleton__line,
+.ui-skeleton__media {
+  border-radius: 8px;
+  background: var(--bg-hover);
+}
+
+.ui-skeleton__line {
+  height: 12px;
+}
+
+.ui-skeleton__media {
+  width: 48px;
+  height: 48px;
+  border-radius: 12px;
+}
+
+.ui-search {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.ui-search__label {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.ui-search__input {
+  height: 36px;
+  width: 100%;
+  border-radius: 10px;
+  border: 0.5px solid var(--border-subtle);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  padding: 0 12px;
+  font-size: 13px;
+}
+
+.ui-search__input:focus-visible {
+  outline: none;
+  border-color: var(--border-strong);
+}
+
+.ui-segment {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 10px;
+  background: var(--bg-hover);
+}
+
+.ui-segment__tab {
+  height: 28px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 13px;
+  cursor: pointer;
+  transition:
+    transform 100ms var(--ease-press),
+    background-color 100ms var(--ease-press);
+}
+
+.ui-segment__tab.is-active {
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+}
+
+.ui-segment__tab:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--border-focus);
+}
+
+.ui-segment__tab:active {
+  transform: scale(0.98);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ui-btn,
+  .ui-icon-btn,
+  .ui-chip,
+  .ui-segment__tab {
+    transition: opacity 120ms ease;
+    transform: none !important;
+  }
+  .ui-btn:active,
+  .ui-icon-btn:active,
+  .ui-chip:active,
+  .ui-segment__tab:active {
+    transform: none !important;
+    opacity: 0.86;
+  }
+}

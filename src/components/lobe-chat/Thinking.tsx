@@ -26,6 +26,7 @@ export function Thinking({
   locale = "zh",
   expandPref,
   onExpandPrefChange,
+  showLiveDot = true,
 }: {
   content?: string | ReactNode;
   thinking?: boolean;
@@ -39,6 +40,8 @@ export function Thinking({
   /** Override stored preference (tests / parent). */
   expandPref?: ThinkingExpandPref;
   onExpandPrefChange?: (pref: ThinkingExpandPref) => void;
+  /** Hide the pulsing dot when a tail status pill already marks the live turn. */
+  showLiveDot?: boolean;
 }) {
   const pref = expandPref ?? loadThinkingExpandPref();
   const [open, setOpen] = useState(() =>
@@ -99,12 +102,14 @@ export function Thinking({
         aria-expanded={open}
         onClick={toggle}
       >
-        <span
-          className={cn(
-            "lobe-chat-thinking__dot",
-            thinking && "lobe-chat-thinking__dot--live",
-          )}
-        />
+        {showLiveDot ? (
+          <span
+            className={cn(
+              "lobe-chat-thinking__dot",
+              thinking && "lobe-chat-thinking__dot--live",
+            )}
+          />
+        ) : null}
         {thinking ? (
           <span style={{ color: "var(--lobe-color-text-secondary)" }}>
             {streamingLabel}

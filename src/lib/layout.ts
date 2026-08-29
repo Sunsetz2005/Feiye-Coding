@@ -5,6 +5,9 @@
 
 export const LAYOUT_STORAGE_KEY = "sunsetz.layout";
 
+export type SidebarGroupBy = "project" | "list";
+export type SidebarSessionSort = "recent" | "priority";
+
 export interface LayoutPrefs {
   sidebarWidth: number;
   asideWidth: number;
@@ -12,6 +15,10 @@ export interface LayoutPrefs {
   asideCollapsed: boolean;
   /** Left project rail collapsed (Codex-style). */
   sidebarCollapsed: boolean;
+  /** Project tree grouping in the left rail. */
+  sidebarGroupBy: SidebarGroupBy;
+  /** Session ordering inside the left rail. */
+  sidebarSessionSort: SidebarSessionSort;
 }
 
 export const DEFAULT_LAYOUT: LayoutPrefs = {
@@ -21,6 +28,8 @@ export const DEFAULT_LAYOUT: LayoutPrefs = {
   asideCollapsed: true,
   /** Left session rail starts open; can fully hide via top-bar panel icon. */
   sidebarCollapsed: false,
+  sidebarGroupBy: "project",
+  sidebarSessionSort: "recent",
 };
 
 export const ASIDE_WIDTH_MIN = 240;
@@ -47,6 +56,9 @@ export function parseLayout(raw: unknown): LayoutPrefs {
       typeof o.sidebarCollapsed === "boolean"
         ? o.sidebarCollapsed
         : DEFAULT_LAYOUT.sidebarCollapsed,
+    sidebarGroupBy: o.sidebarGroupBy === "list" ? "list" : "project",
+    sidebarSessionSort:
+      o.sidebarSessionSort === "priority" ? "priority" : "recent",
   };
 }
 

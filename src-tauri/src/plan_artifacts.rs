@@ -216,9 +216,7 @@ fn sanitize_entries(value: &Value) -> Value {
                 values
                     .iter()
                     .take(128)
-                    .map_while(|value| {
-                        (*remaining > 0).then(|| walk(value, depth + 1, remaining))
-                    })
+                    .map_while(|value| (*remaining > 0).then(|| walk(value, depth + 1, remaining)))
                     .collect(),
             ),
             Value::Object(values) => Value::Object(
@@ -915,24 +913,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(revised.interaction_id.as_deref(), Some("interaction-2"));
-        assert!(resolve_plan_at(
-            &store.path,
-            "interaction-1",
-            "approved",
-            None,
-            now(3),
-        )
-        .is_err());
+        assert!(resolve_plan_at(&store.path, "interaction-1", "approved", None, now(3),).is_err());
         assert_eq!(
-            resolve_plan_at(
-                &store.path,
-                "interaction-2",
-                "approved",
-                None,
-                now(3),
-            )
-            .unwrap()
-            .status,
+            resolve_plan_at(&store.path, "interaction-2", "approved", None, now(3),)
+                .unwrap()
+                .status,
             PlanArtifactStatusV1::Approved
         );
     }
@@ -1060,7 +1045,10 @@ mod tests {
         let fallback = display_artifact(&after_abandon).unwrap();
         assert_eq!(fallback.status, PlanArtifactStatusV1::Completed);
         assert_eq!(
-            fallback.revisions.last().and_then(|row| row.body.as_deref()),
+            fallback
+                .revisions
+                .last()
+                .and_then(|row| row.body.as_deref()),
             Some("Old completed plan")
         );
     }

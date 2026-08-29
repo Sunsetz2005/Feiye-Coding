@@ -343,7 +343,10 @@ pub fn read_auth_profile() -> AccountProfile {
         .cloned()
         .unwrap_or(Value::Null);
 
-    let email = entry.get("email").and_then(|x| x.as_str()).map(str::to_string);
+    let email = entry
+        .get("email")
+        .and_then(|x| x.as_str())
+        .map(str::to_string);
     let first = entry
         .get("first_name")
         .and_then(|x| x.as_str())
@@ -552,15 +555,14 @@ fn parse_billing_json(v: &Value) -> BillingSnapshot {
     });
 
     // Infer a friendly tier when server omits subscription_tier.
-    let subscription_tier = str_field(&["subscription_tier", "subscriptionTier", "tier"]).or_else(
-        || {
+    let subscription_tier =
+        str_field(&["subscription_tier", "subscriptionTier", "tier"]).or_else(|| {
             if bool_field(&["isUnifiedBillingUser", "is_unified_billing_user"]) == Some(true) {
                 Some("Sunsetz Runtime".into())
             } else {
                 None
             }
-        },
-    );
+        });
 
     let has_signal = credit_usage_percent.is_some()
         || monthly_limit.is_some()
@@ -570,9 +572,8 @@ fn parse_billing_json(v: &Value) -> BillingSnapshot {
 
     let on_demand_cap = f64_field(&["onDemandCap", "on_demand_cap"]);
     let on_demand_used = f64_field(&["onDemandUsed", "on_demand_used"]);
-    let on_demand_enabled = bool_field(&["on_demand_enabled", "onDemandEnabled"]).or_else(|| {
-        on_demand_cap.map(|c| c > 0.0)
-    });
+    let on_demand_enabled = bool_field(&["on_demand_enabled", "onDemandEnabled"])
+        .or_else(|| on_demand_cap.map(|c| c > 0.0));
 
     let remaining_percent = credit_usage_percent.map(|u| (100.0 - u).max(0.0));
 
@@ -698,7 +699,12 @@ fn display_from_subscription_code(code: &str) -> Option<String> {
 }
 
 fn resolve_subscription_display(meta: &SubscriptionMeta) -> Option<String> {
-    if let Some(d) = meta.display.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+    if let Some(d) = meta
+        .display
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
         return display_from_subscription_code(d);
     }
     meta.code
@@ -735,7 +741,11 @@ fn display_from_jwt_tier(tier: i64) -> Option<String> {
     }
 }
 
-fn merge_subscription_into_billing(billing: &mut BillingSnapshot, meta: &SubscriptionMeta, token: &str) {
+fn merge_subscription_into_billing(
+    billing: &mut BillingSnapshot,
+    meta: &SubscriptionMeta,
+    token: &str,
+) {
     if let Some(display) = resolve_subscription_display(meta) {
         billing.subscription_tier = Some(display);
         return;
@@ -816,10 +826,7 @@ async fn fetch_subscription_meta(token: &str) -> SubscriptionMeta {
             }
         }
         Ok(r) => {
-            warn!(
-                "account: subscription user → HTTP {}",
-                r.status().as_u16()
-            );
+            warn!("account: subscription user → HTTP {}", r.status().as_u16());
         }
         Err(e) => warn!("account: subscription user failed: {e}"),
     }
@@ -957,7 +964,7 @@ fn local_usage_from_roots(
 
     let today = Utc::now().date_naive();
     let start = today - ChronoDuration::days(i64::from(days.saturating_sub(1)));
-let mut heatmap = Vec::with_capacity(days as usize);
+    let mut heatmap = Vec::with_capacity(days as usize);
     let mut d = start;
     while d <= today {
         let agg = day_map.get(&d).cloned().unwrap_or_default();
@@ -1049,9 +1056,7 @@ fn ingest_session(
         .and_then(|x| x.as_u64())
         .unwrap_or(0);
     let errors = v.get("errorCount").and_then(|x| x.as_u64()).unwrap_or(0);
-    let duration_secs = v
-        .get("sessionDurationSeconds")
-        .and_then(|x| x.as_u64());
+    let duration_secs = v.get("sessionDurationSeconds").and_then(|x| x.as_u64());
     let model = v
         .get("primaryModelId")
         .and_then(|x| x.as_str())
@@ -1273,10 +1278,7 @@ pub async fn account_login(method: &str, manual_cli: Option<&str>) -> LoginResul
         "oauth"
     };
 
-    let before_mtime = auth_json_path()
-        .metadata()
-        .and_then(|m| m.modified())
-        .ok();
+    let before_mtime = auth_json_path().metadata().and_then(|m| m.modified()).ok();
 
     info!("account: starting login method={method} cli={cli}");
 
@@ -1327,9 +1329,7 @@ pub async fn account_login(method: &str, manual_cli: Option<&str>) -> LoginResul
             while let Ok(Some(line)) = reader.next_line().await {
                 let t = line.trim();
                 // First URL => open the browser immediately (OAuth + device).
-                if !url_opened
-                    && (t.starts_with("http://") || t.starts_with("https://"))
-                {
+                if !url_opened && (t.starts_with("http://") || t.starts_with("https://")) {
                     url_opened = true;
                     if let Err(e) = open_url(t) {
                         warn!("account: open login URL failed: {e}");
@@ -1416,10 +1416,7 @@ pub async fn account_login(method: &str, manual_cli: Option<&str>) -> LoginResul
     if exit_success || before_mtime.is_some() || device_url.is_some() {
         for _ in 0..60 {
             tokio::time::sleep(Duration::from_millis(500)).await;
-            let after = auth_json_path()
-                .metadata()
-                .and_then(|m| m.modified())
-                .ok();
+            let after = auth_json_path().metadata().and_then(|m| m.modified()).ok();
             if after != before_mtime {
                 break;
             }
@@ -1621,7 +1618,11 @@ mod tests {
         assert_eq!(b.prepaid_balance, Some(5.0));
         assert_eq!(b.on_demand_cap, Some(0.0));
         assert_eq!(b.subscription_tier.as_deref(), Some("Sunsetz Runtime"));
-        assert!(b.billing_period_start.as_deref().unwrap().starts_with("2026-07-19"));
+        assert!(b
+            .billing_period_start
+            .as_deref()
+            .unwrap()
+            .starts_with("2026-07-19"));
     }
 
     #[test]
@@ -1700,7 +1701,10 @@ mod tests {
             .as_deref(),
             Some("Sunsetz Pro Heavy")
         );
-        assert_eq!(display_from_jwt_tier(5).as_deref(), Some("Sunsetz Pro Heavy"));
+        assert_eq!(
+            display_from_jwt_tier(5).as_deref(),
+            Some("Sunsetz Pro Heavy")
+        );
         assert_eq!(display_from_jwt_tier(3).as_deref(), Some("Sunsetz Pro"));
         assert_eq!(display_from_jwt_tier(0), None);
     }

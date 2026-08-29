@@ -61,6 +61,7 @@ describe("optimistic composer settings", () => {
     expect(isComposerSettingAction("project")).toBe(true);
     expect(isComposerSettingAction("goal")).toBe(true);
     expect(isComposerSettingAction("plan")).toBe(true);
+    expect(isComposerSettingAction("ask")).toBe(true);
     expect(isComposerSettingAction("record-skill")).toBe(true);
     expect(isComposerSettingAction("finder")).toBe(false);
     expect(isComposerSettingAction("folder")).toBe(false);

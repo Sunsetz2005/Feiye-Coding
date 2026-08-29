@@ -67,7 +67,7 @@ Grok Build CLI does **not** expose grok.com web history. Supported migration:
 ## Settings IA
 
 - **Account** (`settings.nav.account`): profile, Sunsetz Pro quota, heatmap, and call logs.
-- **CLI / Runtime** (`settings.nav.runtime`): binary path + Doctor — **not** mixed into Account.
+- **Runtime** (`settings.nav.runtime`): built-in kernel status, optional legacy CLI path, Doctor — **not** mixed into Account.
 
 ## Billing / quota
 

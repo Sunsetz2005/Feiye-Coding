@@ -1,6 +1,6 @@
 /**
  * Contribution-style activity heatmap for Sunsetz usage.
- * Levels use GitHub-green palette; layout stretches cells to fill width.
+ * Levels use the Sunsetz coral accent; layout stretches cells to fill width.
  * Day detail tip is portaled (fixed) so overflow parents cannot clip it.
  */
 
@@ -27,11 +27,11 @@ const MIN_CELL = 10;
 const MAX_CELL = 14;
 
 const LEVEL_COLORS = [
-  "var(--heatmap-0, #ebedf0)",
-  "var(--heatmap-1, #9be9a8)",
-  "var(--heatmap-2, #40c463)",
-  "var(--heatmap-3, #30a14e)",
-  "var(--heatmap-4, #216e39)",
+  "var(--heatmap-0, #eeeef0)",
+  "var(--heatmap-1, #fde0d8)",
+  "var(--heatmap-2, #f7b5a5)",
+  "var(--heatmap-3, #f08b74)",
+  "var(--heatmap-4, #d85c42)",
 ] as const;
 
 function metricValue(day: HeatmapDay, metric: Metric): number {

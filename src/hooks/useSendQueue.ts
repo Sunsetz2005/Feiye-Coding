@@ -436,6 +436,11 @@ export function useSendQueue({
     window.setTimeout(() => flush(), 0);
   }, [queueKey, setHold, flush]);
 
+  const pauseAutoSend = useCallback(() => {
+    setHold(queueKey, "recovered");
+    cancelFlushTimer();
+  }, [queueKey, setHold, cancelFlushTimer]);
+
   return {
     activeQueue,
     flushHold,
@@ -449,6 +454,7 @@ export function useSendQueue({
     migrateDraft,
     releaseFlushHold,
     resumeFlush,
+    pauseAutoSend,
     shouldEnqueue: (state: SessionState, conn: boolean) =>
       shouldEnqueueSend(state, conn),
     canShowQueueButton: (state: SessionState, conn: boolean, hasBody: boolean) =>

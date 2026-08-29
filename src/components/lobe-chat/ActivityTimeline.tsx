@@ -70,6 +70,12 @@ function fillActivityTemplate(
   );
 }
 
+function looksLikeAskSummary(title: string): boolean {
+  return /asked\s+\d+|answered|skipped|询问了|已回答|跳过|詢問了|跳過/i.test(
+    title,
+  );
+}
+
 function visibleActivityTitle(
   item: ActivityItem,
   labels: ActivityTimelineLabels,
@@ -81,7 +87,11 @@ function visibleActivityTitle(
   if (item.status === "running" && labels.askRunning) {
     return fillActivityTemplate(labels.askRunning, { count });
   }
-  if (item.status === "completed" && labels.askCompleted) {
+  if (
+    item.status === "completed" &&
+    labels.askCompleted &&
+    looksLikeAskSummary(fallback)
+  ) {
     const answered = numbers[1] ?? 0;
     const skipped = numbers[2] ?? Math.max(0, count - answered);
     return fillActivityTemplate(labels.askCompleted, {

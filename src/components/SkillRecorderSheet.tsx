@@ -11,6 +11,7 @@ import {
   IconRefresh,
   IconTrash,
 } from "@/components/icons";
+import { useViewedMessages } from "@/entities/session";
 import type { ChatMessage } from "@/lib/session";
 import {
   SkillMaterialError,
@@ -76,7 +77,7 @@ export type SkillRecorderSaveResult =
 
 export interface SkillRecorderSheetProps {
   open: boolean;
-  messages: readonly ChatMessage[];
+  messages?: readonly ChatMessage[];
   projectPath?: string | null;
   labels: SkillRecorderLabels;
   /**
@@ -171,6 +172,8 @@ export function SkillRecorderSheet({
   onSaved,
   onClose,
 }: SkillRecorderSheetProps) {
+  const storedMessages = useViewedMessages();
+  const thread = messages ?? storedMessages;
   const sheetRef = useRef<HTMLElement>(null);
   const openerRef = useRef<HTMLElement | null>(null);
   const loadedDraftRef = useRef<SkillDraft | null>(null);
@@ -179,12 +182,12 @@ export function SkillRecorderSheet({
   const onCloseRef = useRef(onClose);
 
   const rangeOptions = useMemo(
-    () => buildSkillRangeOptions(messages),
-    [messages],
+    () => buildSkillRangeOptions(thread),
+    [thread],
   );
   const defaultRange = useMemo(
-    () => defaultSkillMessageRange(messages),
-    [messages],
+    () => defaultSkillMessageRange(thread),
+    [thread],
   );
 
   const [start, setStart] = useState(defaultRange?.start ?? -1);
@@ -324,7 +327,7 @@ export function SkillRecorderSheet({
         ),
       });
       const request = buildSkillGenerationRequest({
-        messages,
+        messages: thread,
         range: { start, end },
         visibleRequest,
       });

@@ -1,7 +1,4 @@
-//! Live **model** catalog from Grok CLI cache only.
-//!
-//! Providers / relays are **channels** managed on the Providers settings page —
-//! they must never appear as selectable model chips.
+//! Live **model** catalog from the official cache plus configured custom channels.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -29,6 +26,10 @@ pub struct AvailableModel {
     pub is_default: bool,
     /// Only controls that map to a concrete Runtime argument are advertised.
     pub capabilities: Option<ModelCapabilities>,
+}
+
+pub fn model_supports_reasoning_effort(model_id: &str) -> bool {
+    known_model_capabilities(model_id).is_some_and(|caps| !caps.reasoning_efforts.is_empty())
 }
 
 fn known_model_capabilities(model_id: &str) -> Option<ModelCapabilities> {
@@ -96,11 +97,8 @@ fn read_models_cache(
     Some((map, origin, fetched_at))
 }
 
-/// Models the user can select in the composer.
-///
-/// **Only** official Grok Build catalog IDs from `models_cache.json`.
-/// Custom providers (`[model.*]` in config.toml) are channels — switch them under
-/// Settings → Account → Providers, not here.
+/// Models the user can select in the composer: official catalog IDs plus each
+/// configured custom OpenAI-compatible channel (`source = "custom"`).
 pub fn list_available_models() -> AvailableModelsResult {
     let settings = store::load_settings();
     let agent_home = resolve_agent_grok_home(&settings.session_data_mode);
@@ -138,6 +136,23 @@ pub fn list_available_models() -> AvailableModelsResult {
         }
     }
 
+    if let Ok(list) = crate::providers::list_custom_providers() {
+        for provider in list.providers {
+            let label = if provider.model.trim().is_empty() {
+                provider.name.clone()
+            } else {
+                format!("{} · {}", provider.name, provider.model)
+            };
+            by_id.entry(provider.id.clone()).or_insert(AvailableModel {
+                id: provider.id,
+                label,
+                source: "custom".into(),
+                is_default: false,
+                capabilities: None,
+            });
+        }
+    }
+
     // Offline fallback is the Runtime's stable default alias. Do not freeze a
     // dated concrete model id in the desktop shell.
     if by_id.is_empty() {
@@ -158,12 +173,21 @@ pub fn list_available_models() -> AvailableModelsResult {
 
     // Keep a valid user selection; otherwise use the first Runtime-reported
     // catalog entry (or the generic alias inserted above).
-    let preferred = settings
-        .model_id
-        .clone()
-        .filter(|model_id| by_id.contains_key(model_id))
-        .or_else(|| by_id.keys().next().cloned())
-        .unwrap_or_else(|| crate::providers::OFFICIAL_DEFAULT_MODEL.into());
+    let preferred = match crate::providers::active_route() {
+        crate::providers::ActiveRoute::Custom { id } if by_id.contains_key(&id) => id,
+        _ => settings
+            .model_id
+            .clone()
+            .filter(|model_id| by_id.contains_key(model_id))
+            .or_else(|| {
+                by_id
+                    .keys()
+                    .cloned()
+                    .find(|id| by_id.get(id).is_some_and(|model| model.source != "custom"))
+            })
+            .or_else(|| by_id.keys().next().cloned())
+            .unwrap_or_else(|| crate::providers::OFFICIAL_DEFAULT_MODEL.into()),
+    };
 
     let mut models: Vec<AvailableModel> = by_id.into_values().collect();
     models.sort_by(|a, b| a.id.cmp(&b.id));
@@ -211,5 +235,7 @@ mod tests {
     fn unknown_models_do_not_inherit_reasoning_controls() {
         assert!(known_model_capabilities("grok-4.5").is_some());
         assert!(known_model_capabilities("future-model").is_none());
+        assert!(model_supports_reasoning_effort("grok-4.5"));
+        assert!(!model_supports_reasoning_effort("claude-opus-4-6"));
     }
 }

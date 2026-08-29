@@ -11,11 +11,13 @@ Agent 与贡献者的**可执行知识库**。改产品行为或 UI 文案前，
 | [catalog.md](./catalog.md) | 与 Grok Build CLI 对齐的模型 / 推理强度 / 权限（含 YOLO） |
 | [automations.md](./automations.md) | 自动化任务设计（Build `/loop` / scheduler；不阻塞 P0） |
 | [slash-composer.md](./slash-composer.md) | 斜杠面板、技能标签、Goal 模式、Doctor |
+| [open-connector.md](./open-connector.md) | GitHub PAT、Gmail/Drive/Calendar Google 登录、`@` 芯片；其余连接器即将在 App 内连接 |
+| [local-data-isolation.md](./local-data-isolation.md) | MCP / 模型 / 连接器数据按操作系统用户隔离，禁止提交到 GitHub |
 | [session-continuity.md](./session-continuity.md) | Agent 续会话（load/bootstrap）、自动压缩归属 |
 | [runtime-migration-v1.md](./runtime-migration-v1.md) | **成熟能力迁移权威边界**：统一交互、桌面安全、原子 Settings、Runtime 事件、检索、Memory/Skill 候选、显式上下文包与 Host 调度 |
 | [account.md](./account.md) | 官方登录 / 会员额度 / 热力图 / 调用日志 |
 | [providers.md](./providers.md) | 自定义中转、agent GROK_HOME、编辑器探测 |
-| [setup.md](./setup.md) | 首次初始化门禁：CLI 必装、账户可跳过、多镜像安装 |
+| [setup.md](./setup.md) | 首次初始化门禁：登录 Sunsetz 或跳过进入工作台 |
 | [release.md](./release.md) | **发版 / Release 强制流程**：CHANGELOG、tag、三端 CI、macOS 损坏处理 |
 | [maintain.md](./maintain.md) | **开源维护**：Issue 分拣、PR 审核、社区反馈入库、修复闭环 |
 
@@ -34,5 +36,5 @@ Agent 与贡献者的**可执行知识库**。改产品行为或 UI 文案前，
 - 输入器：`src/components/ComposerDock.tsx`
 - 会话渲染：`src/components/lobe-chat/ConversationThread.tsx`
 - 活动时间线：`src/components/lobe-chat/activityTimelineModel.ts`
-- Host 会话协调：`src-tauri/src/session_manager.rs`
+- Host 会话协调：`src-tauri/src/session_manager/`
 - 内建 Agent 循环：`src-tauri/src/agent_loop.rs`

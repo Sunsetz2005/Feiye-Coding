@@ -24,13 +24,16 @@ import type { ResourceOpenTarget } from "@/components/ResourceViewer";
 import {
   IconArrowsMinimize,
   IconClock,
-  IconExportMd,
   IconFork,
   IconRename,
   IconRewind,
 } from "@/components/icons";
 import { formatMessageTime } from "@/lib/accountUi";
 import { formatTokenCount } from "@/lib/contextUsage";
+import {
+  conversationWindow,
+  hiddenHistorySpacerPx,
+} from "@/entities/session/conversationWindow";
 import { useStickToBottom } from "@/hooks/useStickToBottom";
 import {
   MessageActionButton,
@@ -39,6 +42,8 @@ import {
 import { ChatItem } from "./ChatItem";
 import { MarkdownChat } from "./MarkdownChat";
 import { Thinking } from "./Thinking";
+import { AgentStatusMark } from "./AgentStatusMark";
+import { resolveLiveStatus } from "./liveStatus";
 import { BackBottom } from "./BackBottom";
 import { InlineUserEdit } from "./InlineUserEdit";
 import { SkillChip } from "@/components/SkillChip";
@@ -51,7 +56,6 @@ import {
   TurnCancelledRow,
 } from "./AgentActivity";
 import {
-  ActivityRow,
   ActivityTimeline,
   type ActivityTimelineLabels,
 } from "./ActivityTimeline";
@@ -63,6 +67,14 @@ import {
   PlanArtifactCard,
   type PlanArtifactCardModel,
 } from "./PlanArtifactCard";
+import { TurnChangesCard } from "./TurnChangesCard";
+import { SubagentCard } from "./SubagentCard";
+import {
+  enrichFileChanges,
+  lastTurnFileChanges,
+  type SessionFileChange,
+} from "@/lib/sessionChanges";
+import { lastTurnSubagents } from "@/lib/sessionAgents";
 import "./lobe-chat.css";
 
 type AttachLabels = {
@@ -161,7 +173,7 @@ const AssistantMessageBody = memo(function AssistantMessageBody({
 function UserPlainOrSkills({ content }: { content: string }) {
   const hydrated = hydrateDisplayContent(content);
   const segs = parseStoredContent(hydrated);
-  if (!segs.some((s) => s.type === "skill")) {
+  if (!segs.some((s) => s.type === "skill" || s.type === "connector")) {
     return <>{content}</>;
   }
   return (
@@ -169,6 +181,16 @@ function UserPlainOrSkills({ content }: { content: string }) {
       {segs.map((s, i) =>
         s.type === "skill" ? (
           <SkillChip key={`sk-${i}-${s.name}`} name={s.name} size="sm" />
+        ) : s.type === "connector" ? (
+          <span
+            key={`cn-${i}-${s.id}`}
+            className="skill-chip skill-chip--sm connector-chip"
+          >
+            <span className="skill-chip__glyph" aria-hidden>
+              @
+            </span>
+            <span className="skill-chip__name">{s.id}</span>
+          </span>
         ) : (
           <span key={`t-${i}`}>{s.text}</span>
         ),
@@ -244,6 +266,9 @@ export interface ConversationThreadProps {
   /** Opaque in-thread preview; the complete plan opens in Resources. */
   planArtifact?: PlanArtifactCardModel | null;
   onOpenPlanArtifact?: () => void;
+  /** Live session change payloads used to enrich last-turn file stats. */
+  sessionChanges?: SessionFileChange[];
+  onOpenTurnChanges?: () => void;
   attachLabels: {
     open: string;
     reveal: string;
@@ -282,6 +307,8 @@ export function ConversationThread({
   onAddAttachmentToComposer,
   planArtifact = null,
   onOpenPlanArtifact,
+  sessionChanges = [],
+  onOpenTurnChanges,
   attachLabels,
 }: ConversationThreadProps) {
   const tr = useMemo(() => createT(locale), [locale]);
@@ -310,6 +337,17 @@ export function ConversationThread({
     }),
     [tr],
   );
+  const turnChanges = useMemo(() => {
+    if (
+      sessionState === "streaming" ||
+      sessionState === "connecting" ||
+      sessionState === "awaiting_permission"
+    ) {
+      return [];
+    }
+    return enrichFileChanges(lastTurnFileChanges(messages), sessionChanges);
+  }, [messages, sessionChanges, sessionState]);
+  const turnSubagents = useMemo(() => lastTurnSubagents(messages), [messages]);
 
   // Re-pin when user sends (even if they had scrolled up to read history).
   const forceStickKey = useMemo(() => {
@@ -344,6 +382,29 @@ export function ConversationThread({
   const liveActivityItem = useMemo(
     () => (liveTool ? activityItemFromMessage(liveTool) : null),
     [liveTool],
+  );
+  const streamingHasContent = useMemo(
+    () =>
+      messages.some(
+        (m) =>
+          m.role === "assistant" &&
+          m.streaming &&
+          messageSegments(m).some(
+            (seg) => seg.kind === "content" && seg.text.trim().length > 0,
+          ),
+      ),
+    [messages],
+  );
+  const liveStatus = useMemo(
+    () =>
+      resolveLiveStatus({
+        sessionState,
+        liveActivity: liveActivityItem,
+        streamingHasContent,
+        thinkingLabel: tr("chat.thinking"),
+        replyingLabel: tr("chat.replying"),
+      }),
+    [sessionState, liveActivityItem, streamingHasContent, tr],
   );
 
   /** Preserve completed/failed tool journal entries in chronological order. */
@@ -388,22 +449,20 @@ export function ConversationThread({
     return turnBusy ? lastAssistantId : null;
   }, [messages, turnBusy]);
 
-  const hasStreamingAssistant = messages.some(
-    (m) => m.role === "assistant" && m.streaming,
-  );
-
-  // Quiet thinking when busy, no tool motion, no assistant yet.
-  const showQuietThinking =
-    turnBusy && !liveTool && !hasStreamingAssistant;
-
   const hasPlanArtifact =
     Boolean(planArtifact) && planArtifact?.visible !== false;
   const empty =
     messages.length === 0 &&
-    !showQuietThinking &&
+    !liveStatus &&
     !liveTool &&
     !turnBusy &&
     !hasPlanArtifact;
+
+  const historyWindow = useMemo(
+    () => conversationWindow(messages),
+    [messages],
+  );
+  const historySpacerPx = hiddenHistorySpacerPx(historyWindow.hidden);
 
   return (
     <div className="lobe-chat" data-slot="lobe-chat">
@@ -420,7 +479,18 @@ export function ConversationThread({
             </div>
           ) : null}
 
+          {historySpacerPx > 0 ? (
+            <div
+              className="lobe-chat-history-spacer"
+              style={{ height: historySpacerPx }}
+              aria-hidden
+            />
+          ) : null}
+
           {messages.map((m, messageIndex) => {
+            if (historyWindow.windowed && messageIndex < historyWindow.start) {
+              return null;
+            }
             if (
               m.marker === "turn_cancelled" ||
               (m.role === "tool" && m.content?.startsWith("turn_cancelled"))
@@ -529,6 +599,7 @@ export function ConversationThread({
                   placement="right"
                   showAvatar={false}
                   showTitle={false}
+                  className={isLastUser ? undefined : "lobe-chat-item--frozen"}
                   message={
                     <div
                       className={
@@ -665,12 +736,6 @@ export function ConversationThread({
             const thoughtCount = thoughtSegs.length;
             const lastSeg = segs[segs.length - 1];
             const isActiveAssistant = activeAssistantId === m.id;
-            const showLiveToolBelow = !!liveTool && isActiveAssistant;
-            const showThinkingPlaceholder =
-              !!m.streaming &&
-              segs.length === 0 &&
-              !showLiveToolBelow;
-
             const contentSegCount = segs.filter((s) => s.kind === "content")
               .length;
             let lastContentSi = -1;
@@ -688,21 +753,17 @@ export function ConversationThread({
                 placement="left"
                 showAvatar={false}
                 loading={!!m.streaming}
+                className={
+                  m.streaming || isActiveAssistant
+                    ? undefined
+                    : "lobe-chat-item--frozen"
+                }
                 message={
                   <div
                     className="lobe-chat-assistant-timeline"
                     aria-busy={m.streaming ? true : undefined}
                     aria-live={m.streaming ? "polite" : undefined}
                   >
-                    {showThinkingPlaceholder ? (
-                      <Thinking
-                        locale={locale}
-                        thinking
-                        streamingLabel={tr("chat.thinking")}
-                        doneLabel={tr("chat.thoughtDone")}
-                        thoughtForLabel={(n) => tr("chat.thoughtFor", { n })}
-                      />
-                    ) : null}
                     {segs.map((seg, si) => {
                       if (seg.kind === "thought") {
                         // Skip empty finished phases (avoids "Thought for 0.0s").
@@ -726,6 +787,7 @@ export function ConversationThread({
                             key={`${m.id}-th-${si}`}
                             locale={locale}
                             thinking={phaseStreaming}
+                            showLiveDot={!liveStatus}
                             content={seg.text}
                             streamingLabel={label}
                             doneLabel={
@@ -774,44 +836,54 @@ export function ConversationThread({
                     ) : null}
                   </div>
                 }
-                belowMessage={
-                  showLiveToolBelow && liveActivityItem ? (
-                    <ActivityRow
-                      item={liveActivityItem}
-                      labels={activityLabels}
-                    />
-                  ) : null
-                }
-                actions={
-                  !m.streaming && m.content.trim() ? (
-                    <>
-                      <MessageCopyButton
-                        text={m.content}
-                        copyLabel={tr("message.copy")}
-                        copiedLabel={tr("message.copied")}
-                      />
-                      <MessageActionButton
-                        label={tr("message.exportMd")}
-                        onClick={() => {
-                          const blob = new Blob([m.content], {
-                            type: "text/markdown;charset=utf-8",
-                          });
-                          const url = URL.createObjectURL(blob);
-                          const a = document.createElement("a");
-                          a.href = url;
-                          a.download = `grok-${m.id.slice(0, 8)}.md`;
-                          a.click();
-                          URL.revokeObjectURL(url);
-                        }}
-                      >
-                        <IconExportMd size={15} />
-                      </MessageActionButton>
-                    </>
-                  ) : null
-                }
+                actions={null}
               />
             );
           })}
+
+          {turnSubagents.length > 0 ? (
+            <SubagentCard
+              agents={turnSubagents}
+              labels={{
+                running: tr("subagent.running"),
+                completed: tr("subagent.completed"),
+                failed: tr("subagent.failed"),
+                open: tr("subagent.open"),
+              }}
+              onOpen={(agent) =>
+                onOpenResource?.({
+                  type: "agent",
+                  id: agent.id,
+                  title: agent.description,
+                })
+              }
+            />
+          ) : null}
+
+          {turnChanges.length > 0 ? (
+            <TurnChangesCard
+              changes={turnChanges}
+              projectPath={projectPath}
+              labels={{
+                title: tr("turnChanges.title", {
+                  n: String(turnChanges.length),
+                }),
+                review: tr("turnChanges.review"),
+                showMore: tr("turnChanges.showMore", {
+                  n: String(Math.max(0, turnChanges.length - 3)),
+                }),
+                showLess: tr("turnChanges.showLess"),
+              }}
+              onReview={() => onOpenTurnChanges?.()}
+              onOpenFile={(change) =>
+                onOpenResource?.({
+                  type: "changes",
+                  path: change.path,
+                  title: change.name,
+                })
+              }
+            />
+          ) : null}
 
           {planArtifact && hasPlanArtifact ? (
             <PlanArtifactCard
@@ -828,23 +900,11 @@ export function ConversationThread({
             />
           ) : null}
 
-          {/* Tool before any assistant bubble exists for this turn. */}
-          {liveActivityItem && !activeAssistantId ? (
-            <ActivityRow
-              item={liveActivityItem}
-              labels={activityLabels}
+          {liveStatus ? (
+            <AgentStatusMark
+              state={liveStatus.state}
+              label={liveStatus.label}
             />
-          ) : null}
-
-          {showQuietThinking ? (
-            <div className="lobe-chat-live-tool is-running" role="status">
-              <span className="lobe-chat-live-tool__mark" aria-hidden>
-                <span className="lobe-chat-thinking__dot lobe-chat-thinking__dot--live" />
-              </span>
-              <span className="lobe-chat-live-tool__title lobe-chat-live-tool__title--pulse">
-                {tr("chat.thinking")}
-              </span>
-            </div>
           ) : null}
         </div>
       </div>

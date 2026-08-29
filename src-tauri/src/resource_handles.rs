@@ -164,9 +164,7 @@ pub fn authorize_composer_attachment(path: &Path, is_dir: bool) -> Result<PathBu
     }
     authorized_origin(&canonical)
         .map(|_| canonical)
-        .ok_or_else(|| {
-            "RESOURCE_DENIED: composer attachment has no trusted provenance".to_string()
-        })
+        .ok_or_else(|| "RESOURCE_DENIED: composer attachment has no trusted provenance".to_string())
 }
 
 /// Revalidate a previously Host-authorized, canonical Composer reference.

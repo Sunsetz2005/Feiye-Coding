@@ -25,6 +25,7 @@ import type { SettingsPageProps } from "@/components/SettingsPage";
 import type { ComposerDockProps } from "@/components/ComposerDock";
 import type { ResourceViewerProps } from "@/components/ResourceViewer";
 import type { SkillMetadataRankingResultV1 } from "@/lib/api";
+import { transcriptStore } from "@/entities/session";
 
 type EventHandler = (payload: unknown) => void;
 
@@ -403,6 +404,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  transcriptStore.reset();
   cleanup();
   localStorage.clear();
   sidebarCapture.current = null;
@@ -793,6 +795,7 @@ describe("App workbench integration", () => {
           ],
         },
         skillSelections: [],
+        connectorSelections: [],
       });
       expect(apiListenerCapture.sessionSend).not.toHaveBeenCalled();
       await waitFor(() => {
@@ -887,6 +890,7 @@ describe("App workbench integration", () => {
             selection: "explicit",
           },
         ],
+        connectorSelections: [],
       });
       expect(apiListenerCapture.sessionSend).not.toHaveBeenCalled();
     },
@@ -1094,13 +1098,13 @@ describe("App workbench integration", () => {
       Object.assign(window, { __TAURI_INTERNALS__: { invoke } });
 
       await user.click(
-        screen.getByRole("button", { name: /Access|访问/ }),
+        screen.getByRole("button", { name: /Add|添加/ }),
       );
-      const access = await screen.findByRole("dialog", {
-        name: /Access|访问/,
-      });
       await user.click(
-        within(access).getByText("Plan").closest("button")!,
+        within(document.getElementById("composer-plus-panel")!).getByRole(
+          "menuitem",
+          { name: /Plan mode|计划模式/ },
+        ),
       );
 
       const planMode = await screen.findByRole("button", {
@@ -1394,13 +1398,13 @@ describe("App workbench integration", () => {
       });
 
       await user.click(
-        screen.getByRole("button", { name: /Access|访问/ }),
+        screen.getByRole("button", { name: /Add|添加/ }),
       );
-      const access = await screen.findByRole("dialog", {
-        name: /Access|访问/,
-      });
       await user.click(
-        within(access).getByText("Plan").closest("button")!,
+        within(document.getElementById("composer-plus-panel")!).getByRole(
+          "menuitem",
+          { name: /Plan mode|计划模式/ },
+        ),
       );
 
       await waitFor(() => {
@@ -1892,6 +1896,53 @@ describe("App workbench integration", () => {
               "63e654cb61e4cb6c5131d91af44cac1b5d77281b789428f090b21c73aa0d26e5",
           }),
         );
+      });
+    },
+    20_000,
+  );
+
+  it(
+    "applies viewed stream tokens immediately on a done chunk",
+    async () => {
+      apiListenerCapture.tauri = true;
+      apiListenerCapture.sessionState = {
+        ...apiListenerCapture.sessionState,
+        sessionId: "live-1",
+        agentSessionId: "agent-1",
+        state: "streaming",
+        title: "Live",
+      };
+      const { default: App } = await import("./App");
+      render(<App />);
+      await screen.findByTestId("workbench-shell");
+      await waitFor(() => {
+        expect(apiListenerCapture.handlers.has("session://stream")).toBe(true);
+      });
+      act(() => {
+        apiListenerCapture.handlers.get("session://state")?.({
+          sessionId: "live-1",
+          agentSessionId: "agent-1",
+          state: "streaming",
+          lastError: null,
+          streamingMessageId: "a1",
+          backend: "sunsetz",
+          title: "Live",
+        });
+      });
+      act(() => {
+        apiListenerCapture.handlers.get("session://stream")?.({
+          sessionId: "live-1",
+          messageId: "a1",
+          text: "Hello stream",
+          done: true,
+        });
+      });
+      await waitFor(() => {
+        expect(
+          transcriptStore
+            .getViewed()
+            .some((message) => message.content.includes("Hello stream")),
+        ).toBe(true);
       });
     },
     20_000,

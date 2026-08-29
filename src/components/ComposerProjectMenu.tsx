@@ -7,8 +7,11 @@ import { createPortal } from "react-dom";
 import {
   IconCheck,
   IconChevronDown,
+  IconClose,
   IconFolder,
+  IconFork,
   IconPlus,
+  IconSearch,
 } from "@/components/icons";
 import { Tip } from "@/components/ui/tooltip";
 import { useFloatingMenu } from "@/lib/floatingMenu";
@@ -31,6 +34,10 @@ type Props = {
     noProject: string;
     pickProject: string;
     addProject: string;
+    searchProjects?: string;
+    workNotInProject?: string;
+    searchWorktrees?: string;
+    uncommittedCount?: string;
     worktrees: string;
     worktreesEmpty: string;
     worktreesUnavailable: string;
@@ -51,6 +58,8 @@ type Props = {
   worktreesLoading?: boolean;
   worktreesReason?: string | null;
   disabled?: boolean;
+  /** Quiet project-instruction hint; shown in the chip tooltip only. */
+  instructionTip?: string | null;
   /** External, monotonic request used by the + menu to open this picker. */
   openRequestKey?: number;
   onSelect: (project: ProjectOption | null) => void;
@@ -66,18 +75,20 @@ export function ComposerProjectMenu({
   activeProject,
   projects,
   labels,
-  worktrees = [],
-  worktreesAvailable = null,
-  worktreesLoading = false,
-  worktreesReason = null,
+  worktrees: _worktrees = [],
+  worktreesAvailable: _worktreesAvailable = null,
+  worktreesLoading: _worktreesLoading = false,
+  worktreesReason: _worktreesReason = null,
   disabled,
+  instructionTip = null,
   openRequestKey = 0,
   onSelect,
   onAdd,
-  onSwitchWorktree,
+  onSwitchWorktree: _onSwitchWorktree,
   onOpen,
 }: Props) {
   const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const popRef = useRef<HTMLDivElement>(null);
@@ -85,16 +96,18 @@ export function ComposerProjectMenu({
   const onOpenRef = useRef(onOpen);
   onOpenRef.current = onOpen;
 
-  // Only for confirmed git work trees — hide while loading / non-git / no project.
-  const showWorktrees = !!activeProject && worktreesAvailable === true;
+  const needle = query.trim().toLowerCase();
+  const visibleProjects = needle
+    ? projects.filter(
+        (project) =>
+          project.name.toLowerCase().includes(needle) ||
+          project.path.toLowerCase().includes(needle),
+      )
+    : projects;
 
   const estHeight = Math.min(
     400,
-    52 +
-      Math.min(LIST_MAX_H, projects.length * 40 + 8) +
-      (showWorktrees
-        ? 28 + Math.min(160, Math.max(worktrees.length, 1) * 36 + 8)
-        : 0),
+    88 + Math.min(LIST_MAX_H, visibleProjects.length * 40 + 8),
   );
   const { pos, style: popStyle } = useFloatingMenu({
     open,
@@ -108,13 +121,16 @@ export function ComposerProjectMenu({
     minWidth: 260,
     estHeight,
     gap: 8,
-    deps: [projects.length, worktrees.length, showWorktrees],
+    deps: [visibleProjects.length, query],
   });
 
   // Refresh only when the menu opens — not when parent re-renders with a new onOpen.
   useEffect(() => {
     if (!open) return;
     onOpenRef.current?.();
+  }, [open]);
+  useEffect(() => {
+    if (!open) setQuery("");
   }, [open]);
 
   const lastOpenRequestRef = useRef(openRequestKey);
@@ -127,7 +143,7 @@ export function ComposerProjectMenu({
   }, [disabled, openRequestKey]);
 
   const label = activeProject?.name ?? labels.noProject;
-  const tip = activeProject?.path || labels.pickProject;
+  const tip = instructionTip?.trim() || activeProject?.path || labels.pickProject;
 
   return (
     <div ref={rootRef} className={`cpm${open ? " is-open" : ""}`}>
@@ -143,6 +159,8 @@ export function ComposerProjectMenu({
           disabled={disabled}
           aria-haspopup="menu"
           aria-expanded={open}
+          data-testid={instructionTip ? "project-instruction-chip" : undefined}
+          title={instructionTip ?? undefined}
           onClick={() => setOpen((v) => !v)}
         >
           <IconFolder size={14} />
@@ -161,42 +179,24 @@ export function ComposerProjectMenu({
             aria-label={labels.pickProject}
             style={popStyle as CSSProperties}
           >
-            <div className="cpm__actions">
-              <button
-                type="button"
-                role="menuitem"
-                className={
-                  "cpm__action" + (!activeProject ? " is-active" : "")
-                }
-                onClick={() => {
-                  onSelect(null);
-                  setOpen(false);
-                }}
-              >
-                <IconFolder size={14} aria-hidden />
-                <span>{labels.noProject}</span>
-              </button>
-              <button
-                type="button"
-                role="menuitem"
-                className="cpm__action cpm__action--add"
-                onClick={() => {
-                  setOpen(false);
-                  onAdd();
-                }}
-              >
-                <IconPlus size={14} aria-hidden />
-                <span>{labels.addProject}</span>
-              </button>
+            <div className="cpm__search">
+              <IconSearch size={14} aria-hidden />
+              <input
+                className="cpm__search-input"
+                value={query}
+                placeholder={labels.searchProjects ?? labels.pickProject}
+                onChange={(event) => setQuery(event.target.value)}
+                aria-label={labels.searchProjects ?? labels.pickProject}
+              />
             </div>
-            {projects.length > 0 ? (
+            {visibleProjects.length > 0 ? (
               <div
                 className="cpm__list"
                 style={{ maxHeight: LIST_MAX_H }}
                 role="group"
                 aria-label={labels.pickProject}
               >
-                {projects.map((p) => {
+                {visibleProjects.map((p) => {
                   const active = activeProject?.id === p.id;
                   return (
                     <button
@@ -212,6 +212,7 @@ export function ComposerProjectMenu({
                         setOpen(false);
                       }}
                     >
+                      <IconFolder size={14} aria-hidden />
                       <span className="cmm__opt-main">
                         <span className="cmm__opt-title">{p.name}</span>
                       </span>
@@ -225,70 +226,198 @@ export function ComposerProjectMenu({
                 })}
               </div>
             ) : null}
+            <div className="cpm__actions">
+              <button
+                type="button"
+                role="menuitem"
+                className="cpm__action cpm__action--add"
+                onClick={() => {
+                  setOpen(false);
+                  onAdd();
+                }}
+              >
+                <IconPlus size={14} aria-hidden />
+                <span>{labels.addProject}</span>
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                className={
+                  "cpm__action" + (!activeProject ? " is-active" : "")
+                }
+                onClick={() => {
+                  onSelect(null);
+                  setOpen(false);
+                }}
+              >
+                <IconClose size={14} aria-hidden />
+                <span>
+                  {labels.workNotInProject ?? labels.noProject}
+                </span>
+              </button>
+            </div>
+          </div>,
+          document.body,
+        )}
+    </div>
+  );
+}
 
-            {showWorktrees ? (
-              <div className="cpm__worktrees" role="group" aria-label={labels.worktrees}>
-                <div className="cpm__worktrees-head">{labels.worktrees}</div>
-                {worktrees.length > 0 ? (
-                  <ul
-                    className={
-                      "cpm__worktrees-list" +
-                      (worktreesLoading ? " is-loading" : "")
-                    }
-                    aria-busy={worktreesLoading || undefined}
-                  >
-                    {worktrees.map((wt) => {
-                      const current = pathsEqual(wt.path, activeProject?.path);
-                      const name = worktreeLabel(wt);
-                      const meta = [
-                        wt.isMain ? labels.worktreeMain : null,
-                        wt.detached ? labels.worktreeDetached : null,
-                        current ? labels.worktreeCurrent : null,
-                      ]
-                        .filter(Boolean)
-                        .join(" · ");
-                      return (
-                        <li key={wt.path}>
-                          <button
-                            type="button"
-                            role="menuitem"
-                            className={
-                              "cmm__opt cpm__item cpm__worktree" +
-                              (current ? " is-active" : "")
-                            }
-                            title={wt.path}
-                            disabled={current || !onSwitchWorktree}
-                            onClick={() => {
-                              if (current || !onSwitchWorktree) return;
-                              setOpen(false);
-                              onSwitchWorktree(wt);
-                            }}
-                          >
-                            <span className="cpm__worktree-row">
-                              <span className="cpm__worktree-name">{name}</span>
-                              {meta ? (
-                                <span className="cpm__worktree-meta">{meta}</span>
-                              ) : null}
+type WorktreeMenuProps = {
+  activeProject: ProjectOption | null;
+  worktrees: GitWorktreeEntry[];
+  worktreesAvailable: boolean | null;
+  worktreesLoading?: boolean;
+  worktreesReason?: string | null;
+  labels: Props["labels"];
+  disabled?: boolean;
+  onSwitchWorktree?: (wt: GitWorktreeEntry) => void;
+  onOpen?: () => void;
+};
+
+export function ComposerWorktreeMenu({
+  activeProject,
+  worktrees,
+  worktreesAvailable,
+  worktreesLoading = false,
+  worktreesReason = null,
+  labels,
+  disabled,
+  onSwitchWorktree,
+  onOpen,
+}: WorktreeMenuProps) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const rootRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const popRef = useRef<HTMLDivElement>(null);
+  const onOpenRef = useRef(onOpen);
+  onOpenRef.current = onOpen;
+
+  const show = !!activeProject && worktreesAvailable === true;
+  const current = worktrees.find((wt) =>
+    pathsEqual(wt.path, activeProject?.path),
+  );
+  const needle = query.trim().toLowerCase();
+  const visible = needle
+    ? worktrees.filter((wt) => {
+        const name = worktreeLabel(wt).toLowerCase();
+        return name.includes(needle) || wt.path.toLowerCase().includes(needle);
+      })
+    : worktrees;
+  const { pos, style: popStyle } = useFloatingMenu({
+    open,
+    surfaceId: "composer-worktree",
+    triggerRef,
+    panelRef: popRef,
+    roots: [rootRef],
+    onClose: () => setOpen(false),
+    placement: "up",
+    fitContent: true,
+    minWidth: 260,
+    estHeight: Math.min(360, 72 + Math.max(visible.length, 1) * 44),
+    gap: 8,
+    deps: [visible.length, query],
+  });
+
+  useEffect(() => {
+    if (!open) return;
+    onOpenRef.current?.();
+  }, [open]);
+  useEffect(() => {
+    if (!open) setQuery("");
+  }, [open]);
+
+  if (!show) return null;
+  const label = current ? worktreeLabel(current) : labels.worktreeMain;
+
+  return (
+    <div ref={rootRef} className={`cpm cpm--worktree${open ? " is-open" : ""}`}>
+      <Tip label={current?.path || labels.worktrees} disabled={open}>
+        <button
+          ref={triggerRef}
+          type="button"
+          className={"chip chip--worktree" + (open ? " is-open" : "")}
+          disabled={disabled}
+          aria-haspopup="menu"
+          aria-expanded={open}
+          onClick={() => setOpen((value) => !value)}
+        >
+          <IconFork size={14} />
+          <span className="chip__label">{label}</span>
+          <IconChevronDown size={12} />
+        </button>
+      </Tip>
+      {open &&
+        pos &&
+        typeof document !== "undefined" &&
+        createPortal(
+          <div
+            ref={popRef}
+            className="cmm__pop cmm__pop--portal cpm__pop"
+            role="menu"
+            aria-label={labels.worktrees}
+            style={popStyle as CSSProperties}
+          >
+            <div className="cpm__search">
+              <IconSearch size={14} aria-hidden />
+              <input
+                className="cpm__search-input"
+                value={query}
+                placeholder={labels.searchWorktrees ?? labels.worktrees}
+                onChange={(event) => setQuery(event.target.value)}
+                aria-label={labels.searchWorktrees ?? labels.worktrees}
+              />
+            </div>
+            {visible.length > 0 ? (
+              <ul className="cpm__worktrees-list">
+                {visible.map((wt) => {
+                  const isCurrent = pathsEqual(wt.path, activeProject?.path);
+                  const name = worktreeLabel(wt);
+                  return (
+                    <li key={wt.path}>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        className={
+                          "cmm__opt cpm__item cpm__worktree" +
+                          (isCurrent ? " is-active" : "")
+                        }
+                        title={wt.path}
+                        disabled={isCurrent || !onSwitchWorktree}
+                        onClick={() => {
+                          if (isCurrent || !onSwitchWorktree) return;
+                          setOpen(false);
+                          onSwitchWorktree(wt);
+                        }}
+                      >
+                        <span className="cpm__worktree-row">
+                          <span className="cpm__worktree-name">{name}</span>
+                          {isCurrent && worktreesReason?.trim() ? (
+                            <span className="cpm__worktree-meta">
+                              {worktreesReason}
                             </span>
-                            {current ? (
-                              <span className="cmm__opt-check" aria-hidden>
-                                <IconCheck size={16} />
-                              </span>
-                            ) : null}
-                          </button>
-                        </li>
-                      );
-                    })}
-                  </ul>
-                ) : (
-                  <p className="cpm__worktrees-empty">
-                    {worktreesReason?.trim()
-                      ? labels.worktreesUnavailable
-                      : labels.worktreesEmpty}
-                  </p>
-                )}
-              </div>
-            ) : null}
+                          ) : null}
+                        </span>
+                        {isCurrent ? (
+                          <span className="cmm__opt-check" aria-hidden>
+                            <IconCheck size={16} />
+                          </span>
+                        ) : null}
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            ) : (
+              <p className="cpm__worktrees-empty">
+                {worktreesLoading
+                  ? labels.worktreesLoading
+                  : worktreesReason?.trim()
+                    ? labels.worktreesUnavailable
+                    : labels.worktreesEmpty}
+              </p>
+            )}
           </div>,
           document.body,
         )}

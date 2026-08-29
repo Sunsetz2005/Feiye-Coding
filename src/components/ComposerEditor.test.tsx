@@ -59,6 +59,22 @@ describe("ComposerEditor slash query events", () => {
     expect(onChange).toHaveBeenLastCalledWith(`${token} now`);
   });
 
+  it("renders an explicit connector chip from storage", () => {
+    const onChange = vi.fn();
+    render(
+      <ComposerEditor
+        value="[[connector-v1:github|explicit]]"
+        onChange={onChange}
+      />,
+    );
+    const editor = screen.getByRole("textbox");
+    const chip = editor.querySelector<HTMLElement>("[data-connector]");
+    expect(chip?.dataset.connector).toBe("github");
+    expect(chip?.dataset.connectorToken).toBe(
+      "[[connector-v1:github|explicit]]",
+    );
+  });
+
   it("does not downgrade a mutated binding token into a legacy Skill", () => {
     const onChange = vi.fn();
     const token = `[[skill-v1:review|${"a".repeat(64)}|${"b".repeat(64)}|explicit]]`;

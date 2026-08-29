@@ -63,7 +63,7 @@ Full management surface: **Settings → Extensions** (`#/settings/extensions`).
 - **Skills:** App filter only (slash palette / chips). Agent still discovers skill files on disk.
 
 Host commands: `skills_list`, `inspect_mcp`, `extensions_get`, `extensions_set_mcp`, `extensions_set_skill`, `extensions_enable_all_mcp`, `extensions_enable_all_skills`.  
-CLI missing → actionable error with link to **Settings → CLI / Runtime**.  
+Legacy CLI missing (only when the Grok ACP adapter is on) → actionable error with link to **Settings → Runtime**. The built-in kernel does not require that binary.  
 Reveal skill paths / agent-home when paths are available (`path_reveal`).  
 Pure helpers: `src/lib/extensionsUi.ts` (+ enable-set merge/filter). Host: `src-tauri/src/extensions.rs`. UI: `src/components/ExtensionsPanel.tsx`.
 

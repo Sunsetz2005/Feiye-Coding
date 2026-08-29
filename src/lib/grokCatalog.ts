@@ -1,6 +1,7 @@
 /**
  * Catalogs aligned with Grok Build CLI (`grok models`, reasoning effort, permission).
- * Live selectable models come from `models_list_available` (CLI cache + custom providers).
+ * Live selectable models come from `models_list_available`
+ * (official catalog plus configured custom channels).
  * Update docs/llm-wiki/catalog.md when defaults change.
  */
 
@@ -10,7 +11,7 @@ export interface ModelOption {
   label: string;
   /** True if CLI lists as default */
   isDefault?: boolean;
-  /** Catalog source; composer only shows official model IDs (not providers). */
+  /** `official` catalog id or `custom` provider channel id. */
   source?: string;
   /** Optional host/runtime-declared controls for this exact model. */
   capabilities?: {

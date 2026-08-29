@@ -2,6 +2,7 @@ export type SettingsSectionId =
   | "general"
   | "appearance"
   | "account"
+  | "models"
   | "archived"
   | "extensions"
   | "runtime"
@@ -13,6 +14,7 @@ export type SettingsSectionIcon =
   | "settings"
   | "appearance"
   | "user"
+  | "models"
   | "archive"
   | "extensions"
   | "doctor"
@@ -76,7 +78,18 @@ export const SETTINGS_REGISTRY: readonly SettingsSectionRegistration[] = [
       "account.usageSummary",
       "account.login",
       "account.logout",
+    ],
+  },
+  {
+    id: "models",
+    icon: "models",
+    labelKey: "settings.nav.models",
+    group: "personal",
+    keywordKeys: [
+      "settings.models.lead",
       "providers.title",
+      "prov.baseUrl",
+      "prov.apiKey",
     ],
   },
   {
@@ -108,6 +121,8 @@ export const SETTINGS_REGISTRY: readonly SettingsSectionRegistration[] = [
     labelKey: "settings.nav.runtime",
     group: "system",
     keywordKeys: [
+      "settings.runtime.kernel",
+      "settings.runtime.lead",
       "settings.cliPath",
       "settings.acpServer",
       "settings.maxConcurrentAgents",

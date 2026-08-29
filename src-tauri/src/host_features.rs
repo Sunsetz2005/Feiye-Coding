@@ -270,17 +270,14 @@ mod tests {
         ];
         let normalized = normalize_selected_paths(raw).unwrap();
         assert_eq!(normalized.len(), 1);
-        assert_eq!(
-            PathBuf::from(&normalized[0]),
-            file.canonicalize().unwrap()
-        );
+        assert_eq!(PathBuf::from(&normalized[0]), file.canonicalize().unwrap());
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn finder_paths_reject_missing_items() {
-        let missing = std::env::temp_dir()
-            .join(format!("sunsetz-missing-{}", uuid::Uuid::new_v4()));
+        let missing =
+            std::env::temp_dir().join(format!("sunsetz-missing-{}", uuid::Uuid::new_v4()));
         assert!(normalize_selected_paths([missing.to_string_lossy()]).is_err());
     }
 }

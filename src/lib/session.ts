@@ -718,6 +718,18 @@ export interface RuntimeEventEnvelopeV1 {
   payload: unknown;
 }
 
+/** Developer UI stub (`SUNSETZ_ACP=mock`). Does not read the project. */
+export function isDeveloperMockBackend(backend?: string | null): boolean {
+  const value = (backend ?? "").trim().toLowerCase();
+  return value === "mock_acp" || value === "mock";
+}
+
+/** Legacy spawned `grok agent stdio` adapter. Not the product kernel. */
+export function isLegacyGrokBackend(backend?: string | null): boolean {
+  const value = (backend ?? "").trim().toLowerCase();
+  return value === "grok_acp" || value === "grok_agent_stdio";
+}
+
 export const IDLE_SNAPSHOT: SessionSnapshot = {
   sessionId: null,
   agentSessionId: null,

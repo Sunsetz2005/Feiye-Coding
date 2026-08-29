@@ -1,5 +1,7 @@
 import {
   useMemo,
+  useRef,
+  useState,
   type CSSProperties,
   type Dispatch,
   type ReactNode,
@@ -51,7 +53,7 @@ import {
 } from "@/components/ComposerPlusPanel";
 import {
   ComposerProjectMenu,
-  type ProjectOption,
+  ComposerWorktreeMenu,  type ProjectOption,
 } from "@/components/ComposerProjectMenu";
 import { ContextUsageChip } from "@/components/ContextUsageChip";
 import {
@@ -66,10 +68,15 @@ import {
   IconClock,
   IconClose,
   IconImagine,
+  IconMore,
   IconPlus,
+  IconQueue,
+  IconRename,
   IconSend,
   IconStop,
+  IconTrash,
 } from "@/components/icons";
+import { ContextMenu } from "@/components/ContextMenu";
 import { Tip } from "@/components/ui/tooltip";
 
 type ComposerActionEntry = Extract<
@@ -121,11 +128,19 @@ export interface ComposerDockProps {
     onClear: () => void;
     onRemove: (id: string) => void;
     onRetry: () => void;
+    onSteer: () => void;
+    onEdit: (id: string) => void;
+    onPause: () => void;
   };
   memory?: {
     pack: MemoryContextPackV1 | null;
     labels: MemoryContextBadgeLabels;
     onClear: () => void;
+  };
+  connectors?: {
+    items: Array<{ id: string; name: string }>;
+    openLabel: string;
+    onOpen: () => void;
   };
   projectInstruction?: {
     path: string;
@@ -138,7 +153,9 @@ export interface ComposerDockProps {
     plusMode: boolean;
     showPlus: boolean;
     liveSlashPresent: boolean;
+    liveAtPresent?: boolean;
     slashFilterQuery: string;
+    atFilterQuery?: string;
     skillsLoading: boolean;
     activeIndex: number;
     entries: ComposerPlusEntry[];
@@ -149,6 +166,9 @@ export interface ComposerDockProps {
       entry: ComposerActionEntry,
     ) => void | Promise<void>;
     onSelectSlash: (item: SlashItem) => void;
+    onSelectConnector?: (
+      entry: Extract<ComposerPlusEntry, { kind: "connector" }>,
+    ) => void;
     resolveTitle: (item: SlashItem) => string;
     resolveDescription: (item: SlashItem) => string;
     onClose: () => void;
@@ -184,6 +204,7 @@ export interface ComposerDockProps {
     expectMedia?: boolean;
   }) => void | Promise<void>;
   onSlashQueryChange: (query: SlashQuery | null) => void;
+  onAtQueryChange?: (query: SlashQuery | null) => void;
   onCompact: () => void;
   onSend: () => void | Promise<void>;
   onStop: () => void | Promise<void>;
@@ -213,6 +234,7 @@ export function ComposerDock({
   project,
   queue,
   memory,
+  connectors,
   projectInstruction = null,
   menu,
   preferences,
@@ -223,11 +245,14 @@ export function ComposerDock({
   onPasteFiles,
   onPasteMediaFallback,
   onSlashQueryChange,
+  onAtQueryChange,
   onCompact,
   onSend,
   onStop,
 }: ComposerDockProps) {
   const tr = useMemo(() => createT(locale), [locale]);
+  const [queueMenuOpen, setQueueMenuOpen] = useState(false);
+  const queueMoreRef = useRef<HTMLButtonElement>(null);
   const galleryPaths = useMemo(
     () =>
       attachments
@@ -292,6 +317,7 @@ export function ComposerDock({
               </span>
             </button>
           ) : (
+            <div className="composer-context-rail__chips">
             <ComposerProjectMenu
               activeProject={project.active}
               projects={project.options}
@@ -300,6 +326,10 @@ export function ComposerDock({
                 noProject: tr("composer.noProject"),
                 pickProject: tr("composer.pickProject"),
                 addProject: tr("composer.addProject"),
+                searchProjects: tr("composer.searchProjects"),
+                workNotInProject: tr("composer.workNotInProject"),
+                searchWorktrees: tr("composer.searchWorktrees"),
+                uncommittedCount: tr("composer.uncommittedCount"),
                 worktrees: tr("composer.worktrees"),
                 worktreesEmpty: tr("composer.worktreesEmpty"),
                 worktreesUnavailable: tr("composer.worktreesUnavailable"),
@@ -313,27 +343,46 @@ export function ComposerDock({
               worktreesLoading={project.worktreesLoading}
               worktreesReason={project.worktreesReason}
               disabled={settingsLocked}
+              instructionTip={
+                projectInstruction
+                  ? projectInstruction.truncated
+                    ? projectInstruction.labels.truncated
+                    : projectInstruction.labels.attached
+                  : null
+              }
               onSelect={project.onSelect}
               onAdd={project.onAdd}
               onSwitchWorktree={project.onSwitchWorktree}
               onOpen={project.onOpen}
             />
+            <ComposerWorktreeMenu
+              activeProject={project.active}
+              worktrees={project.worktrees}
+              worktreesAvailable={project.worktreesAvailable}
+              worktreesLoading={project.worktreesLoading}
+              worktreesReason={project.worktreesReason}
+              labels={{
+                noProject: tr("composer.noProject"),
+                pickProject: tr("composer.pickProject"),
+                addProject: tr("composer.addProject"),
+                searchProjects: tr("composer.searchProjects"),
+                workNotInProject: tr("composer.workNotInProject"),
+                searchWorktrees: tr("composer.searchWorktrees"),
+                uncommittedCount: tr("composer.uncommittedCount"),
+                worktrees: tr("composer.worktrees"),
+                worktreesEmpty: tr("composer.worktreesEmpty"),
+                worktreesUnavailable: tr("composer.worktreesUnavailable"),
+                worktreeCurrent: tr("composer.worktreeCurrent"),
+                worktreeSwitch: tr("composer.worktreeSwitch"),
+                worktreeMain: tr("composer.worktreeMain"),
+                worktreeDetached: tr("composer.worktreeDetached"),
+              }}
+              disabled={settingsLocked}
+              onSwitchWorktree={project.onSwitchWorktree}
+              onOpen={project.onOpen}
+            />
+            </div>
           )}
-          {projectInstruction ? (
-            <p
-              className="composer-context-rail__instruction"
-              data-testid="project-instruction-chip"
-              title={
-                projectInstruction.truncated
-                  ? projectInstruction.labels.truncated
-                  : projectInstruction.labels.attached
-              }
-            >
-              {projectInstruction.truncated
-                ? projectInstruction.labels.truncated
-                : projectInstruction.labels.attached}
-            </p>
-          ) : null}
         </div>
       ) : null}
       <div
@@ -347,55 +396,83 @@ export function ComposerDock({
               n: String(queueRows.length),
             })}
           >
-            <div className="composer__queue-head">
-              <IconClock size={14} aria-hidden />
-              <span className="composer__queue-title">
-                {tr("composer.queueCount", {
-                  n: String(queueRows.length),
-                })}
+            <div className="composer__queue-bar">
+              <span
+                className="composer__queue-count"
+                title={queueRows[0]?.fullPreview}
+              >
+                <IconQueue size={14} aria-hidden />
+                <span>{queueRows.length}</span>
               </span>
               <button
                 type="button"
-                className="composer__queue-clear"
-                onClick={queue.onClear}
+                className="composer__queue-steer"
+                onClick={queue.onSteer}
               >
-                {tr("composer.queueClear")}
+                {tr("composer.queueSteer")}
               </button>
-            </div>
-            {queue.flushHold ? (
-              <div className="composer__queue-hold" role="status">
-                <span className="composer__queue-hold-text">
-                  {tr("composer.queueHold")}
-                </span>
+              <Tip label={tr("composer.queueRemove")}>
                 <button
                   type="button"
-                  className="composer__queue-hold-retry"
-                  onClick={queue.onRetry}
+                  className="composer__queue-icon"
+                  aria-label={tr("composer.queueRemove")}
+                  onClick={() => queue.onRemove(queueRows[0]!.item.id)}
                 >
-                  {tr("composer.queueHoldRetry")}
+                  <IconTrash size={14} />
                 </button>
-              </div>
-            ) : null}
-            <ul className="composer__queue-list">
-              {queueRows.map(({ item, fullPreview, shortPreview }, index) => (
-                <li key={item.id} className="composer__queue-item">
-                  <span className="composer__queue-idx" aria-hidden>
-                    {index + 1}
-                  </span>
-                  <span className="composer__queue-text" title={fullPreview}>
-                    {shortPreview}
-                  </span>
-                  <button
-                    type="button"
-                    className="composer__queue-remove"
-                    aria-label={tr("composer.queueRemove")}
-                    onClick={() => queue.onRemove(item.id)}
-                  >
-                    <IconClose size={12} />
-                  </button>
-                </li>
-              ))}
-            </ul>
+              </Tip>
+              <Tip label={tr("composer.queueMore")}>
+                <button
+                  type="button"
+                  ref={queueMoreRef}
+                  className="composer__queue-icon"
+                  aria-label={tr("composer.queueMore")}
+                  aria-haspopup="menu"
+                  aria-expanded={queueMenuOpen}
+                  onClick={() => setQueueMenuOpen((open) => !open)}
+                >
+                  <IconMore size={14} />
+                </button>
+              </Tip>
+            </div>
+            <ContextMenu
+              open={queueMenuOpen}
+              x={0}
+              y={0}
+              anchorRect={
+                queueMoreRef.current?.getBoundingClientRect() ?? null
+              }
+              restoreFocusTo={queueMoreRef.current}
+              onClose={() => setQueueMenuOpen(false)}
+              items={[
+                {
+                  id: "edit",
+                  label: tr("composer.queueEdit"),
+                  icon: <IconRename size={16} />,
+                  onClick: () => queue.onEdit(queueRows[0]!.item.id),
+                },
+                queue.flushHold
+                  ? {
+                      id: "resume",
+                      label: tr("composer.queueHoldOn"),
+                      icon: <IconClock size={16} />,
+                      onClick: queue.onRetry,
+                    }
+                  : {
+                      id: "pause",
+                      label: tr("composer.queueHoldOff"),
+                      icon: <IconClock size={16} />,
+                      onClick: queue.onPause,
+                    },
+                {
+                  id: "clear",
+                  label: tr("composer.queueClear"),
+                  danger: true,
+                  separatorBefore: true,
+                  onClick: queue.onClear,
+                },
+              ]}
+            />
           </div>
         ) : null}
         {memory ? (
@@ -406,6 +483,23 @@ export function ComposerDock({
             disabled={connecting || !canType(sessionState)}
             onClear={memory.onClear}
           />
+        ) : null}
+        {connectors && connectors.items.length > 0 ? (
+          <div className="composer__connector-chips" aria-label={connectors.openLabel}>
+            {connectors.items.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                className="skill-chip skill-chip--sm connector-chip"
+                onClick={connectors.onOpen}
+              >
+                <span className="skill-chip__glyph" aria-hidden>
+                  @
+                </span>
+                <span className="skill-chip__name">{item.name}</span>
+              </button>
+            ))}
+          </div>
         ) : null}
         {attachments.length > 0 ? (
           <div
@@ -438,10 +532,13 @@ export function ComposerDock({
               locale={locale}
               entries={menu.entries}
               filterQuery={
-                menu.liveSlashPresent
-                  ? menu.slashFilterQuery
-                  : undefined
+                menu.liveAtPresent
+                  ? menu.atFilterQuery
+                  : menu.liveSlashPresent
+                    ? menu.slashFilterQuery
+                    : undefined
               }
+              filterLead={menu.liveAtPresent ? "@" : "/"}
               skillsLoading={menu.skillsLoading}
               activeIndex={menu.activeIndex}
               onActiveIndexChange={menu.onActiveIndexChange}
@@ -452,6 +549,7 @@ export function ComposerDock({
                 void menu.onSelectAction(entry);
               }}
               onSelectSlash={menu.onSelectSlash}
+              onSelectConnector={menu.onSelectConnector}
               resolveTitle={menu.resolveTitle}
               resolveDescription={menu.resolveDescription}
               style={{
@@ -479,6 +577,7 @@ export function ComposerDock({
             void onPasteMediaFallback(options);
           }}
           onSlashQueryChange={onSlashQueryChange}
+          onAtQueryChange={onAtQueryChange}
           onKeyDown={(event) => {
             if (
               event.nativeEvent.isComposing ||
@@ -516,6 +615,8 @@ export function ComposerDock({
                 if (entry.kind === "upload") void menu.onPickFiles();
                 else if (entry.kind === "action") {
                   void menu.onSelectAction(entry);
+                } else if (entry.kind === "connector") {
+                  menu.onSelectConnector?.(entry);
                 } else {
                   menu.onSelectSlash(entry.item);
                 }
@@ -538,6 +639,8 @@ export function ComposerDock({
                 if (entry.kind === "upload") void menu.onPickFiles();
                 else if (entry.kind === "action") {
                   void menu.onSelectAction(entry);
+                } else if (entry.kind === "connector") {
+                  menu.onSelectConnector?.(entry);
                 } else {
                   menu.onSelectSlash(entry.item);
                 }
@@ -574,19 +677,11 @@ export function ComposerDock({
             </button>
           </Tip>
           <ComposerAccessMenu
-            mode={preferences.mode}
             policy={preferences.policy}
             disabled={settingsLocked}
             labels={{
               access: tr("composer.access"),
               accessHint: tr("composer.accessHint"),
-              mode: tr("composer.mode"),
-              modeAgent: tr("mode.agent"),
-              modePlan: tr("mode.plan"),
-              modeAsk: tr("mode.ask"),
-              modeAgentDesc: tr("mode.agentDesc"),
-              modePlanDesc: tr("mode.planDesc"),
-              modeAskDesc: tr("mode.askDesc"),
               permission: tr("composer.permission"),
               policyAsk: tr("policy.ask"),
               policyAcceptEdits: tr("policy.accept_edits"),
@@ -604,7 +699,6 @@ export function ComposerDock({
               policyShortDontAsk: tr("policy.short.dont_ask"),
               policyShortYolo: tr("policy.short.always_approve"),
             }}
-            onMode={preferences.onMode}
             onPolicy={preferences.onPolicy}
           />
           {preferences.mode === "plan" ? (
@@ -654,6 +748,8 @@ export function ComposerDock({
               compactAction: tr("context.compactAction"),
               auto: tr("context.triggerAuto"),
               manual: tr("context.triggerManual"),
+              hoverUsedRemain: tr("context.hoverUsedRemain"),
+              hoverTokens: tr("context.hoverTokens"),
             }}
             compactDisabled={settingsLocked}
             onCompact={onCompact}
@@ -671,6 +767,8 @@ export function ComposerDock({
               effortLow: tr("effort.low"),
               resetDefaults: tr("composer.resetDefaults"),
               resetDefaultsHint: tr("composer.resetDefaultsHint"),
+              modelsOfficial: tr("composer.modelsOfficial"),
+              modelsCustom: tr("composer.modelsCustom"),
             }}
             onModel={preferences.onModel}
             onEffort={preferences.onEffort}

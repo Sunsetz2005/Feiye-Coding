@@ -1,8 +1,8 @@
-//! In-process mock ACP stub for PR2.
+//! In-process developer stub used only when `SUNSETZ_ACP=mock`.
 //!
-//! Deliberately does **not** spawn `grok agent stdio` — that is PR3 after a
-//! real-machine spike. This stub implements the same Host-facing surface the
-//! real AcpClient will later fill (connect / send / stream chunks / stop).
+//! This is not the product kernel and must not look like one. It does not
+//! read the project, run Host tools, or spawn `grok agent stdio`. Production
+//! sessions use the in-process Sunsetz loop in `agent_loop.rs`.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -68,9 +68,9 @@ pub fn chunk_text(text: &str, max_chars: usize) -> Vec<String> {
 /// Build a deterministic mock reply for a user prompt.
 pub fn mock_reply_for(prompt: &str) -> String {
     format!(
-        "Mock ACP reply: I received «{prompt}». \
-         This stream is fake token output from the in-process stub — \
-         not grok agent stdio. Ready for PR3 swap."
+        "Developer mock: I received «{prompt}». \
+         This stub does not read files or run commands. \
+         Restart without SUNSETZ_ACP=mock to use the built-in Sunsetz Runtime on this computer."
     )
 }
 
@@ -145,8 +145,11 @@ mod tests {
     #[test]
     fn mock_reply_does_not_mention_real_spawn_path_as_backend() {
         let r = mock_reply_for("hello");
-        assert!(r.contains("Mock ACP"));
-        assert!(r.contains("not grok agent stdio"));
+        assert!(r.contains("Developer mock"));
+        assert!(r.contains("SUNSETZ_ACP=mock"));
+        assert!(!r.to_ascii_lowercase().contains("grok agent stdio"));
+        assert!(!r.contains("Mock ACP"));
+        assert!(!r.contains("PR3"));
     }
 
     #[tokio::test]
@@ -169,10 +172,13 @@ mod tests {
             }
         }
         handle.join.await.unwrap();
-        assert!(texts.len() > 1, "expected multi-chunk stream, got {texts:?}");
+        assert!(
+            texts.len() > 1,
+            "expected multi-chunk stream, got {texts:?}"
+        );
         assert!(done);
         let joined: String = texts.concat();
-        assert!(joined.contains("Mock ACP"));
+        assert!(joined.contains("Developer mock"));
     }
 
     #[tokio::test]

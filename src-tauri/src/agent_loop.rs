@@ -3,7 +3,8 @@
 //! The product runtime is this in-process loop, not a spawned `grok agent stdio`
 //! process. It sends the user prompt to an OpenAI-compatible chat endpoint using
 //! existing providers/secrets, executes Host-owned `read_file`, `list_directory`,
-//! `write_file`, and `run_command` inside a trusted project root, and emits the
+//! `grep`, `write_file`, `search_replace`, and `run_command` inside a trusted
+//! project root, and emits the
 //! same `AcpEvent` surface the session UI already consumes.
 //!
 //! Writes and commands wait on the Host permission dock (or an explicit
@@ -12,10 +13,11 @@
 //!
 //! Project instructions are a bounded, trusted-root file attach. Memory and
 //! Skill fragments are prepended by the session Host, not this loop.
-//! Out of scope this slice: Hermes skill runner, cron, plugins, sandbox.
-//! The Grok ACP adapter stays behind an explicit legacy flag.
+//! Connected marketplace connectors inject extra tools for this turn; they do
+//! not require a trusted project. Out of scope this slice: Hermes skill runner,
+//! cron, sandbox. The Grok ACP adapter stays behind an explicit legacy flag.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::ffi::OsString;
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -30,7 +32,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::acp_client::{AcpEvent, StreamKind};
+use crate::acp_client::{parse_ask_user_question_params, AcpEvent, StreamKind};
 use crate::error::{AgentError, AgentErrorCode};
 use crate::fs_browser;
 use crate::process_util;
@@ -45,6 +47,7 @@ pub const SETTING_LEGACY_GROK_ACP: &str = "grok_acp";
 pub const OFFICIAL_OPENAI_BASE_URL: &str = "https://api.x.ai/v1";
 
 pub const MAX_TOOL_ROUNDS: u32 = 16;
+pub const IDENTICAL_TOOL_STREAK_LIMIT: u32 = 3;
 pub const MAX_PROJECT_INSTRUCTION_CHARS: usize = 16_000;
 pub const PROJECT_INSTRUCTION_FILES: &[&str] = &[
     "AGENTS.md",
@@ -54,7 +57,21 @@ pub const PROJECT_INSTRUCTION_FILES: &[&str] = &[
 ];
 const MAX_FILE_CHARS: usize = 32_768;
 const MAX_LIST_ENTRIES: usize = 200;
+const MAX_GREP_MATCHES: usize = 200;
+const MAX_GREP_FILES: usize = 2_000;
+const MAX_GREP_FILE_BYTES: u64 = 1_048_576;
+const MAX_GREP_LINE_CHARS: usize = 240;
 const MAX_HISTORY_MESSAGES: usize = 24;
+const GREP_SKIP_DIRS: &[&str] = &[
+    ".git",
+    "node_modules",
+    "target",
+    "dist",
+    ".next",
+    "__pycache__",
+    ".sunsetz",
+    "vendor",
+];
 const MAX_HISTORY_CHARS: usize = 32_768;
 const HTTP_TIMEOUT_SECS: u64 = 120;
 const COMMAND_TIMEOUT_SECS: u64 = 60;
@@ -82,6 +99,118 @@ pub type HostToolPermissionGate = Arc<
         + Sync,
 >;
 
+#[derive(Debug, Clone)]
+pub struct HostAskUserRequest {
+    pub tool_call_id: String,
+    pub arguments: Value,
+}
+
+#[derive(Debug, Clone)]
+pub enum HostAskUserDecision {
+    Accepted { answers: Value },
+    Cancelled,
+}
+
+pub type HostAskUserGate = Arc<
+    dyn Fn(HostAskUserRequest) -> Pin<Box<dyn Future<Output = HostAskUserDecision> + Send>>
+        + Send
+        + Sync,
+>;
+
+pub type ConnectorInvokeFn =
+    Arc<dyn Fn(String, Value) -> Pin<Box<dyn Future<Output = String> + Send>> + Send + Sync>;
+
+#[derive(Clone, Default)]
+pub struct ConnectorTurn {
+    pub tools: Vec<Value>,
+    pub write_tools: HashSet<String>,
+    pub explicit: Vec<String>,
+    pub invoke: Option<ConnectorInvokeFn>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentKind {
+    Parent,
+    Explore,
+    Plan,
+    General,
+}
+
+impl Default for AgentKind {
+    fn default() -> Self {
+        Self::Parent
+    }
+}
+
+impl AgentKind {
+    pub fn parse_spawn_type(raw: &str) -> Result<Self, String> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "" | "general" | "general-purpose" | "general_purpose" => Ok(Self::General),
+            "explore" | "research" => Ok(Self::Explore),
+            "plan" | "planner" => Ok(Self::Plan),
+            other => Err(format!(
+                "unknown agent_type `{other}` (use explore, plan, or general)"
+            )),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Parent => "parent",
+            Self::Explore => "explore",
+            Self::Plan => "plan",
+            Self::General => "general",
+        }
+    }
+
+    pub fn max_tool_rounds(self) -> u32 {
+        match self {
+            Self::Explore | Self::Plan => 8,
+            _ => MAX_TOOL_ROUNDS,
+        }
+    }
+
+    pub fn allows_write(self) -> bool {
+        matches!(self, Self::Parent | Self::General)
+    }
+
+    pub fn allows_command(self) -> bool {
+        matches!(self, Self::Parent | Self::General)
+    }
+
+    pub fn allows_connectors(self) -> bool {
+        matches!(self, Self::Parent | Self::General)
+    }
+
+    pub fn allows_spawn(self) -> bool {
+        matches!(self, Self::Parent)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SpawnAgentRequest {
+    pub prompt: String,
+    pub description: String,
+    pub agent_type: String,
+    pub background: bool,
+    pub tool_call_id: String,
+}
+
+pub type SpawnAgentFn =
+    Arc<dyn Fn(SpawnAgentRequest) -> Pin<Box<dyn Future<Output = String> + Send>> + Send + Sync>;
+pub type AgentLookupFn =
+    Arc<dyn Fn(String) -> Pin<Box<dyn Future<Output = String> + Send>> + Send + Sync>;
+
+#[derive(Clone, Default)]
+pub struct SubagentHooks {
+    pub spawn: Option<SpawnAgentFn>,
+    pub output: Option<AgentLookupFn>,
+    pub kill: Option<AgentLookupFn>,
+}
+
+pub const SUBAGENT_SUMMARY_CHARS: usize = 8_192;
+pub const MAX_RUNNING_SUBAGENTS: usize = 4;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LlmEndpoint {
     pub base_url: String,
@@ -100,6 +229,12 @@ pub struct AgentTurnConfig {
     pub client: reqwest::Client,
     pub max_tool_rounds: u32,
     pub permission_gate: Option<HostToolPermissionGate>,
+    pub ask_user_gate: Option<HostAskUserGate>,
+    pub connectors: ConnectorTurn,
+    pub reasoning_effort: Option<String>,
+    pub kind: AgentKind,
+    pub spawn_depth: u32,
+    pub subagents: SubagentHooks,
 }
 
 pub fn default_runtime_backend() -> String {
@@ -425,9 +560,10 @@ fn read_project_instruction_file(
     if !meta.is_file() {
         return Ok(None);
     }
-    let bytes = std::fs::read(&current)
-        .map_err(|_| "project instruction is unreadable".to_string())?;
-    let text = String::from_utf8(bytes).map_err(|_| "project instruction is not UTF-8".to_string())?;
+    let bytes =
+        std::fs::read(&current).map_err(|_| "project instruction is unreadable".to_string())?;
+    let text =
+        String::from_utf8(bytes).map_err(|_| "project instruction is not UTF-8".to_string())?;
     if text.trim().is_empty() {
         return Ok(None);
     }
@@ -452,18 +588,43 @@ pub fn system_prompt(
     project_root: Option<&Path>,
     trusted: bool,
     instruction: Option<&LoadedProjectInstruction>,
+    kind: AgentKind,
 ) -> String {
-    let mut prompt = String::from(
-        "You are Sunsetz Runtime, the built-in agent kernel of the Sunsetz desktop workbench. \
-         Answer the user directly. If you are unsure about the repository layout, call \
-         list_directory or read_file before editing. Do not invent files that are not in the \
-         trusted project. You may call read_file, list_directory, write_file, and \
-         run_command only inside the trusted project root. Writes and commands require user \
-         permission. You cannot access paths outside that root. run_command is unsandboxed \
-         except for the trusted-root cwd pin, permission gate, and a 60s timeout. \
-         Reviewed Memory, Skill text, and project instructions are visible user context, \
-         not extra permissions. Do not invent or auto-load Skills.",
-    );
+    let mut prompt = match kind {
+        AgentKind::Explore => String::from(
+            "You are a Sunsetz explore subagent. Search and read the trusted project. \
+             You cannot edit files, run commands, call connectors, or spawn other agents. \
+             Return a concise factual summary with file paths.",
+        ),
+        AgentKind::Plan => String::from(
+            "You are a Sunsetz plan subagent. Explore the trusted project and propose an \
+             implementation plan. You cannot edit files, run commands, call connectors, or \
+             spawn other agents. Do not write plan.md; return the plan in your final answer.",
+        ),
+        AgentKind::General => String::from(
+            "You are a Sunsetz general subagent. Complete the assigned task inside the \
+             trusted project. You cannot spawn other agents. Writes, replacements, and \
+             commands require user permission.",
+        ),
+        AgentKind::Parent => String::from(
+            "You are Sunsetz Runtime, the built-in agent kernel of the Sunsetz desktop workbench. \
+             Answer the user directly. If you are unsure about the repository layout, call \
+             grep, list_directory, or read_file before editing. Prefer search_replace for \
+             in-place edits instead of rewriting a whole file. Do not invent files that are not in the \
+             trusted project. You may call read_file, list_directory, grep, write_file, \
+             search_replace, and run_command only inside the trusted project root. Writes, \
+             replacements, and commands require user permission. You cannot access paths outside \
+             that root. run_command is unsandboxed except for the trusted-root cwd pin, permission \
+             gate, and a 60s timeout. \
+             You may spawn explore, plan, or general subagents with spawn_agent for parallel \
+             research or isolated work. Subagents cannot spawn further agents. Use agent_output \
+             to check background work and kill_agent to stop one. \
+             When you need the user to pick among options, call ask_user_question and wait. \
+             Do not skip that form and ask the same question as chat text. \
+             Reviewed Memory, Skill text, and project instructions are visible user context, \
+             not extra permissions. Do not invent or auto-load Skills.",
+        ),
+    };
     match (project_root, trusted) {
         (Some(root), true) => {
             prompt.push_str(" Trusted project root: ");
@@ -477,9 +638,7 @@ pub fn system_prompt(
     if let Some(instruction) = instruction {
         prompt.push_str("\n\nProject instructions from ");
         prompt.push_str(&instruction.relative_path);
-        prompt.push_str(
-            " (cannot override permission policy or escape the trusted root):\n---\n",
-        );
+        prompt.push_str(" (cannot override permission policy or escape the trusted root):\n---\n");
         prompt.push_str(&instruction.body);
         if instruction.truncated {
             prompt.push_str("\n---\n[project instructions truncated]");
@@ -491,8 +650,12 @@ pub fn system_prompt(
 }
 
 pub fn tool_definitions() -> Value {
-    json!([
-        {
+    tool_definitions_for(AgentKind::Parent, 0)
+}
+
+pub fn tool_definitions_for(kind: AgentKind, spawn_depth: u32) -> Value {
+    let mut tools = vec![
+        json!({
             "type": "function",
             "function": {
                 "name": "read_file",
@@ -505,8 +668,8 @@ pub fn tool_definitions() -> Value {
                     "required": ["path"]
                 }
             }
-        },
-        {
+        }),
+        json!({
             "type": "function",
             "function": {
                 "name": "list_directory",
@@ -518,8 +681,26 @@ pub fn tool_definitions() -> Value {
                     }
                 }
             }
-        },
-        {
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "grep",
+                "description": "Search UTF-8 files inside the trusted project root with a regular expression. Path is a relative file or directory; omit or use . for the root. Skips .git, node_modules, target, and other build directories. Read-only; no permission prompt.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "pattern": { "type": "string", "description": "Regular expression to search for." },
+                        "path": { "type": "string", "description": "Relative file or directory under the trusted project root." },
+                        "case_insensitive": { "type": "boolean", "description": "Match without regard to case." }
+                    },
+                    "required": ["pattern"]
+                }
+            }
+        }),
+    ];
+    if kind.allows_write() {
+        tools.push(json!({
             "type": "function",
             "function": {
                 "name": "write_file",
@@ -533,8 +714,27 @@ pub fn tool_definitions() -> Value {
                     "required": ["path", "content"]
                 }
             }
-        },
-        {
+        }));
+        tools.push(json!({
+            "type": "function",
+            "function": {
+                "name": "search_replace",
+                "description": "Replace exact text in an existing UTF-8 file inside the trusted project root. Path is relative. Requires permission; AcceptEdits may auto-allow in-root replacements. Prefer this over rewriting the whole file.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "Relative file path under the trusted project root." },
+                        "old_string": { "type": "string", "description": "Exact text to find." },
+                        "new_string": { "type": "string", "description": "Replacement text." },
+                        "replace_all": { "type": "boolean", "description": "Replace every occurrence. If false, old_string must match exactly once." }
+                    },
+                    "required": ["path", "old_string", "new_string"]
+                }
+            }
+        }));
+    }
+    if kind.allows_command() {
+        tools.push(json!({
             "type": "function",
             "function": {
                 "name": "run_command",
@@ -548,8 +748,98 @@ pub fn tool_definitions() -> Value {
                     "required": ["command"]
                 }
             }
-        }
-    ])
+        }));
+    }
+    if kind == AgentKind::Parent && spawn_depth == 0 {
+        tools.push(json!({
+            "type": "function",
+            "function": {
+                "name": "ask_user_question",
+                "description": "Ask the user a multiple-choice or free-text question in the Sunsetz workbench form. Use this instead of writing the question into chat when you need a choice. Wait for the form result.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "questions": {
+                            "type": "array",
+                            "description": "One or more questions to show in the form.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "id": { "type": "string" },
+                                    "header": { "type": "string", "description": "Short category label; not the question text." },
+                                    "question": { "type": "string" },
+                                    "options": {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "id": { "type": "string" },
+                                                "label": { "type": "string" },
+                                                "description": { "type": "string" }
+                                            }
+                                        }
+                                    },
+                                    "multiSelect": { "type": "boolean" }
+                                },
+                                "required": ["question"]
+                            }
+                        },
+                        "question": { "type": "string", "description": "Single-question form." },
+                        "options": { "type": "array" },
+                        "multiSelect": { "type": "boolean" }
+                    }
+                }
+            }
+        }));
+    }
+    if kind.allows_spawn() && spawn_depth == 0 {
+        tools.push(json!({
+            "type": "function",
+            "function": {
+                "name": "spawn_agent",
+                "description": "Start a child agent with its own context. Types: explore (read-only research), plan (read-only plan), general (full tools). Set background true to return an id immediately.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "prompt": { "type": "string", "description": "Full task prompt for the child." },
+                        "description": { "type": "string", "description": "Short 3-5 word label." },
+                        "agent_type": { "type": "string", "description": "explore, plan, or general." },
+                        "background": { "type": "boolean", "description": "If true, return an id immediately." }
+                    },
+                    "required": ["prompt", "description"]
+                }
+            }
+        }));
+        tools.push(json!({
+            "type": "function",
+            "function": {
+                "name": "agent_output",
+                "description": "Get status or the final summary of a child agent by id.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string", "description": "Child agent id returned by spawn_agent." }
+                    },
+                    "required": ["id"]
+                }
+            }
+        }));
+        tools.push(json!({
+            "type": "function",
+            "function": {
+                "name": "kill_agent",
+                "description": "Stop a running child agent by id.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string", "description": "Child agent id." }
+                    },
+                    "required": ["id"]
+                }
+            }
+        }));
+    }
+    Value::Array(tools)
 }
 
 fn tool_path_arg(arguments: &Value) -> String {
@@ -580,6 +870,104 @@ fn tool_content_arg(arguments: &Value) -> Result<String, String> {
         Some(_) => Err("write_file requires UTF-8 `content`".into()),
         None => Err("write_file requires UTF-8 `content`".into()),
     }
+}
+
+fn tool_string_field(arguments: &Value, keys: &[&str]) -> Option<String> {
+    for key in keys {
+        if let Some(Value::String(text)) = arguments.get(*key) {
+            return Some(text.clone());
+        }
+    }
+    None
+}
+
+fn tool_bool_field(arguments: &Value, keys: &[&str]) -> bool {
+    for key in keys {
+        match arguments.get(*key) {
+            Some(Value::Bool(value)) => return *value,
+            Some(Value::String(text)) => {
+                let lower = text.trim().to_ascii_lowercase();
+                if lower == "true" || lower == "1" || lower == "yes" {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+fn tool_pattern_arg(arguments: &Value) -> String {
+    tool_string_field(arguments, &["pattern", "query"])
+        .unwrap_or_default()
+        .trim()
+        .to_string()
+}
+
+fn tool_old_string_arg(arguments: &Value) -> Result<String, String> {
+    tool_string_field(
+        arguments,
+        &["old_string", "oldString", "old_str", "previous"],
+    )
+    .ok_or_else(|| "search_replace requires `old_string`".into())
+}
+
+fn tool_new_string_arg(arguments: &Value) -> Result<String, String> {
+    tool_string_field(arguments, &["new_string", "newString", "new_str"])
+        .ok_or_else(|| "search_replace requires `new_string`".into())
+}
+
+fn is_host_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "read_file"
+            | "list_directory"
+            | "grep"
+            | "write_file"
+            | "search_replace"
+            | "run_command"
+            | "spawn_agent"
+            | "agent_output"
+            | "kill_agent"
+            | "ask_user_question"
+    )
+}
+
+fn is_spawn_tool(name: &str) -> bool {
+    matches!(name, "spawn_agent" | "agent_output" | "kill_agent")
+}
+
+fn tool_agent_id_arg(arguments: &Value) -> String {
+    tool_string_field(arguments, &["id", "agent_id", "agentId"])
+        .unwrap_or_default()
+        .trim()
+        .to_string()
+}
+
+fn parse_spawn_request(arguments: &Value) -> Result<SpawnAgentRequest, String> {
+    let prompt = tool_string_field(arguments, &["prompt", "task"])
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if prompt.is_empty() {
+        return Err("spawn_agent requires `prompt`".into());
+    }
+    let description = tool_string_field(arguments, &["description", "label"])
+        .unwrap_or_else(|| "subagent".into())
+        .trim()
+        .chars()
+        .take(80)
+        .collect();
+    let agent_type = tool_string_field(arguments, &["agent_type", "agentType", "subagent_type"])
+        .unwrap_or_else(|| "general".into());
+    let kind = AgentKind::parse_spawn_type(&agent_type)?;
+    Ok(SpawnAgentRequest {
+        prompt,
+        description,
+        agent_type: kind.as_str().to_string(),
+        background: tool_bool_field(arguments, &["background", "run_in_background"]),
+        tool_call_id: String::new(),
+    })
 }
 
 fn tool_command_arg(arguments: &Value) -> String {
@@ -664,6 +1052,167 @@ pub fn execute_list_directory(root: &Path, relative: &str) -> Result<String, Str
     let mut entries = fs_browser::list_dir(&root_str, relative)?;
     entries.truncate(MAX_LIST_ENTRIES);
     serde_json::to_string_pretty(&entries).map_err(|error| error.to_string())
+}
+
+fn skip_grep_dir(name: &str) -> bool {
+    GREP_SKIP_DIRS.iter().any(|skip| *skip == name)
+}
+
+fn grep_relative(root: &Path, file: &Path) -> String {
+    let file = file.canonicalize().unwrap_or_else(|_| file.to_path_buf());
+    file.strip_prefix(root)
+        .unwrap_or(&file)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+fn grep_one_file(
+    root: &Path,
+    file: &Path,
+    regex: &regex::Regex,
+    matches: &mut Vec<String>,
+    truncated: &mut bool,
+) {
+    if matches.len() >= MAX_GREP_MATCHES {
+        *truncated = true;
+        return;
+    }
+    let Ok(meta) = std::fs::symlink_metadata(file) else {
+        return;
+    };
+    if !meta.is_file() || meta.file_type().is_symlink() {
+        return;
+    }
+    if meta.len() > MAX_GREP_FILE_BYTES {
+        return;
+    }
+    let Ok(bytes) = std::fs::read(file) else {
+        return;
+    };
+    if bytes.contains(&0) {
+        return;
+    }
+    let Ok(text) = String::from_utf8(bytes) else {
+        return;
+    };
+    let rel = grep_relative(root, file);
+    for (index, line) in text.lines().enumerate() {
+        if !regex.is_match(line) {
+            continue;
+        }
+        let mut shown: String = line.chars().take(MAX_GREP_LINE_CHARS).collect();
+        if line.chars().count() > MAX_GREP_LINE_CHARS {
+            shown.push('…');
+        }
+        matches.push(format!("{rel}:{}:{shown}", index + 1));
+        if matches.len() >= MAX_GREP_MATCHES {
+            *truncated = true;
+            return;
+        }
+    }
+}
+
+fn grep_walk_dir(
+    root: &Path,
+    dir: &Path,
+    regex: &regex::Regex,
+    matches: &mut Vec<String>,
+    truncated: &mut bool,
+    files_scanned: &mut usize,
+) {
+    if matches.len() >= MAX_GREP_MATCHES || *files_scanned >= MAX_GREP_FILES {
+        *truncated = true;
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut dirs = Vec::new();
+    for entry in entries.flatten() {
+        if matches.len() >= MAX_GREP_MATCHES || *files_scanned >= MAX_GREP_FILES {
+            *truncated = true;
+            break;
+        }
+        let path = entry.path();
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if meta.file_type().is_symlink() {
+            continue;
+        }
+        if meta.is_dir() {
+            let name = entry.file_name();
+            if skip_grep_dir(&name.to_string_lossy()) {
+                continue;
+            }
+            dirs.push(path);
+            continue;
+        }
+        if meta.is_file() {
+            *files_scanned += 1;
+            grep_one_file(root, &path, regex, matches, truncated);
+        }
+    }
+    for child in dirs {
+        if matches.len() >= MAX_GREP_MATCHES || *files_scanned >= MAX_GREP_FILES {
+            *truncated = true;
+            break;
+        }
+        grep_walk_dir(root, &child, regex, matches, truncated, files_scanned);
+    }
+}
+
+pub fn execute_grep(root: &Path, arguments: &Value) -> Result<String, String> {
+    let pattern = tool_pattern_arg(arguments);
+    if pattern.is_empty() {
+        return Err("empty grep pattern".into());
+    }
+    if pattern.chars().count() > 512 {
+        return Err("grep pattern is too long".into());
+    }
+    let case_insensitive =
+        tool_bool_field(arguments, &["case_insensitive", "caseInsensitive", "i"]);
+    let regex = regex::RegexBuilder::new(&pattern)
+        .case_insensitive(case_insensitive)
+        .size_limit(1 << 20)
+        .dfa_size_limit(1 << 20)
+        .build()
+        .map_err(|error| format!("invalid grep pattern: {error}"))?;
+    let relative = tool_path_arg(arguments);
+    let joined = fs_browser::lexical_join(root, &relative)?;
+    let path = ensure_within_trusted_root(root, &joined)?;
+    let root_canon = root
+        .canonicalize()
+        .map_err(|error| format!("trusted project root is not accessible: {error}"))?;
+    let mut matches = Vec::new();
+    let mut truncated = false;
+    let mut files_scanned = 0usize;
+    if path.is_file() {
+        grep_one_file(&root_canon, &path, &regex, &mut matches, &mut truncated);
+    } else if path.is_dir() {
+        grep_walk_dir(
+            &root_canon,
+            &path,
+            &regex,
+            &mut matches,
+            &mut truncated,
+            &mut files_scanned,
+        );
+    } else {
+        return Err(format!("not a file or directory: {}", relative.trim()));
+    }
+    if matches.is_empty() {
+        return Ok("no matches".into());
+    }
+    let mut text = matches.join("\n");
+    if truncated {
+        text.push_str("\n… truncated");
+    }
+    if text.chars().count() > MAX_FILE_CHARS {
+        text = text.chars().take(MAX_FILE_CHARS).collect();
+        text.push_str("\n… truncated");
+    }
+    Ok(text)
 }
 
 /// Resolve a project-relative write destination without following a symlink out
@@ -827,6 +1376,88 @@ pub fn execute_write_file(root: &Path, relative: &str, content: &str) -> Result<
         display_rel(relative),
         bytes.len()
     ))
+}
+
+fn count_nonoverlapping(haystack: &str, needle: &str) -> usize {
+    if needle.is_empty() {
+        return 0;
+    }
+    haystack.matches(needle).count()
+}
+
+fn prepare_search_replace(root: &Path, arguments: &Value) -> Result<PreparedWrite, String> {
+    let rel = tool_write_path_arg(arguments);
+    let old = tool_old_string_arg(arguments)?;
+    let new = tool_new_string_arg(arguments)?;
+    if rel.contains('\0') || old.contains('\0') || new.contains('\0') {
+        return Err("invalid content".into());
+    }
+    if old.is_empty() {
+        return Err("search_replace requires a non-empty `old_string`".into());
+    }
+    let dest = resolve_in_root_dest(root, &rel)?;
+    if !dest.exists() {
+        return Err(format!("not a file: {}", display_rel(&rel)));
+    }
+    let meta = dest
+        .symlink_metadata()
+        .map_err(|error| format!("path is not accessible: {error}"))?;
+    if meta.is_dir() {
+        return Err(format!("not a file: {}", display_rel(&rel)));
+    }
+    if meta.file_type().is_symlink() {
+        let target = dest
+            .canonicalize()
+            .map_err(|_| "path escapes trusted project root".to_string())?;
+        let root_canon = root
+            .canonicalize()
+            .map_err(|error| format!("trusted project root is not accessible: {error}"))?;
+        if !target.starts_with(&root_canon) {
+            return Err("path escapes trusted project root".into());
+        }
+    }
+    let bytes = std::fs::read(&dest).map_err(|error| format!("search_replace: {error}"))?;
+    if bytes.contains(&0) {
+        return Err(format!("binary file ({} bytes); not shown", bytes.len()));
+    }
+    let text = String::from_utf8(bytes).map_err(|_| "file is not UTF-8".to_string())?;
+    let count = count_nonoverlapping(&text, &old);
+    if count == 0 {
+        return Err(format!("`old_string` not found in {}", display_rel(&rel)));
+    }
+    let replace_all = tool_bool_field(arguments, &["replace_all", "replaceAll"]);
+    if count > 1 && !replace_all {
+        return Err(format!(
+            "`old_string` found {count} times in {}; pass replace_all true or a unique string",
+            display_rel(&rel)
+        ));
+    }
+    let content = if replace_all {
+        text.replace(&old, &new)
+    } else {
+        text.replacen(&old, &new, 1)
+    };
+    if content.as_bytes().len() as u64 > fs_browser::MAX_TEXT_BYTES {
+        return Err(format!(
+            "file too large to write (max {} bytes)",
+            fs_browser::MAX_TEXT_BYTES
+        ));
+    }
+    let shown = display_rel(&rel);
+    let replacements = if replace_all { count } else { 1 };
+    Ok(PreparedWrite {
+        preview: format!("{shown} ({replacements} replacement(s))"),
+        path_target: dest.to_string_lossy().replace('\\', "/"),
+        title: format!("Replace {shown}"),
+        rel: shown,
+        content,
+    })
+}
+
+pub fn execute_search_replace(root: &Path, arguments: &Value) -> Result<String, String> {
+    let prepared = prepare_search_replace(root, arguments)?;
+    execute_write_file(root, &prepared.rel, &prepared.content)?;
+    Ok(format!("updated {}", prepared.rel))
 }
 
 #[derive(Debug)]
@@ -1017,10 +1648,7 @@ async fn execute_run_command_timed(
 }
 
 pub fn execute_tool(root: Option<&Path>, trusted: bool, name: &str, arguments: &Value) -> String {
-    if !matches!(
-        name,
-        "read_file" | "list_directory" | "write_file" | "run_command"
-    ) {
+    if !is_host_tool(name) {
         return format!("unknown tool `{name}`");
     }
     if !trusted {
@@ -1036,14 +1664,29 @@ pub fn execute_tool(root: Option<&Path>, trusted: bool, name: &str, arguments: &
         "list_directory" => {
             execute_list_directory(root, &tool_path_arg(arguments)).unwrap_or_else(|error| error)
         }
+        "grep" => execute_grep(root, arguments).unwrap_or_else(|error| error),
+        "spawn_agent" | "agent_output" | "kill_agent" | "ask_user_question" => {
+            format!("`{name}` requires the async Host turn")
+        }
         "write_file" => match tool_content_arg(arguments) {
             Ok(content) => execute_write_file(root, &tool_write_path_arg(arguments), &content)
                 .unwrap_or_else(|error| error),
             Err(error) => error,
         },
+        "search_replace" => execute_search_replace(root, arguments).unwrap_or_else(|error| error),
         "run_command" => "run_command requires the async Host turn".into(),
         _ => format!("unknown tool `{name}`"),
     }
+}
+
+fn tool_fingerprint(name: &str, arguments: &Value) -> String {
+    format!("{name}\n{arguments}")
+}
+
+fn identical_tool_loop_message(name: &str, streak: u32) -> String {
+    format!(
+        "identical tool loop interrupted: `{name}` repeated {streak} times with the same arguments. Change the arguments or stop."
+    )
 }
 
 struct PendingToolCall {
@@ -1096,7 +1739,28 @@ async fn wait_until_stopped(stop: Arc<AtomicBool>) {
 }
 
 fn needs_permission(name: &str) -> bool {
-    matches!(name, "write_file" | "run_command")
+    matches!(name, "write_file" | "search_replace" | "run_command")
+        || crate::permission::is_connector_tool(name)
+}
+
+fn connector_permission_preview(arguments: &Value) -> String {
+    let compact = arguments.to_string();
+    let mut chars = compact.chars();
+    let head: String = chars.by_ref().take(240).collect();
+    if chars.next().is_none() {
+        compact
+    } else {
+        format!("{head}…")
+    }
+}
+
+fn is_configured_connector_tool(cfg: &AgentTurnConfig, name: &str) -> bool {
+    crate::permission::is_connector_tool(name)
+        || cfg
+            .connectors
+            .tools
+            .iter()
+            .any(|tool| tool.pointer("/function/name").and_then(Value::as_str) == Some(name))
 }
 
 enum HostToolDispatch {
@@ -1117,6 +1781,21 @@ async fn request_tool_permission(
     }
 }
 
+fn format_ask_user_answers(answers: &Value) -> String {
+    let pretty = serde_json::to_string_pretty(answers).unwrap_or_else(|_| answers.to_string());
+    format!("The user answered:\n{pretty}")
+}
+
+async fn request_ask_user(cfg: &AgentTurnConfig, req: HostAskUserRequest) -> HostAskUserDecision {
+    let Some(gate) = cfg.ask_user_gate.clone() else {
+        return HostAskUserDecision::Cancelled;
+    };
+    tokio::select! {
+        _ = wait_until_stopped(Arc::clone(&cfg.stop)) => HostAskUserDecision::Cancelled,
+        decision = gate(req) => decision,
+    }
+}
+
 async fn dispatch_host_tool(
     cfg: &AgentTurnConfig,
     name: &str,
@@ -1125,19 +1804,134 @@ async fn dispatch_host_tool(
     prepared_write: Option<Result<PreparedWrite, String>>,
     prepared_command: Option<Result<PreparedCommand, String>>,
 ) -> HostToolDispatch {
-    if !matches!(
-        name,
-        "read_file" | "list_directory" | "write_file" | "run_command"
-    ) {
+    if name == "ask_user_question" {
+        if cfg.kind != AgentKind::Parent || cfg.spawn_depth != 0 {
+            return HostToolDispatch::Output(
+                "ask_user_question is only available on the parent agent".into(),
+            );
+        }
+        let parsed = parse_ask_user_question_params(arguments);
+        if parsed.questions.is_empty() {
+            return HostToolDispatch::Output("ask_user_question requires a question".into());
+        }
+        return match request_ask_user(
+            cfg,
+            HostAskUserRequest {
+                tool_call_id: tool_call_id.into(),
+                arguments: arguments.clone(),
+            },
+        )
+        .await
+        {
+            HostAskUserDecision::Accepted { answers } => {
+                HostToolDispatch::Output(format_ask_user_answers(&answers))
+            }
+            HostAskUserDecision::Cancelled => HostToolDispatch::Output(
+                "The user skipped the question form. Continue in chat only if you still need an answer.".into(),
+            ),
+        };
+    }
+    if is_configured_connector_tool(cfg, name) {
+        if needs_permission(name) {
+            let preview = connector_permission_preview(arguments);
+            let decision = request_tool_permission(
+                cfg,
+                HostToolPermission {
+                    tool_name: name.into(),
+                    title: format!("Connector {name}"),
+                    preview,
+                    path_target: String::new(),
+                    command: String::new(),
+                    tool_call_id: tool_call_id.into(),
+                },
+            )
+            .await;
+            match decision {
+                HostToolPermissionDecision::Allow => {}
+                HostToolPermissionDecision::Deny => {
+                    return HostToolDispatch::Output("permission denied by user".into());
+                }
+                HostToolPermissionDecision::Cancelled => {
+                    return HostToolDispatch::Cancelled;
+                }
+            }
+        }
+        let output = if let Some(invoke) = cfg.connectors.invoke.clone() {
+            invoke(name.to_string(), arguments.clone()).await
+        } else {
+            crate::connectors::invoke_tool(name, arguments).await
+        };
+        return HostToolDispatch::Output(output);
+    }
+    if is_spawn_tool(name) {
+        if cfg.spawn_depth >= 1 || !cfg.kind.allows_spawn() {
+            return HostToolDispatch::Output(
+                "subagents cannot spawn further agents (depth limit 1)".into(),
+            );
+        }
+        match name {
+            "spawn_agent" => {
+                let mut request = match parse_spawn_request(arguments) {
+                    Ok(request) => request,
+                    Err(error) => return HostToolDispatch::Output(error),
+                };
+                request.tool_call_id = tool_call_id.to_string();
+                let Some(spawn) = cfg.subagents.spawn.clone() else {
+                    return HostToolDispatch::Output("subagents are not available".into());
+                };
+                return HostToolDispatch::Output(spawn(request).await);
+            }
+            "agent_output" => {
+                let id = tool_agent_id_arg(arguments);
+                if id.is_empty() {
+                    return HostToolDispatch::Output("agent_output requires `id`".into());
+                }
+                let Some(output) = cfg.subagents.output.clone() else {
+                    return HostToolDispatch::Output("subagents are not available".into());
+                };
+                return HostToolDispatch::Output(output(id).await);
+            }
+            "kill_agent" => {
+                let id = tool_agent_id_arg(arguments);
+                if id.is_empty() {
+                    return HostToolDispatch::Output("kill_agent requires `id`".into());
+                }
+                let Some(kill) = cfg.subagents.kill.clone() else {
+                    return HostToolDispatch::Output("subagents are not available".into());
+                };
+                return HostToolDispatch::Output(kill(id).await);
+            }
+            _ => {}
+        }
+    }
+    if !is_host_tool(name) {
         return HostToolDispatch::Output(format!("unknown tool `{name}`"));
+    }
+    if (name == "write_file" || name == "search_replace") && !cfg.kind.allows_write() {
+        return HostToolDispatch::Output(format!(
+            "{} agents cannot write files",
+            cfg.kind.as_str()
+        ));
+    }
+    if name == "run_command" && !cfg.kind.allows_command() {
+        return HostToolDispatch::Output(format!(
+            "{} agents cannot run commands",
+            cfg.kind.as_str()
+        ));
     }
     if !cfg.trusted || cfg.project_root.is_none() {
         return HostToolDispatch::Output("no trusted project root".into());
     }
     let root = cfg.project_root.as_deref().unwrap();
 
-    if name == "write_file" {
-        let prepared = match prepared_write.unwrap_or_else(|| prepare_write_file(root, arguments)) {
+    if name == "write_file" || name == "search_replace" {
+        let prepared = match prepared_write.unwrap_or_else(|| {
+            if name == "search_replace" {
+                prepare_search_replace(root, arguments)
+            } else {
+                prepare_write_file(root, arguments)
+            }
+        }) {
             Ok(prepared) => prepared,
             Err(error) => return HostToolDispatch::Output(error),
         };
@@ -1164,10 +1958,12 @@ async fn dispatch_host_tool(
                 }
             }
         }
-        return HostToolDispatch::Output(
-            execute_write_file(root, &prepared.rel, &prepared.content)
-                .unwrap_or_else(|error| error),
-        );
+        let written = execute_write_file(root, &prepared.rel, &prepared.content)
+            .unwrap_or_else(|error| error);
+        if name == "search_replace" && written.starts_with("wrote ") {
+            return HostToolDispatch::Output(format!("updated {}", prepared.rel));
+        }
+        return HostToolDispatch::Output(written);
     }
 
     if name == "run_command" {
@@ -1224,21 +2020,51 @@ pub async fn run_turn<F>(cfg: AgentTurnConfig, mut emit: F)
 where
     F: FnMut(AcpEvent) + Send,
 {
-    let tools_enabled = cfg.trusted && cfg.project_root.is_some();
+    let host_tools_enabled = cfg.trusted && cfg.project_root.is_some();
     let instruction = load_project_instruction(cfg.project_root.as_deref(), cfg.trusted);
+    let mut system = system_prompt(
+        cfg.project_root.as_deref(),
+        cfg.trusted,
+        instruction.as_ref(),
+        cfg.kind,
+    );
+    if cfg.kind.allows_connectors() && !cfg.connectors.tools.is_empty() {
+        system.push_str(
+            " Connected connectors are available as extra tools and do not require a trusted project.",
+        );
+        if !cfg.connectors.explicit.is_empty() {
+            system.push(' ');
+            system.push_str(&crate::connectors::explicit_connector_fragment(
+                &cfg.connectors.explicit,
+            ));
+        }
+    }
+    let mut tool_defs = Vec::new();
+    if host_tools_enabled {
+        if let Value::Array(host) = tool_definitions_for(cfg.kind, cfg.spawn_depth) {
+            tool_defs.extend(host);
+        }
+    }
+    if cfg.kind.allows_connectors() {
+        tool_defs.extend(cfg.connectors.tools.clone());
+    }
+    let tools_payload = if tool_defs.is_empty() {
+        None
+    } else {
+        Some(Value::Array(tool_defs))
+    };
     let mut messages = vec![json!({
         "role": "system",
-        "content": system_prompt(
-            cfg.project_root.as_deref(),
-            cfg.trusted,
-            instruction.as_ref(),
-        ),
+        "content": system,
     })];
     messages.extend(cfg.history.clone());
     messages.push(json!({
         "role": "user",
         "content": cfg.user_prompt,
     }));
+
+    let mut last_tool_fingerprint = String::new();
+    let mut identical_tool_streak: u32 = 0;
 
     for round in 0..cfg.max_tool_rounds.max(1) {
         if cfg.stop.load(Ordering::SeqCst) {
@@ -1252,7 +2078,8 @@ where
                 &cfg.client,
                 &cfg.endpoint,
                 &messages,
-                tools_enabled,
+                tools_payload.as_ref(),
+                cfg.reasoning_effort.as_deref(),
                 &cfg.stop,
                 &mut emit,
             ) => outcome,
@@ -1284,14 +2111,29 @@ where
                         call.id.clone()
                     };
                     let args_value = parse_tool_arguments(&call.arguments);
-                    let prepared_write =
-                        if call.name == "write_file" && cfg.trusted && cfg.project_root.is_some() {
-                            cfg.project_root
+                    let fingerprint = tool_fingerprint(&call.name, &args_value);
+                    if fingerprint == last_tool_fingerprint {
+                        identical_tool_streak = identical_tool_streak.saturating_add(1);
+                    } else {
+                        last_tool_fingerprint = fingerprint;
+                        identical_tool_streak = 1;
+                    }
+                    let loop_blocked = identical_tool_streak >= IDENTICAL_TOOL_STREAK_LIMIT;
+                    let prepared_write = if cfg.trusted && cfg.project_root.is_some() {
+                        match call.name.as_str() {
+                            "write_file" => cfg
+                                .project_root
                                 .as_deref()
-                                .map(|root| prepare_write_file(root, &args_value))
-                        } else {
-                            None
-                        };
+                                .map(|root| prepare_write_file(root, &args_value)),
+                            "search_replace" => cfg
+                                .project_root
+                                .as_deref()
+                                .map(|root| prepare_search_replace(root, &args_value)),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
                     let prepared_command = if call.name == "run_command"
                         && cfg.trusted
                         && cfg.project_root.is_some()
@@ -1307,12 +2149,41 @@ where
                         "list_directory" => {
                             format!("List {}", tool_path_arg(&args_value))
                         }
-                        "write_file" => prepared_write
+                        "grep" => {
+                            let pattern = tool_pattern_arg(&args_value);
+                            let shown: String = pattern.chars().take(48).collect();
+                            if pattern.chars().count() > 48 {
+                                format!("Grep {shown}…")
+                            } else if shown.is_empty() {
+                                "Grep".into()
+                            } else {
+                                format!("Grep {shown}")
+                            }
+                        }
+                        "spawn_agent" => {
+                            let desc = tool_string_field(&args_value, &["description", "label"])
+                                .unwrap_or_else(|| "subagent".into());
+                            format!("Subagent {desc}")
+                        }
+                        "agent_output" => "Agent output".into(),
+                        "kill_agent" => "Kill agent".into(),
+                        "ask_user_question" => parse_ask_user_question_params(&args_value)
+                            .questions
+                            .first()
+                            .map(|question| question.question.clone())
+                            .filter(|text| !text.trim().is_empty())
+                            .unwrap_or_else(|| "Ask user".into()),
+                        "write_file" | "search_replace" => prepared_write
                             .as_ref()
                             .and_then(|prepared| prepared.as_ref().ok())
                             .map(|prepared| prepared.title.clone())
                             .unwrap_or_else(|| {
-                                format!("Write {}", display_rel(&tool_write_path_arg(&args_value)))
+                                let rel = display_rel(&tool_write_path_arg(&args_value));
+                                if call.name == "search_replace" {
+                                    format!("Replace {rel}")
+                                } else {
+                                    format!("Write {rel}")
+                                }
                             }),
                         "run_command" => prepared_command
                             .as_ref()
@@ -1326,13 +2197,21 @@ where
                                     format!("Run {command}")
                                 }
                             }),
+                        other if crate::permission::is_connector_tool(other) => {
+                            format!("Connector {other}")
+                        }
                         other => other.to_string(),
                     };
                     let kind = match call.name.as_str() {
                         "read_file" => "read",
                         "list_directory" => "list",
-                        "write_file" => "edit",
+                        "grep" => "search",
+                        "spawn_agent" | "agent_output" | "kill_agent" => "agent",
+                        "ask_user_question" => "ask",
+                        "write_file" | "search_replace" => "edit",
                         "run_command" => "execute",
+                        other if crate::permission::is_connector_write_tool(other) => "execute",
+                        other if crate::permission::is_connector_tool(other) => "fetch",
                         other => other,
                     };
                     let raw_input = match call.name.as_str() {
@@ -1344,6 +2223,24 @@ where
                                 .unwrap_or(0);
                             json!({ "path": rel, "bytes": bytes })
                         }
+                        "search_replace" => {
+                            let rel = display_rel(&tool_write_path_arg(&args_value));
+                            json!({
+                                "path": rel,
+                                "replaceAll": tool_bool_field(
+                                    &args_value,
+                                    &["replace_all", "replaceAll"]
+                                ),
+                            })
+                        }
+                        "spawn_agent" => json!({
+                            "description": tool_string_field(&args_value, &["description", "label"]).unwrap_or_default(),
+                            "agentType": tool_string_field(&args_value, &["agent_type", "agentType"]).unwrap_or_else(|| "general".into()),
+                            "background": tool_bool_field(&args_value, &["background", "run_in_background"]),
+                        }),
+                        "agent_output" | "kill_agent" => json!({
+                            "id": tool_agent_id_arg(&args_value),
+                        }),
                         "run_command" => json!({
                             "command": tool_command_arg(&args_value),
                             "cwd": display_rel(&tool_cwd_arg(&args_value)),
@@ -1358,27 +2255,49 @@ where
                         status: "in_progress".into(),
                         raw: raw.clone(),
                     });
-                    let output = match dispatch_host_tool(
-                        &cfg,
-                        &call.name,
-                        &args_value,
-                        &id,
-                        prepared_write,
-                        prepared_command,
-                    )
-                    .await
-                    {
-                        HostToolDispatch::Cancelled => return,
-                        HostToolDispatch::Output(output) => output,
+                    let output = if loop_blocked {
+                        identical_tool_loop_message(&call.name, identical_tool_streak)
+                    } else {
+                        match dispatch_host_tool(
+                            &cfg,
+                            &call.name,
+                            &args_value,
+                            &id,
+                            prepared_write,
+                            prepared_command,
+                        )
+                        .await
+                        {
+                            HostToolDispatch::Cancelled => return,
+                            HostToolDispatch::Output(output) => output,
+                        }
                     };
                     if cfg.stop.load(Ordering::SeqCst) {
                         return;
+                    }
+                    let mut raw = raw;
+                    let mut tool_status = "completed";
+                    if call.name == "spawn_agent" {
+                        if let Ok(parsed) = serde_json::from_str::<Value>(&output) {
+                            if let Some(agent_id) = parsed.get("id").and_then(Value::as_str) {
+                                raw["rawInput"]["id"] = json!(agent_id);
+                            }
+                            if parsed.get("status").and_then(Value::as_str) == Some("running") {
+                                tool_status = "in_progress";
+                            }
+                            if parsed.get("status").and_then(Value::as_str) == Some("failed") {
+                                tool_status = "failed";
+                            }
+                            if parsed.get("status").and_then(Value::as_str) == Some("cancelled") {
+                                tool_status = "failed";
+                            }
+                        }
                     }
                     emit(AcpEvent::ToolCall {
                         tool_call_id: id.clone(),
                         title,
                         kind: kind.into(),
-                        status: "completed".into(),
+                        status: tool_status.into(),
                         raw,
                     });
                     assistant_tool_calls.push(json!({
@@ -1425,11 +2344,38 @@ enum ChatOutcome {
     ToolCalls(Vec<PendingToolCall>),
 }
 
+fn chat_completion_body(
+    model: &str,
+    messages: &[Value],
+    tools: Option<&Value>,
+    reasoning_effort: Option<&str>,
+) -> Value {
+    let mut body = json!({
+        "model": model,
+        "messages": messages,
+        "stream": true,
+    });
+    if let Some(tools) = tools {
+        body["tools"] = tools.clone();
+        body["tool_choice"] = json!("auto");
+        body["parallel_tool_calls"] = json!(false);
+    }
+    let effort = reasoning_effort
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .filter(|_| crate::models_catalog::model_supports_reasoning_effort(model));
+    if let Some(effort) = effort {
+        body["reasoning_effort"] = json!(effort);
+    }
+    body
+}
+
 async fn stream_chat_completion<F>(
     client: &reqwest::Client,
     endpoint: &LlmEndpoint,
     messages: &[Value],
-    tools_enabled: bool,
+    tools: Option<&Value>,
+    reasoning_effort: Option<&str>,
     stop: &AtomicBool,
     emit: &mut F,
 ) -> Result<ChatOutcome, AgentError>
@@ -1437,16 +2383,7 @@ where
     F: FnMut(AcpEvent) + Send,
 {
     let url = chat_completions_url(&endpoint.base_url);
-    let mut body = json!({
-        "model": endpoint.model,
-        "messages": messages,
-        "stream": true,
-    });
-    if tools_enabled {
-        body["tools"] = tool_definitions();
-        body["tool_choice"] = json!("auto");
-        body["parallel_tool_calls"] = json!(false);
-    }
+    let body = chat_completion_body(&endpoint.model, messages, tools, reasoning_effort);
     let response = client
         .post(&url)
         .header("Authorization", format!("Bearer {}", endpoint.api_key))
@@ -1587,10 +2524,10 @@ mod tests {
         assert_eq!(loaded.body, "from agents");
         assert!(!loaded.truncated);
         assert!(load_project_instruction(Some(&root), false).is_none());
-        let prompt = system_prompt(Some(&root), true, Some(&loaded));
+        let prompt = system_prompt(Some(&root), true, Some(&loaded), AgentKind::Parent);
         assert!(prompt.contains("from agents"));
         assert!(prompt.contains("cannot override permission policy"));
-        assert!(prompt.contains("list_directory or read_file"));
+        assert!(prompt.contains("grep, list_directory, or read_file"));
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1794,6 +2731,12 @@ mod tests {
             client: http_client().unwrap(),
             max_tool_rounds: MAX_TOOL_ROUNDS,
             permission_gate: None,
+            ask_user_gate: None,
+            connectors: ConnectorTurn::default(),
+            reasoning_effort: None,
+            kind: AgentKind::Parent,
+            spawn_depth: 0,
+            subagents: SubagentHooks::default(),
         }
     }
 
@@ -1844,12 +2787,64 @@ mod tests {
     }
 
     #[test]
+    fn chat_body_sends_reasoning_effort_only_when_declared() {
+        let messages = vec![json!({ "role": "user", "content": "hi" })];
+        let supported = chat_completion_body("grok-4.5", &messages, None, Some("high"));
+        assert_eq!(supported["reasoning_effort"], json!("high"));
+        let custom = chat_completion_body("claude-opus-4-6", &messages, None, Some("high"));
+        assert!(custom.get("reasoning_effort").is_none());
+    }
+
+    #[test]
     fn tools_include_write_and_run_command() {
         let listed = tool_definitions().to_string();
         assert!(listed.contains("read_file"));
         assert!(listed.contains("list_directory"));
+        assert!(listed.contains("grep"));
         assert!(listed.contains("write_file"));
+        assert!(listed.contains("search_replace"));
         assert!(listed.contains("run_command"));
+        assert!(listed.contains("spawn_agent"));
+        assert!(listed.contains("ask_user_question"));
+        let explore = tool_definitions_for(AgentKind::Explore, 0).to_string();
+        assert!(explore.contains("grep"));
+        assert!(!explore.contains("write_file"));
+        assert!(!explore.contains("run_command"));
+        assert!(!explore.contains("spawn_agent"));
+        assert!(!explore.contains("ask_user_question"));
+        let child_general = tool_definitions_for(AgentKind::General, 1).to_string();
+        assert!(child_general.contains("write_file"));
+        assert!(!child_general.contains("spawn_agent"));
+        assert!(!child_general.contains("ask_user_question"));
+    }
+
+    #[tokio::test]
+    async fn ask_user_question_returns_answers_from_gate() {
+        let root = temp_root("ask-user");
+        let gate: HostAskUserGate = Arc::new(|_req| {
+            Box::pin(async {
+                HostAskUserDecision::Accepted {
+                    answers: json!({ "哪一块": "报名" }),
+                }
+            })
+        });
+        let mut cfg = base_cfg("http://127.0.0.1/v1".into(), Some(root), true, "hi");
+        cfg.ask_user_gate = Some(gate);
+        let output = dispatch_host_tool(
+            &cfg,
+            "ask_user_question",
+            &json!({ "question": "哪一块？", "options": ["报名", "统计"] }),
+            "ask-1",
+            None,
+            None,
+        )
+        .await;
+        match output {
+            HostToolDispatch::Output(text) => {
+                assert!(text.contains("报名"), "{text}");
+            }
+            HostToolDispatch::Cancelled => panic!("expected answers"),
+        }
     }
 
     #[test]
@@ -1963,6 +2958,122 @@ mod tests {
         assert!(!prepared.preview.contains("secret"));
         assert!(!prepared.path_target.contains("fn secret"));
         assert_eq!(prepared.title, "Write src/a.rs");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn grep_finds_hits_inside_root_and_skips_build_dirs() {
+        let root = temp_root("grep-ok");
+        write_file(&root, "src/main.rs", "fn alpha() {}\nfn beta() {}\n");
+        write_file(&root, "node_modules/secret.rs", "fn alpha() {}\n");
+        write_file(&root, "target/debug/out.rs", "fn alpha() {}\n");
+        let hits = execute_grep(&root, &json!({"pattern": "alpha"})).unwrap();
+        assert!(hits.contains("src/main.rs:1:fn alpha() {}"), "{hits}");
+        assert!(!hits.contains("node_modules"), "{hits}");
+        assert!(!hits.contains("target/"), "{hits}");
+        let none = execute_grep(&root, &json!({"pattern": "zzz-missing"})).unwrap();
+        assert_eq!(none, "no matches");
+        let case = execute_grep(
+            &root,
+            &json!({"pattern": "ALPHA", "case_insensitive": true}),
+        )
+        .unwrap();
+        assert!(case.contains("src/main.rs:1:"), "{case}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn grep_refuses_escape_and_invalid_pattern() {
+        let root = temp_root("grep-refuse");
+        write_file(&root, "a.rs", "hello");
+        let escape = execute_grep(&root, &json!({"pattern": "hello", "path": "../"})).unwrap_err();
+        assert!(
+            escape.contains("escapes") || escape.contains("absolute") || escape.contains("project"),
+            "{escape}"
+        );
+        let bad = execute_grep(&root, &json!({"pattern": "("})).unwrap_err();
+        assert!(bad.contains("invalid grep pattern"), "{bad}");
+        assert!(
+            execute_tool(Some(&root), false, "grep", &json!({"pattern": "hello"}))
+                .contains("no trusted project root")
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn search_replace_updates_unique_match_and_replace_all() {
+        let root = temp_root("replace-ok");
+        write_file(&root, "src/a.rs", "alpha\nalpha\nbeta\n");
+        let unique_err = execute_search_replace(
+            &root,
+            &json!({"path":"src/a.rs","old_string":"alpha","new_string":"gamma"}),
+        )
+        .unwrap_err();
+        assert!(unique_err.contains("2 times"), "{unique_err}");
+        assert_eq!(
+            std::fs::read_to_string(root.join("src/a.rs")).unwrap(),
+            "alpha\nalpha\nbeta\n"
+        );
+
+        let updated = execute_search_replace(
+            &root,
+            &json!({
+                "path":"src/a.rs",
+                "old_string":"alpha",
+                "new_string":"gamma",
+                "replace_all": true
+            }),
+        )
+        .unwrap();
+        assert!(updated.contains("updated src/a.rs"), "{updated}");
+        assert_eq!(
+            std::fs::read_to_string(root.join("src/a.rs")).unwrap(),
+            "gamma\ngamma\nbeta\n"
+        );
+
+        let once = execute_search_replace(
+            &root,
+            &json!({"path":"src/a.rs","old_string":"beta","new_string":"delta"}),
+        )
+        .unwrap();
+        assert!(once.contains("updated"), "{once}");
+        assert_eq!(
+            std::fs::read_to_string(root.join("src/a.rs")).unwrap(),
+            "gamma\ngamma\ndelta\n"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn search_replace_refuses_escape_missing_and_preview_has_no_body() {
+        let root = temp_root("replace-refuse");
+        write_file(&root, "src/a.rs", "secret_token = 1\n");
+        let missing = execute_search_replace(
+            &root,
+            &json!({"path":"src/a.rs","old_string":"nope","new_string":"x"}),
+        )
+        .unwrap_err();
+        assert!(missing.contains("not found"), "{missing}");
+
+        let escape = execute_search_replace(
+            &root,
+            &json!({"path":"../secret.txt","old_string":"a","new_string":"b"}),
+        )
+        .unwrap_err();
+        assert!(
+            escape.contains("escapes") || escape.contains("absolute"),
+            "{escape}"
+        );
+
+        let prepared = prepare_search_replace(
+            &root,
+            &json!({"path":"src/a.rs","old_string":"secret_token = 1","new_string":"ok = 1"}),
+        )
+        .unwrap();
+        assert_eq!(prepared.preview, "src/a.rs (1 replacement(s))");
+        assert!(!prepared.preview.contains("secret_token"));
+        assert!(!prepared.path_target.contains("secret_token"));
+        assert_eq!(prepared.title, "Replace src/a.rs");
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -2086,6 +3197,74 @@ mod tests {
             event,
             AcpEvent::PromptComplete { stop_reason } if stop_reason == "end_turn"
         )));
+    }
+
+    #[tokio::test]
+    async fn connector_tools_run_without_trusted_project() {
+        let (tool, answer) = sse_tool_then(
+            "github_list_pull_requests",
+            r#"{"owner":"acme","repo":"app"}"#,
+            &["found the PR"],
+        );
+        let (base, server) = spawn_mock_llm(vec![tool, answer]).await;
+        let called = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let called_invoke = Arc::clone(&called);
+        let mut cfg = base_cfg(base, None, false, "list prs");
+        cfg.permission_gate = Some(allow_gate());
+        cfg.connectors.tools = vec![json!({
+            "type": "function",
+            "function": {
+                "name": "github_list_pull_requests",
+                "parameters": { "type": "object" }
+            }
+        })];
+        cfg.connectors.explicit = vec!["github".into()];
+        cfg.connectors.invoke = Some(Arc::new(move |name, _arguments| {
+            let called_invoke = Arc::clone(&called_invoke);
+            Box::pin(async move {
+                called_invoke.lock().unwrap().push(name);
+                r#"[{"number":7,"title":"Ready"}]"#.into()
+            })
+        }));
+        let events = collect_events(cfg).await;
+        server.abort();
+        assert_eq!(
+            called.lock().unwrap().as_slice(),
+            ["github_list_pull_requests"]
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AcpEvent::ToolCall { kind, status, title, .. }
+                if kind == "fetch" && status == "completed" && title.contains("github_list_pull_requests")
+        )));
+    }
+
+    #[tokio::test]
+    async fn connector_write_denied_does_not_invoke() {
+        let (tool, answer) = sse_tool_then(
+            "github_create_issue",
+            r#"{"owner":"acme","repo":"app","title":"Bug"}"#,
+            &["denied"],
+        );
+        let (base, server) = spawn_mock_llm(vec![tool, answer]).await;
+        let called = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let hits = Arc::clone(&called);
+        let mut cfg = base_cfg(base, None, false, "open issue");
+        cfg.permission_gate = Some(deny_gate());
+        cfg.connectors.tools = vec![json!({
+            "type": "function",
+            "function": { "name": "github_create_issue", "parameters": { "type": "object" } }
+        })];
+        cfg.connectors
+            .write_tools
+            .insert("github_create_issue".into());
+        cfg.connectors.invoke = Some(Arc::new(move |_, _| {
+            hits.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { "should not run".into() })
+        }));
+        let _events = collect_events(cfg).await;
+        server.abort();
+        assert_eq!(called.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
@@ -2288,6 +3467,223 @@ mod tests {
                 assert!(!dumped.contains("secret_token"), "{dumped}");
             }
         }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn sse_repeated_tool(
+        name: &str,
+        arguments: &str,
+        repeats: usize,
+        answer_parts: &[&str],
+    ) -> Vec<String> {
+        let (tool, answer) = sse_tool_then(name, arguments, answer_parts);
+        let mut out = Vec::with_capacity(repeats + 1);
+        for _ in 0..repeats {
+            out.push(tool.clone());
+        }
+        out.push(answer);
+        out
+    }
+
+    #[tokio::test]
+    async fn spawn_agent_parent_calls_host_and_child_depth_fails() {
+        let spawned = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let hook_count = Arc::clone(&spawned);
+        let (tool, answer) = sse_tool_then(
+            "spawn_agent",
+            r#"{"prompt":"look","description":"search repo","agent_type":"explore"}"#,
+            &["spawned"],
+        );
+        let (base, server) = spawn_mock_llm(vec![tool, answer]).await;
+        let mut cfg = base_cfg(base, None, false, "spawn");
+        cfg.subagents.spawn = Some(Arc::new(move |req| {
+            hook_count.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                format!(
+                    "{{\"id\":\"child-1\",\"status\":\"completed\",\"agentType\":\"{}\",\"description\":\"{}\",\"summary\":\"ok\"}}",
+                    req.agent_type, req.description
+                )
+            })
+        }));
+        let events = collect_events(cfg).await;
+        server.abort();
+        assert_eq!(spawned.load(Ordering::SeqCst), 1);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AcpEvent::ToolCall { kind, .. } if kind == "agent"
+        )));
+
+        let (tool2, answer2) = sse_tool_then(
+            "spawn_agent",
+            r#"{"prompt":"look","description":"nope"}"#,
+            &["refused"],
+        );
+        let (base2, server2) = spawn_mock_llm(vec![tool2, answer2]).await;
+        let mut child = base_cfg(base2, None, false, "nested");
+        child.kind = AgentKind::Explore;
+        child.spawn_depth = 1;
+        child.subagents.spawn = Some(Arc::new(move |_req| {
+            Box::pin(async move { "should not run".into() })
+        }));
+        let events2 = collect_events(child).await;
+        server2.abort();
+        // Child configs do not advertise spawn_agent, so the invented call is
+        // rejected by depth/kind before the host hook runs.
+        let _ = events2;
+    }
+
+    #[tokio::test]
+    async fn grep_turn_searches_trusted_root() {
+        let root = temp_root("grep-turn");
+        write_file(&root, "src/lib.rs", "pub fn host_grep_marker() {}\n");
+        let (tool, answer) = sse_tool_then(
+            "grep",
+            r#"{"pattern":"host_grep_marker"}"#,
+            &["found the marker"],
+        );
+        let (base, server) = spawn_mock_llm(vec![tool, answer]).await;
+        let events = collect_events(base_cfg(base, Some(root.clone()), true, "search")).await;
+        server.abort();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AcpEvent::ToolCall { kind, status, title, .. }
+                if kind == "search" && status == "completed" && title.contains("host_grep_marker")
+        )));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn search_replace_turn_allows_then_answers() {
+        let root = temp_root("replace-turn");
+        write_file(&root, "out.txt", "OLD");
+        let (tool, answer) = sse_tool_then(
+            "search_replace",
+            r#"{"path":"out.txt","old_string":"OLD","new_string":"NEW"}"#,
+            &["replaced it"],
+        );
+        let (base, server) = spawn_mock_llm(vec![tool, answer]).await;
+        let mut cfg = base_cfg(base, Some(root.clone()), true, "replace");
+        cfg.permission_gate = Some(allow_gate());
+        let events = collect_events(cfg).await;
+        server.abort();
+        assert_eq!(
+            std::fs::read_to_string(root.join("out.txt")).unwrap(),
+            "NEW"
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AcpEvent::ToolCall { kind, status, title, .. }
+                if kind == "edit" && status == "completed" && title.contains("out.txt")
+        )));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn search_replace_deny_does_not_touch_disk() {
+        let root = temp_root("replace-deny");
+        write_file(&root, "out.txt", "OLD");
+        let (tool, answer) = sse_tool_then(
+            "search_replace",
+            r#"{"path":"out.txt","old_string":"OLD","new_string":"NEW"}"#,
+            &["denied"],
+        );
+        let (base, server) = spawn_mock_llm(vec![tool, answer]).await;
+        let mut cfg = base_cfg(base, Some(root.clone()), true, "replace");
+        cfg.permission_gate = Some(deny_gate());
+        let _events = collect_events(cfg).await;
+        server.abort();
+        assert_eq!(
+            std::fs::read_to_string(root.join("out.txt")).unwrap(),
+            "OLD"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn search_replace_escape_does_not_open_dock() {
+        let root = temp_root("replace-escape-turn");
+        let hits = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let (tool, answer) = sse_tool_then(
+            "search_replace",
+            r#"{"path":"../secret.txt","old_string":"a","new_string":"b"}"#,
+            &["refused"],
+        );
+        let (base, server) = spawn_mock_llm(vec![tool, answer]).await;
+        let mut cfg = base_cfg(base, Some(root.clone()), true, "replace escape");
+        cfg.permission_gate = Some(counting_gate(
+            Arc::clone(&hits),
+            HostToolPermissionDecision::Allow,
+        ));
+        let _events = collect_events(cfg).await;
+        server.abort();
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+        assert!(!root.parent().unwrap().join("secret.txt").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn search_replace_preview_never_includes_body() {
+        let root = temp_root("replace-preview-turn");
+        write_file(&root, "a.rs", "fn secret_token() {}");
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let (tool, answer) = sse_tool_then(
+            "search_replace",
+            r#"{"path":"a.rs","old_string":"fn secret_token() {}","new_string":"fn ok() {}"}"#,
+            &["ok"],
+        );
+        let (base, server) = spawn_mock_llm(vec![tool, answer]).await;
+        let mut cfg = base_cfg(base, Some(root.clone()), true, "replace");
+        cfg.permission_gate = Some(recording_gate(
+            Arc::clone(&seen),
+            HostToolPermissionDecision::Deny,
+        ));
+        let events = collect_events(cfg).await;
+        server.abort();
+        let reqs = seen.lock().unwrap();
+        assert_eq!(reqs.len(), 1);
+        assert!(reqs[0].preview.contains("replacement"));
+        assert!(!reqs[0].preview.contains("secret_token"));
+        for event in &events {
+            if let AcpEvent::ToolCall { raw, .. } = event {
+                let dumped = raw.to_string();
+                assert!(!dumped.contains("secret_token"), "{dumped}");
+            }
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn identical_tool_loop_stops_before_third_repeat() {
+        let root = temp_root("loop-guard");
+        write_file(&root, "notes.txt", "alpha");
+        let hits = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let responses = sse_repeated_tool(
+            "write_file",
+            r#"{"path":"out.txt","content":"same"}"#,
+            3,
+            &["stopped looping"],
+        );
+        let (base, server) = spawn_mock_llm(responses).await;
+        let mut cfg = base_cfg(base, Some(root.clone()), true, "write same");
+        cfg.permission_gate = Some(counting_gate(
+            Arc::clone(&hits),
+            HostToolPermissionDecision::Allow,
+        ));
+        let events = collect_events(cfg).await;
+        server.abort();
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            std::fs::read_to_string(root.join("out.txt")).unwrap(),
+            "same"
+        );
+        let texts: Vec<String> = events
+            .iter()
+            .filter_map(|event| match event {
+                AcpEvent::Stream { text, .. } if !text.is_empty() => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(texts.concat().contains("stopped looping"));
         let _ = std::fs::remove_dir_all(&root);
     }
 

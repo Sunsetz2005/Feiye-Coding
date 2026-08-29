@@ -190,6 +190,60 @@ export function mergeSessionChange(
   return [next, ...copy];
 }
 
+/**
+ * Files written in the latest user turn (from the last user message onward).
+ * Failed / cancelled tools are omitted.
+ */
+export function lastTurnFileChanges(
+  messages: ChatMessage[],
+): SessionFileChange[] {
+  let start = 0;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i]?.role === "user") {
+      start = i;
+      break;
+    }
+  }
+  return sessionChangesFromMessages(messages.slice(start)).filter((change) => {
+    const status = (change.status || "completed").toLowerCase();
+    return status === "completed";
+  });
+}
+
+/** Overlay live before/after payloads onto last-turn paths. */
+export function enrichFileChanges(
+  turn: SessionFileChange[],
+  live: SessionFileChange[] | undefined,
+): SessionFileChange[] {
+  if (!live?.length) return turn;
+  return turn.map((item) => {
+    const path = normalizePath(item.path);
+    const match = live.find((row) => normalizePath(row.path) === path);
+    if (!match) return item;
+    return {
+      ...item,
+      before: match.before ?? item.before,
+      after: match.after ?? item.after,
+    };
+  });
+}
+
+/** Line add/remove counts when before/after payloads exist. */
+export function countLineEdits(
+  before?: string,
+  after?: string,
+): { added: number; removed: number } | null {
+  if (before == null && after == null) return null;
+  const ops = diffLines(splitLines(before ?? ""), splitLines(after ?? ""));
+  let added = 0;
+  let removed = 0;
+  for (const op of ops) {
+    if (op.type === "add") added += 1;
+    else if (op.type === "delete") removed += 1;
+  }
+  return { added, removed };
+}
+
 /** Rebuild change list from persisted / live tool_step messages (chronological). */
 export function sessionChangesFromMessages(
   messages: ChatMessage[],

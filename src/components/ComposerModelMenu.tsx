@@ -19,7 +19,6 @@ import {
   GROK_BUILD_EFFORTS,
   GROK_BUILD_MODELS,
   PERMISSION_POLICIES,
-  SESSION_MODES,
   type EffortOption,
   type ModelOption,
   type PermissionPolicyId,
@@ -31,8 +30,6 @@ import {
   IconChevronDown,
   IconChevronRight,
   IconHandStop,
-  IconList,
-  IconRobot,
   IconRefresh,
   IconShield,
   IconShieldCheck,
@@ -218,6 +215,8 @@ export interface ComposerModelMenuProps {
     effortLow: string;
     resetDefaults?: string;
     resetDefaultsHint?: string;
+    modelsOfficial?: string;
+    modelsCustom?: string;
   };
   onModel: (id: string) => void;
   onEffort: (id: EffortId) => void;
@@ -237,6 +236,19 @@ function effortLabel(
 function effortShort(id: string, labels: ComposerModelMenuProps["labels"]): string {
   // Compact: just effort word (icon carries model)
   return effortLabel(id, labels);
+}
+
+export function partitionComposerModels(models: readonly ModelOption[]): {
+  official: ModelOption[];
+  custom: ModelOption[];
+} {
+  const official: ModelOption[] = [];
+  const custom: ModelOption[] = [];
+  for (const model of models) {
+    if (model.source === "custom") custom.push(model);
+    else official.push(model);
+  }
+  return { official, custom };
 }
 
 export function resolveComposerEfforts(opts: {
@@ -278,6 +290,7 @@ export function ComposerModelMenu({
     "composer-model",
   );
   const modelList = models ?? GROK_BUILD_MODELS;
+  const groupedModels = partitionComposerModels(modelList);
   const effortList = resolveComposerEfforts({ modelId, models, efforts });
   const hasEffort = effortList.length > 0;
   const hasReset = Boolean(onReset && labels.resetDefaults);
@@ -587,33 +600,81 @@ export function ComposerModelMenu({
                         </span>
                       </div>
                     )
-                    : modelList.map((model) => (
-                      <button
-                        key={model.id}
-                        type="button"
-                        role="menuitemradio"
-                        aria-checked={model.id === modelId}
-                        aria-disabled={disabled || undefined}
-                        className={
-                          "cmm__opt" +
-                          (model.id === modelId ? " is-active" : "")
-                        }
-                        onClick={() => {
-                          if (disabled) return;
-                          onModel(model.id);
-                          closeAll();
-                        }}
-                      >
-                        <span className="cmm__opt-main">
-                          <span className="cmm__opt-title">{model.label}</span>
-                        </span>
-                        {model.id === modelId ? (
-                          <span className="cmm__opt-check" aria-hidden>
-                            <IconCheck size={16} />
-                          </span>
+                    : (
+                      <>
+                        {groupedModels.official.length > 0 &&
+                        groupedModels.custom.length > 0 &&
+                        labels.modelsOfficial ? (
+                          <div className="cmm__group" role="presentation">
+                            {labels.modelsOfficial}
+                          </div>
                         ) : null}
-                      </button>
-                      ))
+                        {groupedModels.official.map((model) => (
+                          <button
+                            key={model.id}
+                            type="button"
+                            role="menuitemradio"
+                            aria-checked={model.id === modelId}
+                            aria-disabled={disabled || undefined}
+                            className={
+                              "cmm__opt" +
+                              (model.id === modelId ? " is-active" : "")
+                            }
+                            onClick={() => {
+                              if (disabled) return;
+                              onModel(model.id);
+                              closeAll();
+                            }}
+                          >
+                            <span className="cmm__opt-main">
+                              <span className="cmm__opt-title">
+                                {model.label}
+                              </span>
+                            </span>
+                            {model.id === modelId ? (
+                              <span className="cmm__opt-check" aria-hidden>
+                                <IconCheck size={16} />
+                              </span>
+                            ) : null}
+                          </button>
+                        ))}
+                        {groupedModels.custom.length > 0 &&
+                        labels.modelsCustom ? (
+                          <div className="cmm__group" role="presentation">
+                            {labels.modelsCustom}
+                          </div>
+                        ) : null}
+                        {groupedModels.custom.map((model) => (
+                          <button
+                            key={model.id}
+                            type="button"
+                            role="menuitemradio"
+                            aria-checked={model.id === modelId}
+                            aria-disabled={disabled || undefined}
+                            className={
+                              "cmm__opt" +
+                              (model.id === modelId ? " is-active" : "")
+                            }
+                            onClick={() => {
+                              if (disabled) return;
+                              onModel(model.id);
+                              closeAll();
+                            }}
+                          >
+                            <span className="cmm__opt-main">
+                              <span className="cmm__opt-title">
+                                {model.label}
+                              </span>
+                            </span>
+                            {model.id === modelId ? (
+                              <span className="cmm__opt-check" aria-hidden>
+                                <IconCheck size={16} />
+                              </span>
+                            ) : null}
+                          </button>
+                        ))}
+                      </>
+                    )
                   : effortList.map((option) => (
                       <button
                         key={option.id}
@@ -691,10 +752,9 @@ export function ComposerModelMenu({
   );
 }
 
-/* ---------- Access: mode + permission (Codex-style one entry) ---------- */
+/* ---------- Access: permission only (session modes live in the + menu) ---------- */
 
 export interface ComposerAccessMenuProps {
-  mode: string;
   policy: string;
   /**
    * Read-only while Runtime state is owned by a turn, permission, question,
@@ -704,13 +764,6 @@ export interface ComposerAccessMenuProps {
   labels: {
     access: string;
     accessHint: string;
-    mode: string;
-    modeAgent: string;
-    modePlan: string;
-    modeAsk: string;
-    modeAgentDesc: string;
-    modePlanDesc: string;
-    modeAskDesc: string;
     permission: string;
     policyAsk: string;
     policyAcceptEdits: string;
@@ -728,20 +781,7 @@ export interface ComposerAccessMenuProps {
     policyShortDontAsk: string;
     policyShortYolo: string;
   };
-  onMode: (id: string) => void;
   onPolicy: (id: PermissionPolicyId) => void;
-}
-
-function modeLabel(id: string, labels: ComposerAccessMenuProps["labels"]): string {
-  if (id === "plan") return labels.modePlan;
-  if (id === "ask") return labels.modeAsk;
-  return labels.modeAgent;
-}
-
-function modeDesc(id: string, labels: ComposerAccessMenuProps["labels"]): string {
-  if (id === "plan") return labels.modePlanDesc;
-  if (id === "ask") return labels.modeAskDesc;
-  return labels.modeAgentDesc;
 }
 
 function policyLabel(
@@ -813,22 +853,14 @@ function policyIcon(id: string) {
   }
 }
 
-function modeIcon(id: string) {
-  if (id === "plan") return <IconList size={18} />;
-  if (id === "ask") return <IconHandStop size={18} />;
-  return <IconRobot size={18} />;
-}
-
 export function ComposerAccessMenu({
-  mode,
   policy,
   disabled = false,
   labels,
-  onMode,
   onPolicy,
 }: ComposerAccessMenuProps) {
   const menu = usePortalMenu(
-    420,
+    320,
     320,
     undefined,
     [],
@@ -837,7 +869,6 @@ export function ComposerAccessMenu({
   const isDanger = policy === "always_approve";
   const full = policyLabel(policy, labels);
   const short = policyShort(policy, labels);
-  const title = `${labels.mode}: ${modeLabel(mode, labels)} · ${labels.permission}: ${full}`;
 
   return (
     <MenuShell
@@ -847,7 +878,7 @@ export function ComposerAccessMenu({
       triggerText={full}
       triggerShort={short}
       ariaLabel={labels.access}
-      title={title}
+      title={`${labels.permission}: ${full}`}
       danger={isDanger}
       readOnly={disabled}
     >
@@ -855,35 +886,7 @@ export function ComposerAccessMenu({
         <div className="cmm__header-title">{labels.accessHint}</div>
       </div>
 
-      <div className="cmm__section">{labels.mode}</div>
-      {SESSION_MODES.map((m) => (
-        <button
-          key={m.id}
-          type="button"
-          className={"cmm__opt cmm__opt--rich" + (m.id === mode ? " is-active" : "")}
-          aria-disabled={disabled || undefined}
-          onClick={() => {
-            if (disabled) return;
-            onMode(m.id);
-            menu.setOpen(false);
-          }}
-        >
-          <span className="cmm__opt-icon" aria-hidden>
-            {modeIcon(m.id)}
-          </span>
-          <span className="cmm__opt-main">
-            <span className="cmm__opt-title">{modeLabel(m.id, labels)}</span>
-            <span className="cmm__opt-desc">{modeDesc(m.id, labels)}</span>
-          </span>
-          {m.id === mode && (
-            <span className="cmm__opt-check" aria-hidden>
-              <IconCheck size={16} />
-            </span>
-          )}
-        </button>
-      ))}
-
-      <div className="cmm__section cmm__section--gap">{labels.permission}</div>
+      <div className="cmm__section">{labels.permission}</div>
       {PERMISSION_POLICIES.map((p) => (
         <button
           key={p.id}

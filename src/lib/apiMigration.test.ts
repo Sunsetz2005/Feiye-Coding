@@ -61,6 +61,9 @@ describe("migration API contracts", () => {
     await api.sessionInteractionsList();
     await api.sessionInteractionsList("s1");
     await api.sessionPlanArtifactsListV1("s1");
+    await api.connectorsList();
+    await api.connectorsConnect("gmail");
+    await api.connectorsDisconnect("gmail");
     await api.sessionResolveInteractionV1({
       interactionId: "i1",
       sessionId: "s1",
@@ -74,6 +77,9 @@ describe("migration API contracts", () => {
         ["session_interactions_list", { sessionId: null }],
         ["session_interactions_list", { sessionId: "s1" }],
         ["session_plan_artifacts_list_v1", { sessionId: "s1" }],
+        ["connectors_list", undefined],
+        ["connectors_connect", { id: "gmail", credential: null }],
+        ["connectors_disconnect", { id: "gmail" }],
       ]),
     );
   });

@@ -55,9 +55,7 @@ pub fn should_emit_stall(
 /// Human-readable stall message (English; UI maps via i18n).
 pub fn stream_stall_message(stall_seconds: u32) -> String {
     let secs = normalize_stream_stall_seconds(stall_seconds);
-    format!(
-        "No stream or tool progress for about {secs}s. Cancel this turn or keep waiting."
-    )
+    format!("No stream or tool progress for about {secs}s. Cancel this turn or keep waiting.")
 }
 
 #[cfg(test)]
@@ -95,8 +93,16 @@ mod tests {
         let t0 = Instant::now();
         let tool = t0 + Duration::from_secs(100);
         // 50s after last tool event with 120s window — not stalled.
-        assert!(!is_stream_stalled(tool, 120, tool + Duration::from_secs(50)));
-        assert!(is_stream_stalled(tool, 120, tool + Duration::from_secs(120)));
+        assert!(!is_stream_stalled(
+            tool,
+            120,
+            tool + Duration::from_secs(50)
+        ));
+        assert!(is_stream_stalled(
+            tool,
+            120,
+            tool + Duration::from_secs(120)
+        ));
     }
 
     #[test]

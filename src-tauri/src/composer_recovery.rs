@@ -503,9 +503,7 @@ fn validate_memory_pack(pack: &ComposerMemoryPackRefV1) -> Result<(), String> {
     if pack.version != COMPOSER_RECOVERY_VERSION {
         return Err("COMPOSER_RECOVERY_INVALID: memory pack version".into());
     }
-    if pack.selections.is_empty()
-        || pack.selections.len() > COMPOSER_MEMORY_PACK_MAX_SELECTIONS
-    {
+    if pack.selections.is_empty() || pack.selections.len() > COMPOSER_MEMORY_PACK_MAX_SELECTIONS {
         return Err("COMPOSER_RECOVERY_LIMIT: memory pack selection count".into());
     }
     let mut ids = HashSet::with_capacity(pack.selections.len());

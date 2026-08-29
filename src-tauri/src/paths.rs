@@ -6,14 +6,68 @@ use std::path::{Path, PathBuf};
 use directories::ProjectDirs;
 
 pub fn app_data_root() -> PathBuf {
+    let home = crate::process_util::user_home();
+    let temp = std::env::temp_dir();
     if let Some(custom) = crate::runtime_compat::product_home_override() {
-        return custom;
+        if user_data_root_is_isolated(&custom, &home, &temp) {
+            return custom;
+        }
+        tracing::warn!(
+            target: "sunsetz::paths",
+            path = %custom.display(),
+            "SUNSETZ_HOME is not isolated to the current user (shared folder, other home, or git checkout); ignoring override"
+        );
     }
     if let Some(proj) = ProjectDirs::from("dev", "sunsetz", "desktop") {
-        return proj.data_dir().to_path_buf();
+        let dir = proj.data_dir().to_path_buf();
+        if user_data_root_is_isolated(&dir, &home, &temp) {
+            return dir;
+        }
     }
-    // Fallback
     dirs_fallback()
+}
+
+/// True when `path` may hold this user's MCP, model, and connector data.
+///
+/// Allowed: current user home, or the process temp dir (tests / native smoke).
+/// Denied: another user's home, `/Users/Shared`, world-shared public folders,
+/// and any git checkout (so local models/MCP are never staged for GitHub).
+pub fn user_data_root_is_isolated(path: &Path, user_home: &Path, temp_dir: &Path) -> bool {
+    if path.as_os_str().is_empty() {
+        return false;
+    }
+    if is_inside_git_worktree(path) {
+        return false;
+    }
+    path_is_within(path, user_home) || path_is_within(path, temp_dir)
+}
+
+fn path_is_within(path: &Path, parent: &Path) -> bool {
+    let path = normalize_for_compare(path);
+    let parent = normalize_for_compare(parent);
+    path == parent || path.starts_with(&parent)
+}
+
+fn normalize_for_compare(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| {
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map(|cwd| cwd.join(path))
+                .unwrap_or_else(|_| path.to_path_buf())
+        }
+    })
+}
+
+fn is_inside_git_worktree(path: &Path) -> bool {
+    let start = normalize_for_compare(path);
+    for ancestor in start.ancestors() {
+        if ancestor.join(".git").exists() {
+            return true;
+        }
+    }
+    false
 }
 
 fn dirs_fallback() -> PathBuf {
@@ -28,6 +82,12 @@ fn dirs_fallback() -> PathBuf {
 
 pub fn ensure_app_dirs() -> std::io::Result<PathBuf> {
     let root = app_data_root();
+    std::fs::create_dir_all(&root)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&root, fs::Permissions::from_mode(0o700));
+    }
     std::fs::create_dir_all(root.join("projects"))?;
     std::fs::create_dir_all(root.join("sessions"))?;
     std::fs::create_dir_all(root.join("logs"))?;
@@ -184,10 +244,7 @@ pub fn find_agent_session_dir(
 
 /// Join agent session root + relative path like `images/1.jpg`.
 /// Rejects `..` segments. Returns None if the resolved file is missing.
-pub fn resolve_session_relative_media(
-    session_root: &Path,
-    relative: &str,
-) -> Option<PathBuf> {
+pub fn resolve_session_relative_media(session_root: &Path, relative: &str) -> Option<PathBuf> {
     let rel = relative.trim().trim_start_matches("./");
     if rel.is_empty() {
         return None;
@@ -225,6 +282,37 @@ mod tests {
     fn app_data_root_is_absolute_or_relative_path() {
         let p = app_data_root();
         assert!(!p.as_os_str().is_empty());
+    }
+
+    #[test]
+    fn user_data_root_rejects_git_checkout_and_shared_folder() {
+        let home = PathBuf::from("/Users/alice");
+        let temp = PathBuf::from("/tmp/sunsetz-test-temp");
+        assert!(user_data_root_is_isolated(
+            &home.join("Library/Application Support/dev.sunsetz.desktop"),
+            &home,
+            &temp,
+        ));
+        assert!(user_data_root_is_isolated(
+            &temp.join("smoke"),
+            &home,
+            &temp
+        ));
+        assert!(!user_data_root_is_isolated(
+            Path::new("/Users/Shared/Files From d.localized/Coding/Sunsetz"),
+            &home,
+            &temp,
+        ));
+        assert!(!user_data_root_is_isolated(
+            Path::new("/Users/bob/.sunsetz"),
+            &home,
+            &temp,
+        ));
+        let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+        assert!(
+            !user_data_root_is_isolated(&repo.join(".sunsetz-local"), &home, &temp),
+            "data inside this git checkout must not be treated as isolated"
+        );
     }
 
     #[test]

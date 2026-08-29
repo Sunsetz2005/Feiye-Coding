@@ -776,12 +776,53 @@ pub fn add_project(path: String, trust: bool) -> Result<Project, String> {
     Ok(p)
 }
 
-/// Remove project from the app list only — does **not** delete the disk folder
-/// or any chat sessions (sessions keep their project_id and become orphans).
+/// Delete every session belonging to a project (including archived journals).
+pub fn delete_project_sessions(project_id: &str) -> Result<usize, String> {
+    let ids: Vec<String> = load_sessions_index()
+        .into_iter()
+        .filter(|session| session.project_id.as_deref() == Some(project_id))
+        .map(|session| session.id)
+        .collect();
+    let n = ids.len();
+    for id in ids {
+        delete_session(&id)?;
+    }
+    Ok(n)
+}
+
+/// Remove the project from the app list and delete its chats.
+/// Does **not** delete the disk folder.
 pub fn remove_project(id: &str) -> Result<(), String> {
+    let _ = delete_project_sessions(id)?;
     let mut list = load_projects();
     list.retain(|p| p.id != id);
     save_projects(&list)
+}
+
+pub fn set_project_path(id: &str, path: &str) -> Result<Project, String> {
+    let path_buf = PathBuf::from(path);
+    if !path_buf.is_dir() {
+        return Err("path is not a directory".into());
+    }
+    let next = path_buf
+        .canonicalize()
+        .unwrap_or(path_buf)
+        .to_string_lossy()
+        .to_string();
+    let mut list = load_projects();
+    if list.iter().any(|p| p.id != id && p.path == next) {
+        return Err("another project already uses this folder".into());
+    }
+    let p = list
+        .iter_mut()
+        .find(|p| p.id == id)
+        .ok_or_else(|| "project not found".to_string())?;
+    p.path = next;
+    p.path_ok = true;
+    p.last_opened_at = Utc::now();
+    let clone = p.clone();
+    save_projects(&list)?;
+    Ok(clone)
 }
 
 pub fn rename_project(id: &str, name: &str) -> Result<Project, String> {
@@ -1975,5 +2016,65 @@ mod tests {
         assert!(legacy_loaded[0].attachments.is_none());
 
         fs::remove_dir_all(root).unwrap();
+    }
+
+    static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct IsolatedHome {
+        home: PathBuf,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl IsolatedHome {
+        fn new(label: &str) -> Self {
+            let lock = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let home = std::env::temp_dir().join(format!(
+                "sunsetz-store-{label}-{}-{}",
+                std::process::id(),
+                Uuid::new_v4()
+            ));
+            fs::create_dir_all(&home).unwrap();
+            std::env::set_var("SUNSETZ_HOME", &home);
+            Self { home, _lock: lock }
+        }
+    }
+
+    impl Drop for IsolatedHome {
+        fn drop(&mut self) {
+            std::env::remove_var("SUNSETZ_HOME");
+            let _ = fs::remove_dir_all(&self.home);
+        }
+    }
+
+    #[test]
+    fn remove_project_deletes_its_sessions_and_keeps_the_folder() {
+        let isolated = IsolatedHome::new("remove-project");
+        let folder = isolated.home.join("proj");
+        fs::create_dir_all(&folder).unwrap();
+        let project = add_project(folder.display().to_string(), true).expect("add");
+        let orphan = create_session(None, Some("orphan".into()), false).expect("orphan");
+        let owned =
+            create_session(Some(project.id.clone()), Some("owned".into()), false).expect("owned");
+        let archived = create_session(Some(project.id.clone()), Some("archived".into()), false)
+            .expect("archived");
+        update_sessions_index(|list| {
+            if let Some(session) = list.iter_mut().find(|item| item.id == archived.id) {
+                session.archived = true;
+            }
+            Ok(())
+        })
+        .expect("archive");
+
+        remove_project(&project.id).expect("remove");
+
+        assert!(folder.is_dir(), "disk folder must stay");
+        assert!(load_projects().iter().all(|item| item.id != project.id));
+        let remaining = load_sessions_index();
+        assert!(remaining.iter().any(|item| item.id == orphan.id));
+        assert!(!remaining.iter().any(|item| item.id == owned.id));
+        assert!(!remaining.iter().any(|item| item.id == archived.id));
+        assert!(!session_dir(&owned.id).exists());
+        assert!(!session_dir(&archived.id).exists());
+        assert!(session_dir(&orphan.id).exists());
     }
 }

@@ -1,7 +1,7 @@
 /**
  * Settings → Extensions: Skills + MCP + Plugins.
- * Skills/MCP from `grok inspect` with enable toggles (extensions.json / ACP inject).
- * Plugins from `grok plugin list/enable/…` (config.toml disabled list).
+ * Default kernel uses Host-owned inventory. Legacy Grok CLI inspect stays
+ * behind the ACP adapter. Marketplace connectors are Host adapters.
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";

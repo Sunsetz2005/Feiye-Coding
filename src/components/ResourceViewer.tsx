@@ -98,7 +98,9 @@ function clampTreeWidth(w: number, containerWidth: number): number {
 /** Request from chat (or elsewhere) to open a path/URL in this pane. */
 export type ResourceOpenTarget =
   | { type: "file"; path: string; title?: string }
-  | { type: "url"; url: string; title?: string };
+  | { type: "url"; url: string; title?: string }
+  | { type: "changes"; path?: string; title?: string }
+  | { type: "agent"; id: string; title?: string };
 
 export interface ResourceViewerProps {
   projectPath: string | null;
@@ -125,7 +127,7 @@ export interface ResourceViewerProps {
   planFocusKey?: number | null;
 }
 
-type SideMode = "files" | "changes" | "plan";
+type SideMode = "files" | "changes" | "plan" | "agent";
 
 type DiffViewState = {
   path: string;
@@ -251,6 +253,10 @@ export function ResourceViewer({
   // Default closed; session-only — not persisted; reset when pane hides.
   const [treeVisible, setTreeVisible] = useState(false);
   const [sideMode, setSideMode] = useState<SideMode>("files");
+  const [agentView, setAgentView] = useState<api.SessionSubagentView | null>(
+    null,
+  );
+  const [agentError, setAgentError] = useState<string | null>(null);
   const lastPlanFocusKey = useRef<number | null>(null);
   const [treeWidth, setTreeWidth] = useState(loadTreeWidth);
   const [resizingTree, setResizingTree] = useState(false);
@@ -1155,6 +1161,27 @@ export function ResourceViewer({
       void openAbsoluteFile(openRequest.path, openRequest.title);
     } else if (openRequest.type === "url") {
       openUrl(openRequest.url, openRequest.title);
+    } else if (openRequest.type === "changes") {
+      setSideMode("changes");
+      setTreeVisible(true);
+      const path = openRequest.path ? normalizePath(openRequest.path) : "";
+      if (path) {
+        const change = sessionChanges.find(
+          (row) => normalizePath(row.path) === path,
+        );
+        if (change) void loadChangeDiff(change);
+      }
+    } else if (openRequest.type === "agent") {
+      setSideMode("agent");
+      setTreeVisible(false);
+      setAgentError(null);
+      void api
+        .sessionSubagentGet(openRequest.id)
+        .then((view) => setAgentView(view))
+        .catch((err: unknown) => {
+          setAgentView(null);
+          setAgentError(err instanceof Error ? err.message : String(err));
+        });
     }
     onOpenRequestConsumed?.();
   }, [openRequest, openAbsoluteFile, openUrl, onOpenRequestConsumed]);
@@ -1940,7 +1967,30 @@ export function ResourceViewer({
         }
       >
         <div className="rp-split__preview">
-          {sideMode === "plan" && plan?.visible ? (
+          {sideMode === "agent" ? (
+            <div className="rp__empty-state" data-testid="resource-agent">
+              <div className="rp__empty-title">
+                {agentView?.description || tr("subagent.open")}
+              </div>
+              <div className="rp__empty-desc">
+                {agentError
+                  ? agentError
+                  : agentView
+                    ? `${agentView.agentType} · ${agentView.status}`
+                    : tr("subagent.loading")}
+              </div>
+              {agentView?.summary ? (
+                <pre className="rp-agent-transcript">{agentView.summary}</pre>
+              ) : null}
+              {agentView?.transcript?.length ? (
+                <pre className="rp-agent-transcript">
+                  {agentView.transcript
+                    .map((line) => `[${line.kind}] ${line.text}`)
+                    .join("\n")}
+                </pre>
+              ) : null}
+            </div>
+          ) : sideMode === "plan" && plan?.visible ? (
             <PlanReviewPanel
               plan={plan}
               forceExpandKey={planFocusKey}
@@ -1972,6 +2022,53 @@ export function ResourceViewer({
             ) : (
               <div className="rp__empty-state">{previewBody}</div>
             )
+          ) : !activeTab && sideMode === "files" && !treeVisible ? (
+            <div className="rp-home" data-testid="resource-home">
+              <button
+                type="button"
+                className="rp-home__item"
+                onClick={() => {
+                  setSideMode("files");
+                  setTreeVisible(true);
+                }}
+              >
+                <span className="rp-home__icon" aria-hidden>
+                  <IconFiles size={18} />
+                </span>
+                <span className="rp-home__copy">
+                  <strong>{tr("resources.homeFiles")}</strong>
+                  <small>{tr("resources.homeFilesHint")}</small>
+                </span>
+              </button>
+              <button
+                type="button"
+                className="rp-home__item"
+                onClick={() => showSidePanel("changes")}
+              >
+                <span className="rp-home__icon" aria-hidden>
+                  <IconFileDiff size={18} />
+                </span>
+                <span className="rp-home__copy">
+                  <strong>{tr("resources.homeChanges")}</strong>
+                  <small>{tr("resources.homeChangesHint")}</small>
+                </span>
+              </button>
+              {plan?.visible ? (
+                <button
+                  type="button"
+                  className="rp-home__item"
+                  onClick={() => showSidePanel("plan")}
+                >
+                  <span className="rp-home__icon" aria-hidden>
+                    <IconPlan size={18} />
+                  </span>
+                  <span className="rp-home__copy">
+                    <strong>{tr("resources.homePlan")}</strong>
+                    <small>{tr("resources.homePlanHint")}</small>
+                  </span>
+                </button>
+              ) : null}
+            </div>
           ) : !activeTab ? (
             <div className="rp__empty-state">
               <div className="rp__empty-title">

@@ -11,6 +11,10 @@
 //! - Mid-stream journal upserts are throttled (≥500ms or paragraph / force).
 //! - Pure stream silence past `streamStallSeconds` emits `session://stream_stall`.
 
+mod subagents;
+
+pub use subagents::SubagentView;
+
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -22,8 +26,9 @@ use tauri::{AppHandle, Emitter};
 use uuid::Uuid;
 
 use crate::acp_client::{
-    should_abort_provider_retry, AcpClient, AcpEvent, AskUserOutcome, AskUserQuestionItem,
-    PermissionOutcome, StreamKind, TransportWriteAck, HOST_PROVIDER_MAX_RETRIES,
+    parse_ask_user_question_params, should_abort_provider_retry, AcpClient, AcpEvent,
+    AskUserOutcome, AskUserQuestionItem, PermissionOutcome, StreamKind, TransportWriteAck,
+    HOST_PROVIDER_MAX_RETRIES,
 };
 use crate::agent_loop;
 use crate::cli_probe;
@@ -185,7 +190,7 @@ pub struct UiAskUserRequest {
 
 /// Full in-memory reverse-request. This is deliberately not part of the disk
 /// schema: it is meaningful only while its owning ACP connection is alive.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct PendingAskUser {
     interaction: InteractionSnapshotV1,
     rpc_id: u64,
@@ -196,6 +201,8 @@ struct PendingAskUser {
     raw: serde_json::Value,
     /// Prevent two UI retries from writing two replies concurrently.
     resolving: bool,
+    /// In-process Sunsetz kernel wait. ACP asks leave this empty.
+    host_reply: Option<tokio::sync::oneshot::Sender<AskUserOutcome>>,
 }
 
 impl PendingAskUser {
@@ -370,6 +377,8 @@ struct LiveSession {
     mock_stream: Option<MockStreamHandle>,
     /// Cancels the in-process Sunsetz agent turn.
     agent_cancel: Option<Arc<AtomicBool>>,
+    /// Id of the current parent kernel turn; subagents spawned here are cancelled with Stop.
+    host_turn_id: Option<String>,
     streaming_message_id: Option<String>,
     /// Accumulated assistant text for current turn (persisted on complete).
     stream_buf: String,
@@ -476,6 +485,9 @@ fn interrupt_pending_interactions(session: &mut LiveSession) -> InterruptedSessi
             .interaction
             .set_status(InteractionStatusV1::Interrupted);
         interactions.push(pending.interaction.clone());
+        if let Some(tx) = pending.host_reply.take() {
+            let _ = tx.send(AskUserOutcome::Cancelled);
+        }
     }
     let plan_artifacts = match crate::plan_artifacts::interrupt_process(
         &session.app_session_id,
@@ -698,6 +710,7 @@ fn extract_tool_ui_fields(raw: &serde_json::Value) -> (Option<String>, Option<St
         .or_else(|| raw.pointer("/rawInput/filePath"))
         .or_else(|| raw.pointer("/rawInput/target_file"))
         .or_else(|| raw.pointer("/rawInput/targetFile"))
+        .or_else(|| raw.pointer("/rawInput/id"))
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
     let command = raw
@@ -1086,7 +1099,7 @@ fn upsert_tool_step_message(
     });
 }
 
-fn persist_tool_step(
+pub(super) fn persist_tool_step(
     session_id: &str,
     tool_call_id: &str,
     status: &str,
@@ -1452,6 +1465,14 @@ pub struct SessionManager {
     parked: Mutex<HashMap<String, ParkedAgent>>,
     /// Serialize connect / park / unpark so openSession prefetch cannot race first send.
     connect_lock: tokio::sync::Mutex<()>,
+    /// In-process child agents for the Sunsetz kernel.
+    subagents: Arc<tokio::sync::Mutex<subagents::SubagentRegistry>>,
+}
+
+enum AskUserReplyChannel {
+    Acp(Arc<AcpClient>),
+    Host(tokio::sync::oneshot::Sender<AskUserOutcome>),
+    Taken,
 }
 
 struct AskUserResolveTarget {
@@ -1460,7 +1481,7 @@ struct AskUserResolveTarget {
     rpc_id: u64,
     activity_id: String,
     question_count: usize,
-    acp: Arc<AcpClient>,
+    reply: AskUserReplyChannel,
     snapshot: InteractionSnapshotV1,
 }
 
@@ -1498,6 +1519,9 @@ impl SessionManager {
             background: Mutex::new(HashMap::new()),
             parked: Mutex::new(HashMap::new()),
             connect_lock: tokio::sync::Mutex::new(()),
+            subagents: Arc::new(tokio::sync::Mutex::new(
+                subagents::SubagentRegistry::default(),
+            )),
         }
     }
 
@@ -1994,8 +2018,15 @@ impl SessionManager {
         let Some(s) = guard.as_mut() else {
             return Ok(());
         };
-        // Nothing to park
-        if s.acp.as_ref().is_none_or(|c| !c.is_alive()) {
+        let acp_alive = s.acp.as_ref().is_some_and(|c| c.is_alive());
+        let busy = matches!(
+            s.fsm.state(),
+            SessionState::Streaming | SessionState::AwaitingPermission | SessionState::Connecting
+        );
+        // Sunsetz kernel has no ACP process. Ready shells are cheap to rebuild,
+        // but an in-flight turn must still move to `background` or switching
+        // chats drops the live agent_loop (no reply, possible crash).
+        if !acp_alive && !busy {
             return Ok(());
         }
         if let Some(pending_status) = s.pending_skill_settlement {
@@ -2041,9 +2072,25 @@ impl SessionManager {
             SessionState::Streaming
             | SessionState::AwaitingPermission
             | SessionState::Connecting => {
-                // +1 for the demoted session already counted as live; need room.
-                let others = self.active_process_count().saturating_sub(1);
-                if others.saturating_add(1) > max {
+                // Do not call active_process_count() here: it also locks `inner`.
+                let background = self
+                    .background
+                    .lock()
+                    .values()
+                    .filter(|session| session.acp.as_ref().is_some_and(|c| c.is_alive()))
+                    .count() as u32;
+                let parked = self
+                    .parked
+                    .lock()
+                    .values()
+                    .filter(|parked| parked.acp.is_alive())
+                    .count() as u32;
+                let this_process = acp_alive as u32;
+                if background
+                    .saturating_add(parked)
+                    .saturating_add(this_process)
+                    > max
+                {
                     return Err(AgentError::new(
                         AgentErrorCode::ProcessLimit,
                         format!(
@@ -2142,6 +2189,7 @@ impl SessionManager {
             acp: Some(parked.acp),
             mock_stream: None,
             agent_cancel: None,
+            host_turn_id: None,
             streaming_message_id: None,
             stream_buf: String::new(),
             stream_thought: String::new(),
@@ -2718,7 +2766,15 @@ impl SessionManager {
                 {
                     let mut guard = self.inner.lock();
                     if let Some(s) = guard.as_ref() {
-                        if s.app_session_id != meta.id
+                        let busy = matches!(
+                            s.fsm.state(),
+                            SessionState::Streaming
+                                | SessionState::AwaitingPermission
+                                | SessionState::Connecting
+                        );
+                        if busy {
+                            // try_park_live should have moved this; never drop it.
+                        } else if s.app_session_id != meta.id
                             || s.acp.is_none()
                             || !matches!(s.fsm.state(), SessionState::Ready)
                         {
@@ -2766,6 +2822,7 @@ impl SessionManager {
                 acp: None,
                 mock_stream: None,
                 agent_cancel: None,
+                host_turn_id: None,
                 streaming_message_id: None,
                 stream_buf: String::new(),
                 stream_thought: String::new(),
@@ -3622,6 +3679,7 @@ impl SessionManager {
                             partial_answers: None,
                             raw,
                             resolving: false,
+                            host_reply: None,
                         });
                         let payload = s
                             .pending_ask_user
@@ -4436,6 +4494,7 @@ impl SessionManager {
                         partial_answers: None,
                         raw,
                         resolving: false,
+                        host_reply: None,
                     });
                     let payload = session
                         .pending_ask_user
@@ -4911,6 +4970,7 @@ impl SessionManager {
             attachments,
             None,
             Vec::new(),
+            Vec::new(),
         )
         .await
         .map(|(snapshot, _, _)| snapshot)
@@ -4926,6 +4986,7 @@ impl SessionManager {
         attachments: Option<Vec<MessageAttachmentStored>>,
         memory: Option<crate::memory_injection::MemoryInjectionPreparedV1>,
         skill_uses: Vec<crate::skill_feedback::SkillUseRecordV1>,
+        explicit_connectors: Vec<String>,
     ) -> Result<SessionSendResultV2, String> {
         let disclosure = memory.as_ref().map(|prepared| prepared.disclosure.clone());
         match self
@@ -4938,6 +4999,7 @@ impl SessionManager {
                 attachments,
                 memory.clone(),
                 skill_uses,
+                explicit_connectors,
             )
             .await
         {
@@ -4983,6 +5045,7 @@ impl SessionManager {
         attachments: Option<Vec<MessageAttachmentStored>>,
         memory: Option<crate::memory_injection::MemoryInjectionPreparedV1>,
         skill_uses: Vec<crate::skill_feedback::SkillUseRecordV1>,
+        explicit_connectors: Vec<String>,
     ) -> Result<
         (
             SessionSnapshot,
@@ -5006,7 +5069,7 @@ impl SessionManager {
         let turn_id = turn_id.unwrap_or_else(|| Uuid::new_v4().to_string());
 
         // If agent is a fresh session/new, wrap recent journal into the prompt once.
-        let (backend, app_sid, process_id, model_id, project_path, acp, agent_prompt) = {
+        let (backend, app_sid, process_id, model_id, project_path, acp, agent_prompt, effort) = {
             let mut guard = self.inner.lock();
             let s = guard.as_mut().ok_or("no active session")?;
             if let Some(pending_status) = s.pending_skill_settlement {
@@ -5104,6 +5167,7 @@ impl SessionManager {
                 s.project_path.clone(),
                 s.acp.clone(),
                 agent_prompt,
+                s.effort.clone(),
             )
         };
         Self::emit_state(&app, &self.snapshot());
@@ -5425,10 +5489,12 @@ impl SessionManager {
                     app_sid,
                     process_id,
                     model_id,
+                    effort,
                     project_path,
                     agent_prompt,
                     memory,
                     skill_uses,
+                    explicit_connectors,
                 )
                 .await;
         }
@@ -5604,10 +5670,12 @@ impl SessionManager {
         app_sid: String,
         process_id: String,
         model_id: Option<String>,
+        effort: Option<String>,
         project_path: Option<String>,
         agent_prompt: String,
         memory: Option<crate::memory_injection::MemoryInjectionPreparedV1>,
         skill_uses: Vec<crate::skill_feedback::SkillUseRecordV1>,
+        explicit_connectors: Vec<String>,
     ) -> Result<
         (
             SessionSnapshot,
@@ -5704,6 +5772,7 @@ impl SessionManager {
             }
         };
         let stop = Arc::new(AtomicBool::new(false));
+        let host_turn_id = Uuid::new_v4().to_string();
         {
             let mut live = self.inner.lock();
             if let Some(session) = live
@@ -5711,8 +5780,10 @@ impl SessionManager {
                 .filter(|session| session.app_session_id == app_sid)
             {
                 session.agent_cancel = Some(Arc::clone(&stop));
+                session.host_turn_id = Some(host_turn_id.clone());
             } else if let Some(session) = self.background.lock().get_mut(&app_sid) {
                 session.agent_cancel = Some(Arc::clone(&stop));
+                session.host_turn_id = Some(host_turn_id.clone());
             }
         }
 
@@ -5727,7 +5798,19 @@ impl SessionManager {
                 Box::pin(async move { mgr.request_host_tool_permission(app_gate, sid, req).await })
             })
         };
-        let cfg = agent_loop::AgentTurnConfig {
+        let permission_gate_for_child = permission_gate.clone();
+        let ask_user_gate: agent_loop::HostAskUserGate = {
+            let mgr = Arc::clone(self);
+            let app_gate = app.clone();
+            let sid = app_sid.clone();
+            Arc::new(move |req| {
+                let mgr = Arc::clone(&mgr);
+                let app_gate = app_gate.clone();
+                let sid = sid.clone();
+                Box::pin(async move { mgr.request_host_ask_user(app_gate, sid, req).await })
+            })
+        };
+        let mut cfg = agent_loop::AgentTurnConfig {
             endpoint,
             project_root: root,
             trusted,
@@ -5737,6 +5820,67 @@ impl SessionManager {
             client,
             max_tool_rounds: agent_loop::MAX_TOOL_ROUNDS,
             permission_gate: Some(permission_gate),
+            ask_user_gate: Some(ask_user_gate),
+            reasoning_effort: effort,
+            connectors: agent_loop::ConnectorTurn {
+                tools: crate::connectors::connected_tool_definitions(),
+                write_tools: crate::connectors::connected_write_tools()
+                    .into_iter()
+                    .collect(),
+                explicit: explicit_connectors,
+                invoke: Some(Arc::new(|name, arguments| {
+                    Box::pin(async move { crate::connectors::invoke_tool(&name, &arguments).await })
+                })),
+            },
+            kind: agent_loop::AgentKind::Parent,
+            spawn_depth: 0,
+            subagents: agent_loop::SubagentHooks::default(),
+        };
+        let child_template = agent_loop::AgentTurnConfig {
+            subagents: agent_loop::SubagentHooks::default(),
+            permission_gate: Some(permission_gate_for_child),
+            ..cfg.clone()
+        };
+        let registry = Arc::clone(&self.subagents);
+        let registry_out = Arc::clone(&self.subagents);
+        let registry_kill = Arc::clone(&self.subagents);
+        let session_for_spawn = app_sid.clone();
+        let turn_for_spawn = host_turn_id.clone();
+        let on_life: Arc<
+            dyn Fn(String, String, String, String, Option<String>, Option<String>) + Send + Sync,
+        > = Arc::new(|session, tool_id, status, title, detail, path| {
+            persist_tool_step(
+                &session,
+                &tool_id,
+                &status,
+                "agent",
+                &title,
+                detail.as_deref(),
+                path.as_deref(),
+            );
+        });
+        cfg.subagents = agent_loop::SubagentHooks {
+            spawn: Some(Arc::new(move |request| {
+                let registry = Arc::clone(&registry);
+                let template = child_template.clone();
+                let session = session_for_spawn.clone();
+                let turn = turn_for_spawn.clone();
+                let on_life = Arc::clone(&on_life);
+                Box::pin(async move {
+                    subagents::spawn_with_registry(
+                        registry, template, session, turn, request, on_life,
+                    )
+                    .await
+                })
+            })),
+            output: Some(Arc::new(move |id| {
+                let registry = Arc::clone(&registry_out);
+                Box::pin(async move { registry.lock().await.output(&id) })
+            })),
+            kill: Some(Arc::new(move |id| {
+                let registry = Arc::clone(&registry_kill);
+                Box::pin(async move { registry.lock().await.kill(&id) })
+            })),
         };
         let mgr = Arc::clone(self);
         let app_ev = app.clone();
@@ -5779,6 +5923,9 @@ impl SessionManager {
                     .filter(|session| session.app_session_id == automation_session_id)
                 {
                     session.agent_cancel = None;
+                } else if let Some(session) = mgr.background.lock().get_mut(&automation_session_id)
+                {
+                    session.agent_cancel = None;
                 }
             }
             SessionManager::emit_state(&app_ev, &mgr.snapshot());
@@ -5786,8 +5933,16 @@ impl SessionManager {
         Ok((self.snapshot(), memory_record, applied_skill_uses))
     }
 
+    pub async fn subagent_get(&self, id: &str) -> Result<SubagentView, String> {
+        self.subagents
+            .lock()
+            .await
+            .get(id)
+            .ok_or_else(|| format!("unknown agent `{id}`"))
+    }
+
     pub async fn stop(self: &Arc<Self>, app: AppHandle) -> Result<SessionSnapshot, String> {
-        let (acp, ask_activity, interrupted) = {
+        let (acp, ask_activity, interrupted, cancel_sid, cancel_turn) = {
             let mut guard = self.inner.lock();
             let s = guard.as_mut().ok_or("no active session")?;
             if let Some(h) = s.mock_stream.take() {
@@ -5796,6 +5951,8 @@ impl SessionManager {
             if let Some(cancel) = s.agent_cancel.take() {
                 cancel.store(true, Ordering::SeqCst);
             }
+            let cancel_sid = s.app_session_id.clone();
+            let cancel_turn = s.host_turn_id.clone();
             let was_busy = s.fsm.state() == SessionState::Streaming
                 || s.fsm.state() == SessionState::AwaitingPermission;
             let partial = s.stream_buf.trim().to_string();
@@ -5851,8 +6008,20 @@ impl SessionManager {
             s.last_stall_emit = None;
             let interrupted = interrupt_pending_interactions(s);
             let ask_activity = take_pending_ask_activity(s);
-            (s.acp.clone(), ask_activity, interrupted)
+            (
+                s.acp.clone(),
+                ask_activity,
+                interrupted,
+                cancel_sid,
+                cancel_turn,
+            )
         };
+        if let Some(turn_id) = cancel_turn {
+            let registry = Arc::clone(&self.subagents);
+            tokio::spawn(async move {
+                registry.lock().await.cancel_turn(&cancel_sid, &turn_id);
+            });
+        }
         Self::publish_interrupted_session_gates(&app, interrupted);
         if let Some(activity) = ask_activity {
             record_ask_user_activity(
@@ -6276,6 +6445,121 @@ impl SessionManager {
         match rx.await {
             Ok(outcome) => Self::host_decision_from_outcome(outcome),
             Err(_) => agent_loop::HostToolPermissionDecision::Cancelled,
+        }
+    }
+
+    fn install_host_ask_user(
+        &self,
+        app_sid: &str,
+        req: &agent_loop::HostAskUserRequest,
+    ) -> Result<
+        (
+            tokio::sync::oneshot::Receiver<AskUserOutcome>,
+            UiAskUserRequest,
+            InteractionSnapshotV1,
+            bool,
+        ),
+        String,
+    > {
+        fn install(
+            session: &mut LiveSession,
+            req: &agent_loop::HostAskUserRequest,
+        ) -> Result<
+            (
+                tokio::sync::oneshot::Receiver<AskUserOutcome>,
+                UiAskUserRequest,
+                InteractionSnapshotV1,
+            ),
+            String,
+        > {
+            if session.pending_ask_user.is_some() {
+                return Err("ask_user_question already pending".into());
+            }
+            let parsed = parse_ask_user_question_params(&req.arguments);
+            if parsed.questions.is_empty() {
+                return Err("ask_user_question requires a question".into());
+            }
+            session.host_rpc_seq = session.host_rpc_seq.saturating_add(1);
+            let rpc_id = session.host_rpc_seq;
+            let tool_call_id = if req.tool_call_id.trim().is_empty() {
+                None
+            } else {
+                Some(req.tool_call_id.clone())
+            };
+            let activity_id = ask_user_activity_id(tool_call_id.as_deref(), rpc_id);
+            let snapshot = InteractionSnapshotV1::new(
+                &session.app_session_id,
+                &session.process_id,
+                rpc_id,
+                tool_call_id.clone(),
+                InteractionPayloadV1::AskUser {
+                    questions: parsed.questions.clone(),
+                    partial_answers: None,
+                },
+            );
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let pending = PendingAskUser {
+                interaction: snapshot.clone(),
+                rpc_id,
+                tool_call_id,
+                activity_id,
+                questions: parsed.questions,
+                partial_answers: None,
+                raw: req.arguments.clone(),
+                resolving: false,
+                host_reply: Some(tx),
+            };
+            let request = pending.ui_payload(&session.app_session_id);
+            session.pending_ask_user = Some(pending);
+            SessionManager::touch_activity_locked(session);
+            Ok((rx, request, snapshot))
+        }
+
+        {
+            let mut live = self.inner.lock();
+            if let Some(session) = live
+                .as_mut()
+                .filter(|session| session.app_session_id == app_sid)
+            {
+                let (rx, request, snapshot) = install(session, req)?;
+                return Ok((rx, request, snapshot, false));
+            }
+        }
+        let mut background = self.background.lock();
+        let session = background
+            .get_mut(app_sid)
+            .ok_or_else(|| format!("session not active: {app_sid}"))?;
+        let (rx, request, snapshot) = install(session, req)?;
+        Ok((rx, request, snapshot, true))
+    }
+
+    async fn request_host_ask_user(
+        self: &Arc<Self>,
+        app: AppHandle,
+        app_sid: String,
+        req: agent_loop::HostAskUserRequest,
+    ) -> agent_loop::HostAskUserDecision {
+        let (rx, request, snapshot, background) = match self.install_host_ask_user(&app_sid, &req) {
+            Ok(installed) => installed,
+            Err(error) => {
+                tracing::warn!("host ask_user install failed: {error}");
+                return agent_loop::HostAskUserDecision::Cancelled;
+            }
+        };
+        Self::publish_interaction(&app, &snapshot);
+        let _ = app.emit("session://ask_user", &request);
+        if background {
+            let _ = app.emit(
+                "session://background_ask_user",
+                serde_json::json!({ "sessionId": request.session_id }),
+            );
+        }
+        Self::emit_state(&app, &self.snapshot());
+        match rx.await {
+            Ok(AskUserOutcome::Accepted { answers }) => {
+                agent_loop::HostAskUserDecision::Accepted { answers }
+            }
+            Ok(AskUserOutcome::Cancelled) | Err(_) => agent_loop::HostAskUserDecision::Cancelled,
         }
     }
 
@@ -6892,10 +7176,6 @@ impl SessionManager {
             interaction_id: Option<&str>,
             partial_answers: Option<&serde_json::Value>,
         ) -> Result<AskUserResolveTarget, String> {
-            let acp = session
-                .acp
-                .clone()
-                .ok_or_else(|| "ACP client missing".to_string())?;
             let pending = session
                 .pending_ask_user
                 .as_mut()
@@ -6909,6 +7189,17 @@ impl SessionManager {
             {
                 *stored = partial_answers.cloned();
             }
+            let reply = match pending.host_reply.take() {
+                Some(tx) => AskUserReplyChannel::Host(tx),
+                None => match session.acp.clone() {
+                    Some(acp) => AskUserReplyChannel::Acp(acp),
+                    None => {
+                        pending.interaction.restore_pending();
+                        pending.resolving = false;
+                        return Err("ACP client missing".into());
+                    }
+                },
+            };
             let activity_id = pending.activity_id.clone();
             let question_count = pending.questions.len();
             let snapshot = pending.interaction.clone();
@@ -6919,7 +7210,7 @@ impl SessionManager {
                 rpc_id: pending_rpc_id,
                 activity_id,
                 question_count,
-                acp,
+                reply,
                 snapshot,
             })
         }
@@ -7034,7 +7325,7 @@ impl SessionManager {
     ) -> Result<SessionSnapshot, String> {
         let accepted = matches!(decision.as_str(), "accepted" | "answered" | "accept");
         let accepted_answers = answers.unwrap_or_else(|| serde_json::json!({}));
-        let target = self.prepare_ask_user_resolution(
+        let mut target = self.prepare_ask_user_resolution(
             session_id.as_deref(),
             rpc_id,
             interaction_id.as_deref(),
@@ -7050,11 +7341,17 @@ impl SessionManager {
         } else {
             AskUserOutcome::Cancelled
         };
-        if let Err(error) = target
-            .acp
-            .respond_ask_user_question(target.rpc_id, outcome)
-            .await
-        {
+        let reply = std::mem::replace(&mut target.reply, AskUserReplyChannel::Taken);
+        let write_result = match reply {
+            AskUserReplyChannel::Acp(acp) => {
+                acp.respond_ask_user_question(target.rpc_id, outcome).await
+            }
+            AskUserReplyChannel::Host(tx) => tx
+                .send(outcome)
+                .map_err(|_| "ask_user_question waiter dropped".to_string()),
+            AskUserReplyChannel::Taken => Ok(()),
+        };
+        if let Err(error) = write_result {
             if let Some(restored) = self.restore_ask_user_after_write_failure(&target) {
                 Self::publish_interaction(&app, &restored);
             }
@@ -7231,6 +7528,7 @@ mod tests {
             acp: None,
             mock_stream: None,
             agent_cancel: None,
+            host_turn_id: None,
             streaming_message_id: Some(format!("phase-{session_id}-0")),
             stream_buf: String::new(),
             stream_thought: String::new(),
@@ -7263,6 +7561,41 @@ mod tests {
         }
     }
 
+    #[test]
+    fn sunsetz_busy_session_parks_into_background_without_acp() {
+        let mgr = SessionManager::new();
+        *mgr.inner.lock() = Some(test_live_session("sid-a"));
+        mgr.try_park_live().unwrap();
+        assert!(mgr.inner.lock().is_none());
+        assert!(mgr.background.lock().contains_key("sid-a"));
+        assert_eq!(
+            mgr.background
+                .lock()
+                .get("sid-a")
+                .map(|session| session.process_id.clone())
+                .as_deref(),
+            Some("process-sid-a")
+        );
+    }
+
+    #[test]
+    fn sunsetz_ready_session_without_acp_is_not_parked() {
+        let mgr = SessionManager::new();
+        let mut live = test_live_session("sid-ready");
+        live.fsm.end_stream().unwrap();
+        live.streaming_message_id = None;
+        *mgr.inner.lock() = Some(live);
+        mgr.try_park_live().unwrap();
+        assert!(mgr.background.lock().is_empty());
+        assert_eq!(
+            mgr.inner
+                .lock()
+                .as_ref()
+                .map(|session| session.app_session_id.as_str()),
+            Some("sid-ready")
+        );
+    }
+
     fn pending_ask(session_id: &str, rpc_id: u64) -> PendingAskUser {
         let questions = vec![AskUserQuestionItem {
             id: "q-1".into(),
@@ -7291,6 +7624,7 @@ mod tests {
                 "futureField": { "kept": true }
             }),
             resolving: false,
+            host_reply: None,
         }
     }
 
@@ -7386,7 +7720,7 @@ mod tests {
             "tool_step|in_progress|read|Read file\n\n/tmp/a.rs"
         );
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
-            "../tests/fixtures/acp/assistant_tool_timeline.json"
+            "../../tests/fixtures/acp/assistant_tool_timeline.json"
         ))
         .unwrap();
         let mut messages = Vec::new();
@@ -7443,7 +7777,7 @@ mod tests {
     #[test]
     fn context_compact_keeps_phase_order_from_golden_fixture() {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
-            "../tests/fixtures/acp/context_compact_timeline.json"
+            "../../tests/fixtures/acp/context_compact_timeline.json"
         ))
         .unwrap();
         let mut messages = Vec::new();
@@ -7504,9 +7838,10 @@ mod tests {
 
     #[test]
     fn ask_user_activity_lifecycle_matches_golden_fixture() {
-        let fixture: serde_json::Value =
-            serde_json::from_str(include_str!("../tests/fixtures/acp/ask_user_activity.json"))
-                .unwrap();
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/acp/ask_user_activity.json"
+        ))
+        .unwrap();
         let rpc_id = fixture["rpcId"].as_u64().unwrap();
         let tool_call_id = fixture["toolCallId"].as_str().unwrap();
         let question_count = fixture["questionCount"].as_u64().unwrap() as usize;
@@ -7672,6 +8007,7 @@ mod tests {
             partial_answers: None,
             raw: json!({}),
             resolving: false,
+            host_reply: None,
         });
 
         let activity = take_pending_ask_activity(&mut session).unwrap();

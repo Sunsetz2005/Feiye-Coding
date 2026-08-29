@@ -17,11 +17,7 @@ use tauri::http::{header, Method, Request, Response, StatusCode};
 const MAX_CHUNK: u64 = 2 * 1024 * 1024; // 2 MiB
 
 fn mime_from_path(path: &str) -> &'static str {
-    let ext = path
-        .rsplit('.')
-        .next()
-        .unwrap_or("")
-        .to_ascii_lowercase();
+    let ext = path.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
     match ext.as_str() {
         "mp4" | "m4v" => "video/mp4",
         "webm" => "video/webm",
@@ -302,10 +298,7 @@ fn handle_file_request(request: Request<Vec<u8>>, path: PathBuf) -> Response<Vec
         .header(header::CACHE_CONTROL, "no-cache");
 
     if partial && len > 0 {
-        builder = builder.header(
-            header::CONTENT_RANGE,
-            format!("bytes {start}-{end}/{len}"),
-        );
+        builder = builder.header(header::CONTENT_RANGE, format!("bytes {start}-{end}/{len}"));
     }
 
     builder
@@ -334,9 +327,6 @@ mod tests {
         assert_eq!(parse_range("bytes=100-", 1000), Some((100, 999)));
         assert_eq!(parse_range("bytes=0-999999999", 500), Some((0, 499)));
         let big = MAX_CHUNK * 4;
-        assert_eq!(
-            parse_range("bytes=0-", big),
-            Some((0, MAX_CHUNK - 1))
-        );
+        assert_eq!(parse_range("bytes=0-", big), Some((0, MAX_CHUNK - 1)));
     }
 }

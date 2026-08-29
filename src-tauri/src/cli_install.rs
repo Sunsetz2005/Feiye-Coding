@@ -127,7 +127,10 @@ pub fn parse_checksum_for_file(body: &str, filename: &str) -> Option<String> {
         }
         if let Some(name) = parts.next() {
             let name = name.trim_start_matches('*');
-            if name == want || name.ends_with(want) || Path::new(name).file_name().and_then(|s| s.to_str()) == Some(want) {
+            if name == want
+                || name.ends_with(want)
+                || Path::new(name).file_name().and_then(|s| s.to_str()) == Some(want)
+            {
                 return Some(hex_part.to_ascii_lowercase());
             }
         } else {
@@ -350,9 +353,7 @@ async fn download_to_file(
     // After redirects, re-check final URL when available.
     let final_url = resp.url().to_string();
     if !is_allowed_download_url(&final_url) {
-        return Err(format!(
-            "download redirected off allowlist: {final_url}"
-        ));
+        return Err(format!("download redirected off allowlist: {final_url}"));
     }
     let total = resp.content_length();
     let mut stream = resp.bytes_stream();
@@ -392,10 +393,7 @@ async fn download_to_file(
                 app,
                 CliInstallProgress {
                     phase: "downloading".into(),
-                    message: format!(
-                        "Downloading… {}",
-                        format_bytes_pair(downloaded, total)
-                    ),
+                    message: format!("Downloading… {}", format_bytes_pair(downloaded, total)),
                     percent: Some(percent.min(90.0)),
                     bytes_downloaded: Some(downloaded),
                     total_bytes: total,
@@ -414,7 +412,9 @@ async fn download_to_file(
     if let Some(t) = total {
         if downloaded != t {
             let _ = fs::remove_file(dest);
-            return Err(format!("download size mismatch: got {downloaded}, expected {t}"));
+            return Err(format!(
+                "download size mismatch: got {downloaded}, expected {t}"
+            ));
         }
     }
     let digest = hex::encode(hasher.finalize());
@@ -511,8 +511,7 @@ fn link_install(download_path: &Path, version: &str) -> Result<PathBuf, String> 
     if final_download != *download_path {
         let _ = fs::remove_file(&final_download);
         if fs::rename(download_path, &final_download).is_err() {
-            fs::copy(download_path, &final_download)
-                .map_err(|e| format!("place binary: {e}"))?;
+            fs::copy(download_path, &final_download).map_err(|e| format!("place binary: {e}"))?;
             let _ = fs::remove_file(download_path);
         }
     }
@@ -604,10 +603,7 @@ async fn try_download_all_mirrors(
         let candidates: Vec<String> = if cfg!(target_os = "windows") {
             vec![
                 artifact.clone(),
-                format!(
-                    "{}/grok-{version}-{platform}",
-                    base.trim_end_matches('/')
-                ),
+                format!("{}/grok-{version}-{platform}", base.trim_end_matches('/')),
             ]
         } else {
             vec![artifact]
@@ -707,8 +703,7 @@ pub async fn install_cli_latest(app: AppHandle) -> Result<CliInstallResult, Stri
     );
 
     let published =
-        fetch_published_checksum(&client, &mirror_used, &version, &platform, &artifact_name)
-            .await;
+        fetch_published_checksum(&client, &mirror_used, &version, &platform, &artifact_name).await;
     let checksum_verified = match published {
         Some(expected) => {
             if expected != digest {
@@ -774,9 +769,7 @@ pub async fn install_cli_latest(app: AppHandle) -> Result<CliInstallResult, Stri
     let linked = link_install(&tmp_path, &version)?;
     let _ = fs::remove_file(tmp_path.with_extension("sha256"));
     let probe = cli_probe::probe_cli(Some(linked.to_string_lossy().as_ref()));
-    let path = probe
-        .path
-        .or_else(|| Some(linked.display().to_string()));
+    let path = probe.path.or_else(|| Some(linked.display().to_string()));
     let version_out = probe.version.or(Some(ver_line));
 
     emit(
@@ -845,9 +838,7 @@ mod tests {
         assert!(is_allowed_download_url(
             "https://x.ai/cli/grok-0.2.111-macos-x86_64"
         ));
-        assert!(is_allowed_download_url(
-            "https://x.ai/cli/SHA256SUMS"
-        ));
+        assert!(is_allowed_download_url("https://x.ai/cli/SHA256SUMS"));
     }
 
     #[test]
@@ -861,15 +852,11 @@ mod tests {
         assert!(!is_allowed_download_url(
             "https://storage.googleapis.com/other-bucket/cli/stable"
         ));
-        assert!(!is_allowed_download_url(
-            "https://x.ai/not-cli/payload"
-        ));
+        assert!(!is_allowed_download_url("https://x.ai/not-cli/payload"));
         assert!(!is_allowed_download_url(
             "https://user:pass@x.ai/cli/stable"
         ));
-        assert!(!is_allowed_download_url(
-            "https://x.ai/cli/../etc/passwd"
-        ));
+        assert!(!is_allowed_download_url("https://x.ai/cli/../etc/passwd"));
         assert!(!is_allowed_download_url(""));
         assert!(!is_allowed_download_url("ftp://x.ai/cli/stable"));
     }
@@ -882,7 +869,10 @@ aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  grok-0.2.111-m
 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb *other-file
 ";
         let h = parse_checksum_for_file(body, "grok-0.2.111-macos-aarch64").unwrap();
-        assert_eq!(h, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        assert_eq!(
+            h,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
     }
 
     #[test]

@@ -26,6 +26,7 @@ import {
   normalizePathToken,
   resolveFileToken,
 } from "@/lib/pathRefs";
+import { splitStreamingMarkdown } from "@/entities/session/streamingMarkdown";
 import { useSmoothStream } from "@/hooks/useSmoothStream";
 import { cn } from "@/lib/utils";
 import { CodeBlock } from "./CodeBlock";
@@ -99,10 +100,18 @@ export const MarkdownChat = memo(function MarkdownChat({
     return Array.from(new Set(Object.values(imagePathMap))).filter(isImagePath);
   }, [imagePathMap]);
 
-  // Adaptive buffer: drip when sparse, catch up hard on large dumps.
-  const smoothChildren = useSmoothStream(children, streaming);
-  const source = softCloseMarkdown(
-    smoothChildren || (streaming ? " " : ""),
+  const parts = streaming
+    ? splitStreamingMarkdown(children)
+    : { frozen: "", tail: children };
+  const smoothTail = useSmoothStream(
+    streaming ? parts.tail : children,
+    streaming,
+  );
+  const frozenSource = streaming ? parts.frozen : "";
+  const liveSource = softCloseMarkdown(
+    streaming
+      ? smoothTail || (frozenSource ? "" : " ")
+      : smoothTail || "",
     streaming,
   );
 
@@ -229,6 +238,131 @@ export const MarkdownChat = memo(function MarkdownChat({
     );
   };
 
+  const linkComponent = (interactive: boolean) =>
+    function MarkdownLink({
+      href,
+      children: c,
+    }: {
+      href?: string;
+      children?: ReactNode;
+    }) {
+      const text = textFromChildren(c).trim();
+      const hrefStr = typeof href === "string" ? href : "";
+      if (interactive) {
+        const card =
+          (hrefStr && renderPathOrUrl(hrefStr, text)) ||
+          (text && text !== hrefStr ? renderPathOrUrl(text) : null);
+        if (card) return card;
+      }
+      return (
+        <a
+          className="chat-md__link"
+          href={href}
+          target="_blank"
+          rel="noreferrer noopener"
+        >
+          {c}
+        </a>
+      );
+    };
+
+  const markdownComponents = {
+    a: linkComponent(true),
+    pre: ({ children: c }: { children?: ReactNode }) => <>{c}</>,
+    code: ({
+      className: cnCode,
+      children: c,
+    }: {
+      className?: string;
+      children?: ReactNode;
+    }) => {
+      const match =
+        typeof cnCode === "string" ? /language-([\w#+-]+)/.exec(cnCode) : null;
+      const block = Boolean(match) || String(c).includes("\n");
+      if (!block) {
+        const raw = textFromChildren(c).replace(/\n$/, "").trim();
+        const card = renderPathOrUrl(raw);
+        if (card) return card;
+        return <code className="chat-md__inline-code">{c}</code>;
+      }
+      return (
+        <CodeBlock
+          language={match?.[1] || "text"}
+          wrapLabel={tr("chat.codeWrap")}
+          unwrapLabel={tr("chat.codeUnwrap")}
+          copyLabel={tr("message.copy")}
+        >
+          {c as ReactNode}
+        </CodeBlock>
+      );
+    },
+    table: ({ children: c }: { children?: ReactNode }) => (
+      <div className="chat-md__table-wrap">
+        <table>{c}</table>
+      </div>
+    ),
+    hr: () => null,
+    img: ({ src, alt }: { src?: string; alt?: string }) => {
+      if (!src || typeof src !== "string") return null;
+      const card = renderPathOrUrl(
+        src,
+        typeof alt === "string" ? alt : undefined,
+      );
+      if (card) return card;
+      return (
+        <ImageUi
+          className="md-body__img md-body__img--card"
+          src={src}
+          alt={typeof alt === "string" ? alt : ""}
+          labels={imageLabels}
+        />
+      );
+    },
+  };
+
+  const liveMarkdownComponents = {
+    ...markdownComponents,
+    a: linkComponent(false),
+    img: ({ src, alt }: { src?: string; alt?: string }) =>
+      src ? (
+        <img className="md-body__img" src={src} alt={alt || ""} />
+      ) : null,
+    code: ({
+      className: cnCode,
+      children: c,
+    }: {
+      className?: string;
+      children?: ReactNode;
+    }) => {
+      const match =
+        typeof cnCode === "string" ? /language-([\w#+-]+)/.exec(cnCode) : null;
+      const block = Boolean(match) || String(c).includes("\n");
+      if (!block) {
+        return <code className="chat-md__inline-code">{c}</code>;
+      }
+      return (
+        <CodeBlock
+          language={match?.[1] || "text"}
+          wrapLabel={tr("chat.codeWrap")}
+          unwrapLabel={tr("chat.codeUnwrap")}
+          copyLabel={tr("message.copy")}
+        >
+          {c as ReactNode}
+        </CodeBlock>
+      );
+    },
+  };
+
+  const renderMarkdown = (source: string, interactive = true) =>
+    source ? (
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={interactive ? markdownComponents : liveMarkdownComponents}
+      >
+        {source}
+      </ReactMarkdown>
+    ) : null;
+
   return (
     <div
       className={cn(
@@ -238,77 +372,12 @@ export const MarkdownChat = memo(function MarkdownChat({
         className,
       )}
     >
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        components={{
-          a: ({ href, children: c }) => {
-            const text = textFromChildren(c).trim();
-            const hrefStr = typeof href === "string" ? href : "";
-            const card =
-              (hrefStr && renderPathOrUrl(hrefStr, text)) ||
-              (text && text !== hrefStr ? renderPathOrUrl(text) : null);
-            if (card) return card;
-            return (
-              <a
-                className="chat-md__link"
-                href={href}
-                target="_blank"
-                rel="noreferrer noopener"
-              >
-                {c}
-              </a>
-            );
-          },
-          pre: ({ children: c }) => <>{c}</>,
-          code: ({ className: cnCode, children: c }) => {
-            const match =
-              typeof cnCode === "string"
-                ? /language-([\w#+-]+)/.exec(cnCode)
-                : null;
-            const block = Boolean(match) || String(c).includes("\n");
-            if (!block) {
-              const raw = textFromChildren(c).replace(/\n$/, "").trim();
-              const card = renderPathOrUrl(raw);
-              if (card) return card;
-              return <code className="chat-md__inline-code">{c}</code>;
-            }
-            return (
-              <CodeBlock
-                language={match?.[1] || "text"}
-                wrapLabel={tr("chat.codeWrap")}
-                unwrapLabel={tr("chat.codeUnwrap")}
-                copyLabel={tr("message.copy")}
-              >
-                {c as ReactNode}
-              </CodeBlock>
-            );
-          },
-          table: ({ children: c }) => (
-            <div className="chat-md__table-wrap">
-              <table>{c}</table>
-            </div>
-          ),
-          hr: () => null,
-          img: ({ src, alt }) => {
-            if (!src || typeof src !== "string") return null;
-            const card = renderPathOrUrl(
-              src,
-              typeof alt === "string" ? alt : undefined,
-            );
-            if (card) return card;
-            return (
-              <ImageUi
-                className="md-body__img md-body__img--card"
-                src={src}
-                alt={typeof alt === "string" ? alt : ""}
-                labels={imageLabels}
-              />
-            );
-          },
-        }}
-      >
-        {source}
-      </ReactMarkdown>
+      {frozenSource ? (
+        <div className="chat-md__frozen">{renderMarkdown(frozenSource)}</div>
+      ) : null}
+      {liveSource ? (
+        <div className="chat-md__live">{renderMarkdown(liveSource, false)}</div>
+      ) : null}
     </div>
   );
 });

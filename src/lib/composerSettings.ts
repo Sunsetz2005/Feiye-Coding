@@ -30,6 +30,7 @@ export function isComposerSettingAction(action: string): boolean {
     action === "project" ||
     action === "goal" ||
     action === "plan" ||
+    action === "ask" ||
     action === "record-skill"
   );
 }

@@ -965,6 +965,7 @@ export async function sessionSendV2(request: {
     contextPack: MemoryContextPackRequestV1;
   } | null;
   skillSelections?: SkillSelectionRequestV1[];
+  connectorSelections?: Array<{ id: string; selection?: "explicit" }>;
 }): Promise<SessionSendResultV2> {
   return invoke("session_send_v2", {
     request: {
@@ -976,6 +977,7 @@ export async function sessionSendV2(request: {
       memoryContextPack: request.memoryContextPack ?? null,
       memoryRetry: request.memoryRetry ?? null,
       skillSelections: request.skillSelections ?? [],
+      connectorSelections: request.connectorSelections ?? [],
     },
   });
 }
@@ -1051,6 +1053,23 @@ export async function sessionFork(
 
 export async function sessionStop(): Promise<SessionSnapshot> {
   return invoke("session_stop");
+}
+
+export interface SessionSubagentView {
+  id: string;
+  parentSessionId: string;
+  description: string;
+  agentType: string;
+  status: "queued" | "running" | "completed" | "failed" | "cancelled";
+  background: boolean;
+  summary: string;
+  transcript: { kind: string; text: string }[];
+}
+
+export async function sessionSubagentGet(
+  id: string,
+): Promise<SessionSubagentView> {
+  return invoke("session_subagent_get", { id });
 }
 
 export async function sessionDisconnect(): Promise<SessionSnapshot> {
@@ -1557,6 +1576,10 @@ export async function projectRemove(id: string) {
 
 export async function projectRename(id: string, name: string) {
   return invoke("project_rename", { id, name });
+}
+
+export async function projectSetPath(id: string, path: string) {
+  return invoke("project_set_path", { id, path });
 }
 
 export async function projectSetPinned(id: string, pinned: boolean) {
@@ -2560,6 +2583,32 @@ export interface ProvidersListResult {
 
 export async function providersList() {
   return invoke<ProvidersListResult>("providers_list");
+}
+
+export interface ConnectorStateV1 {
+  id: string;
+  slug: string;
+  developer: string;
+  version: string;
+  enabled: boolean;
+  connected: boolean;
+  lastError: string | null;
+  tools: string[];
+}
+
+export async function connectorsList() {
+  return invoke<ConnectorStateV1[]>("connectors_list");
+}
+
+export async function connectorsConnect(id: string, credential?: string | null) {
+  return invoke<ConnectorStateV1>("connectors_connect", {
+    id,
+    credential: credential ?? null,
+  });
+}
+
+export async function connectorsDisconnect(id: string) {
+  return invoke<ConnectorStateV1>("connectors_disconnect", { id });
 }
 
 /** Switch to official Grok Build or a custom provider (writes config.toml default). */

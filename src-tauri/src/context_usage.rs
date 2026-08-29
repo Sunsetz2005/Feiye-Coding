@@ -50,10 +50,7 @@ fn parse_inference_line(line: &str, agent_session_id: &str) -> Option<InferenceU
 }
 
 /// Read only the tail of the Runtime log; newest matching inference wins.
-pub fn latest_inference_usage(
-    agent_home: &Path,
-    agent_session_id: &str,
-) -> Option<InferenceUsage> {
+pub fn latest_inference_usage(agent_home: &Path, agent_session_id: &str) -> Option<InferenceUsage> {
     if agent_session_id.trim().is_empty() {
         return None;
     }

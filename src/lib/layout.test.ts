@@ -28,6 +28,8 @@ describe("layout prefs", () => {
       asideWidth: 320,
       asideCollapsed: false,
       sidebarCollapsed: true,
+      sidebarGroupBy: "list",
+      sidebarSessionSort: "priority",
     });
     expect(data[LAYOUT_STORAGE_KEY]).toBeTruthy();
     const loaded = loadLayout(storage);
@@ -36,11 +38,15 @@ describe("layout prefs", () => {
     expect(loaded.sidebarWidth).toBe(280);
     expect(loaded.asideWidth).toBe(320);
     expect(loaded.sidebarCollapsed).toBe(true);
+    expect(loaded.sidebarGroupBy).toBe("list");
+    expect(loaded.sidebarSessionSort).toBe("priority");
   });
 
   it("parseLayout falls back safely", () => {
     expect(parseLayout(null).asideCollapsed).toBe(true);
     expect(parseLayout(null).sidebarCollapsed).toBe(false);
+    expect(parseLayout(null).sidebarGroupBy).toBe("project");
+    expect(parseLayout(null).sidebarSessionSort).toBe("recent");
   });
 
   it("clamps aside width", () => {

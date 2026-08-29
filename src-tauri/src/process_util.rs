@@ -21,7 +21,7 @@ pub fn user_home() -> PathBuf {
                 return PathBuf::from(h);
             }
         }
-        return PathBuf::from(".");
+        return std::env::temp_dir().join("sunsetz-missing-home");
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -36,7 +36,8 @@ pub fn user_home() -> PathBuf {
                 return PathBuf::from(h);
             }
         }
-        PathBuf::from(".")
+        // Never fall back to cwd — that can be a shared git checkout.
+        std::env::temp_dir().join("sunsetz-missing-home")
     }
 }
 
@@ -84,7 +85,10 @@ pub fn looks_runnable(path: &Path) -> bool {
             return false;
         }
         // Symlink that does not resolve: not runnable
-        if !std::fs::metadata(path).map(|m| m.is_file()).unwrap_or(false) {
+        if !std::fs::metadata(path)
+            .map(|m| m.is_file())
+            .unwrap_or(false)
+        {
             return false;
         }
     }

@@ -197,7 +197,7 @@
 
 .ask-user-dock__icon-btn:active:not(:disabled),
 .ask-user-dock__send:active:not(:disabled) {
-  transform: scale(0.92);
+  transform: scale(0.98);
 }
 
 .ask-user-dock__icon-btn:disabled,

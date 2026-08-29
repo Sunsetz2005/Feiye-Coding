@@ -55,8 +55,7 @@ afterEach(() => {
 });
 
 describe("SetupWizard settings patch migration", () => {
-  it("persists a manually selected Runtime path as a field-level patch", async () => {
-    const user = userEvent.setup();
+  it("shows sign-in and skip without Grok CLI or xAI key entries", () => {
     render(
       <SetupWizard
         tr={createT("en")}
@@ -67,22 +66,14 @@ describe("SetupWizard settings patch migration", () => {
         onAccountLoginOauth={vi.fn(async () => false)}
       />,
     );
-
-    await user.click(
-      await screen.findByRole("button", { name: /Legacy Grok CLI/ }),
+    expect(screen.getByTestId("setup-wizard").textContent).toContain(
+      "Sign in to Sunsetz",
     );
-    await user.click(
-      await screen.findByRole("button", { name: "Choose local binary…" }),
-    );
-
-    await waitFor(() => {
-      expect(apiMock.settingsPatchV1).toHaveBeenCalledWith({
-        manualCliPath: "/opt/sunsetz/bin/runtime",
-      });
-    });
-    expect(apiMock.probeCli).toHaveBeenCalledWith(
-      "/opt/sunsetz/bin/runtime",
-    );
+    expect(screen.getByRole("button", { name: /Sign in with Sunsetz/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Skip for now" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Legacy Grok CLI/ })).toBeNull();
+    expect(screen.queryByText(/console\.x\.ai/i)).toBeNull();
+    expect(screen.queryByText(/Runtime/i)).toBeNull();
   });
 
   it("commits completion flags together after account setup is skipped", async () => {
@@ -100,9 +91,6 @@ describe("SetupWizard settings patch migration", () => {
     );
 
     await user.click(screen.getByRole("button", { name: "Skip for now" }));
-    await user.click(
-      await screen.findByRole("button", { name: "Enter Sunsetz" }),
-    );
 
     await waitFor(() => {
       expect(apiMock.settingsPatchV1).toHaveBeenCalledWith({
@@ -131,9 +119,6 @@ describe("SetupWizard settings patch migration", () => {
     );
 
     await user.click(screen.getByRole("button", { name: "Skip for now" }));
-    await user.click(
-      await screen.findByRole("button", { name: "Enter Sunsetz" }),
-    );
 
     await waitFor(() => {
       expect(apiMock.settingsPatchV1).toHaveBeenCalledWith({

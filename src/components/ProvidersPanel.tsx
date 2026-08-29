@@ -7,6 +7,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type MouseEvent,
 } from "react";
@@ -64,6 +65,14 @@ function slugify(raw: string): string {
     .slice(0, 48);
 }
 
+export function uniqueProviderId(name: string, existingIds: string[]): string {
+  const base = slugify(name) || "provider";
+  if (!existingIds.includes(base)) return base;
+  let n = 2;
+  while (existingIds.includes(`${base}-${n}`)) n += 1;
+  return `${base}-${n}`;
+}
+
 function hostOf(url: string): string {
   try {
     return new URL(url).host || url;
@@ -88,6 +97,8 @@ export function ProvidersPanel({
   const [busy, setBusy] = useState(false);
   const [showKey, setShowKey] = useState(false);
   const [remoteModels, setRemoteModels] = useState<string[]>([]);
+  const [modelListOpen, setModelListOpen] = useState(false);
+  const modelFieldRef = useRef<HTMLDivElement>(null);
   const [hint, setHint] = useState<string | null>(null);
   const [hintTone, setHintTone] = useState<"ok" | "err" | "muted">("muted");
   const [deleteTarget, setDeleteTarget] = useState<{
@@ -134,6 +145,18 @@ export function ProvidersPanel({
   useEffect(() => {
     void reload();
   }, [reload]);
+
+  useEffect(() => {
+    if (!modelListOpen) return;
+    const onPointerDown = (event: PointerEvent) => {
+      const root = modelFieldRef.current;
+      if (root && event.target instanceof Node && !root.contains(event.target)) {
+        setModelListOpen(false);
+      }
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    return () => document.removeEventListener("pointerdown", onPointerDown);
+  }, [modelListOpen]);
 
   // Drop official selection if auth disappears.
   useEffect(() => {
@@ -212,10 +235,10 @@ export function ProvidersPanel({
     setHint(tr("prov.saving"));
     setHintTone("muted");
     try {
+      const existingIds = (list?.providers ?? []).map((p) => p.id);
       const id =
         editingId ??
-        (slugify(form.id || form.name || form.baseUrl) ||
-          `provider-${Date.now().toString(36)}`);
+        uniqueProviderId(form.name || form.baseUrl, existingIds);
       if (form.setAsDefault) {
         const ping = await api.providersPing({
           baseUrl: form.baseUrl.trim(),
@@ -322,16 +345,16 @@ export function ProvidersPanel({
         apiKey: form.apiKey.trim() || undefined,
         providerId: editingId ?? undefined,
       });
-      setRemoteModels(r.models.map((m) => m.id));
-      if (r.models.length) {
-        setHint(tr("prov.loaded", { n: r.models.length }));
+      const ids = r.models.map((m) => m.id);
+      setRemoteModels(ids);
+      if (ids.length) {
+        setHint(tr("prov.loaded", { n: ids.length }));
         setHintTone("ok");
-        if (!form.model && r.models[0]?.id) {
-          setForm((f) => ({ ...f, model: r.models[0].id }));
-        }
+        setModelListOpen(true);
       } else {
         setHint(tr("prov.emptyList"));
         setHintTone("muted");
+        setModelListOpen(false);
       }
     } catch (e) {
       setHint(String(e));
@@ -537,44 +560,18 @@ export function ProvidersPanel({
               </div>
 
               <div className="prov-form__grid">
-                <label className="prov-field">
+                <label className="prov-field prov-field--full">
                   <span className="prov-field__label">{tr("prov.name")}</span>
                   <input
                     className="settings-input"
                     value={form.name}
-                    onChange={(e) => {
-                      const name = e.target.value;
-                      setForm((f) => ({
-                        ...f,
-                        name,
-                        id: editingId ? f.id : slugify(name) || f.id,
-                      }));
-                    }}
+                    onChange={(e) =>
+                      setForm((f) => ({ ...f, name: e.target.value }))
+                    }
                     placeholder={tr("prov.namePh")}
                     autoComplete="off"
                   />
                 </label>
-
-                {!editingId && (
-                  <label className="prov-field">
-                    <span className="prov-field__label">
-                      {tr("prov.displayName")}
-                    </span>
-                    <input
-                      className="settings-input"
-                      value={form.id}
-                      onChange={(e) =>
-                        setForm((f) => ({
-                          ...f,
-                          id: slugify(e.target.value),
-                        }))
-                      }
-                      placeholder={tr("prov.idPh")}
-                      autoComplete="off"
-                      spellCheck={false}
-                    />
-                  </label>
-                )}
 
                 <label className="prov-field prov-field--full">
                   <span className="prov-field__label">{tr("prov.baseUrl")}</span>
@@ -628,7 +625,7 @@ export function ProvidersPanel({
                   </div>
                 </label>
 
-                <label className="prov-field prov-field--full">
+                <div className="prov-field prov-field--full" ref={modelFieldRef}>
                   <span className="prov-field__label-row">
                     <span className="prov-field__label">
                       {tr("prov.requestModel")}
@@ -646,20 +643,57 @@ export function ProvidersPanel({
                   <input
                     className="settings-input"
                     value={form.model}
-                    onChange={(e) =>
-                      setForm((f) => ({ ...f, model: e.target.value }))
-                    }
+                    onChange={(e) => {
+                      setForm((f) => ({ ...f, model: e.target.value }));
+                      if (remoteModels.length) setModelListOpen(true);
+                    }}
+                    onFocus={() => {
+                      if (remoteModels.length) setModelListOpen(true);
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Escape") setModelListOpen(false);
+                    }}
                     placeholder={tr("prov.modelPh")}
-                    list="prov-model-suggestions"
                     autoComplete="off"
                     spellCheck={false}
+                    role="combobox"
+                    aria-expanded={modelListOpen}
+                    aria-controls="prov-model-suggestions"
+                    aria-autocomplete="list"
                   />
-                  <datalist id="prov-model-suggestions">
-                    {remoteModels.map((m) => (
-                      <option key={m} value={m} />
-                    ))}
-                  </datalist>
-                </label>
+                  {modelListOpen && remoteModels.length > 0 ? (
+                    <ul
+                      id="prov-model-suggestions"
+                      className="prov-model-list"
+                      role="listbox"
+                    >
+                      {remoteModels
+                        .filter((id) => {
+                          const q = form.model.trim().toLowerCase();
+                          return !q || id.toLowerCase().includes(q);
+                        })
+                        .map((id) => (
+                          <li key={id} role="presentation">
+                            <button
+                              type="button"
+                              role="option"
+                              aria-selected={form.model === id}
+                              className={
+                                "prov-model-list__opt" +
+                                (form.model === id ? " is-active" : "")
+                              }
+                              onClick={() => {
+                                setForm((f) => ({ ...f, model: id }));
+                                setModelListOpen(false);
+                              }}
+                            >
+                              {id}
+                            </button>
+                          </li>
+                        ))}
+                    </ul>
+                  ) : null}
+                </div>
               </div>
 
               <label className="prov-check">

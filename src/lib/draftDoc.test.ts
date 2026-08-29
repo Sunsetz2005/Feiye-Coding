@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  applyConnectorAtMention,
   applySkillAtSlash,
+  detectAtQuery,
   detectSlashQuery,
   detectSlashQueryFromEditor,
   draftFromPlainText,
@@ -159,6 +161,42 @@ describe("draftDoc roundtrip", () => {
     expect(() => serializeDisplayForJournal(segments)).toThrow(
       "invalid Skill binding",
     );
+  });
+});
+
+describe("connector tokens", () => {
+  it("round-trips explicit connector chips", () => {
+    const stored = "[[connector-v1:github|explicit]] please triage";
+    const segments = parseStoredContent(stored);
+    expect(segments).toEqual([
+      { type: "connector", id: "github", selection: "explicit" },
+      { type: "text", text: " please triage" },
+    ]);
+    expect(serializeStored(segments)).toBe(stored);
+    expect(serializeDisplayForJournal(segments)).toBe(
+      "[[connector:github]] please triage",
+    );
+    expect(serializeForAgent(segments)).toBe("please triage");
+    expect(isDraftEmpty(segments)).toBe(false);
+  });
+
+  it("applyConnectorAtMention replaces @query", () => {
+    expect(applyConnectorAtMention("@gi", 0, 3, "github")).toBe(
+      "[[connector-v1:github|explicit]] ",
+    );
+  });
+});
+
+describe("detectAtQuery", () => {
+  it("triggers at start and after whitespace", () => {
+    expect(detectAtQuery("@")).toEqual({ start: 0, query: "" });
+    expect(detectAtQuery("@gi")).toEqual({ start: 0, query: "gi" });
+    expect(detectAtQuery("hello @git")).toEqual({ start: 6, query: "git" });
+  });
+
+  it("does not treat email addresses as mentions", () => {
+    expect(detectAtQuery("user@gmail.com")).toBeNull();
+    expect(detectAtQuery("write user@gmail")).toBeNull();
   });
 });
 

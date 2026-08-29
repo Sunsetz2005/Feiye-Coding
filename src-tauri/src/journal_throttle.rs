@@ -75,7 +75,13 @@ impl JournalWriteThrottle {
 
     /// Whether a flush should run now.
     pub fn should_flush(&self, now: Instant, force: bool, paragraph_break: bool) -> bool {
-        should_flush_journal(self.last_flush, self.min_interval, now, force, paragraph_break)
+        should_flush_journal(
+            self.last_flush,
+            self.min_interval,
+            now,
+            force,
+            paragraph_break,
+        )
     }
 
     pub fn mark_flushed(&mut self, now: Instant) {

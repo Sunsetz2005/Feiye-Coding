@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { GROK_BUILD_EFFORTS } from "@/lib/grokCatalog";
 import {
   ComposerModelMenu,
+  partitionComposerModels,
   resolveComposerEfforts,
 } from "./ComposerModelMenu";
 
@@ -14,6 +15,17 @@ const labels = {
   effortMedium: "Medium",
   effortLow: "Low",
 };
+
+describe("partitionComposerModels", () => {
+  it("keeps official and custom channels in separate groups", () => {
+    const grouped = partitionComposerModels([
+      { id: "grok-4.5", label: "Sunsetz 4.5", source: "official" },
+      { id: "cldapi", label: "Cldapi · claude-opus-4-6", source: "custom" },
+    ]);
+    expect(grouped.official.map((item) => item.id)).toEqual(["grok-4.5"]);
+    expect(grouped.custom.map((item) => item.id)).toEqual(["cldapi"]);
+  });
+});
 
 describe("resolveComposerEfforts", () => {
   it("shows only the levels declared by the active live model", () => {

@@ -12,12 +12,13 @@
 - 宽屏资源面板与中栏并列；隐藏后不应保留可聚焦控件。窄屏使用覆盖式面板。
 - 新任务的引导内容可位于视觉中心，输入器仍保持在底部工作区。
 
-当前会话协调仍位于 `src/App.tsx`；已独立的关键界面包括：
+当前会话协调仍位于 `src/App.tsx`；流式正文由 `src/entities/session/transcriptStore.ts` 持有，中栏通过 `src/features/workbench/ConversationSurface.tsx` 订阅，因此 token 更新不再重绘侧栏和输入器。已独立的关键界面包括：
 
 - `src/components/WorkbenchShell.tsx`
 - `src/components/WorkbenchTopbar.tsx`
 - `src/components/SidebarNavigator.tsx`
 - `src/components/ComposerDock.tsx`
+- `src/features/workbench/ConversationSurface.tsx`
 - `src/components/lobe-chat/ConversationThread.tsx`
 - `src/components/lobe-chat/ActivityTimeline.tsx`
 - `src/components/lobe-chat/AskUserDock.tsx`
@@ -28,11 +29,13 @@
 - `src/components/ContextUsageChip.tsx`
 - `src/components/FloatingSurfaceProvider.tsx`
 
-`SidebarNavigator` 拥有侧栏渲染、项目/任务披露语义、当前项语义、虚拟任务行、只读悬停预览和账户入口；数据加载、菜单动作与 Host 协调仍由 `App.tsx` 提供。任务预览停留 450ms 后调用 `session_preview`，以 30 秒短缓存合并同一 session 的并发请求，并丢弃移出、滚动、折叠、菜单打开或虚拟行卸载后的过期响应。键盘聚焦跳过停留延迟，但预览自身不可交互、不夺取焦点。Host 只返回最近 `user` 与 `assistant` 的可见正文摘要；思考、附件、工具输出和完整 journal 不进入 DTO。项目预览使用已加载的项目与 session 元数据，Git 摘要完成惰性能力前不显示。
+`SidebarNavigator` 拥有侧栏渲染、项目/任务选择、当前项语义、虚拟任务行、悬停预览和账户入口；数据加载、菜单动作与 Host 协调仍由 `App.tsx` 提供。单个项目不再使用独立披露箭头：点击项目行选中并切换其会话列表；整个「项目」栏的折叠箭头只在该栏悬停或聚焦时出现。任务预览停留 450ms 后调用 `session_preview`，以 30 秒短缓存合并同一 session 的并发请求，并丢弃移出、滚动、折叠、菜单打开或虚拟行卸载后的过期响应。键盘聚焦跳过停留延迟。会话预览仍只读、不夺取焦点。项目预览可移入并包含「编辑项目」；卡片贴在项目栏右缘外侧，不得挡住行内 ⋯ / 新对话。编辑对话框可改名称和源文件夹（`project_rename` / `project_set_path`）。从应用移除项目会删除该项目下的对话，磁盘文件夹保留。Host 只返回最近 `user` 与 `assistant` 的可见正文摘要；思考、附件、工具输出和完整 journal 不进入 DTO。项目预览使用已加载的项目与 session 元数据，Git 摘要完成惰性能力前不显示。侧栏「整理」偏好（按项目 / 平铺列表，最近更新 / 优先级）写入 `sunsetz.layout`。
 
 `WorkbenchShell` 拥有三栏布局根节点，并在侧栏或资源面板关闭后把焦点恢复到对应顶部栏按钮。会话中栏在面板切换时保持挂载，因此原生滚动位置不被重建。
 
-`ComposerDock` 拥有底部浮层、三层输入器和运行中的 `TaskProgressRail`；草稿、附件、队列、模型/权限偏好、发送停止和 Host 调用仍由 `App.tsx` 提供。权限条与 `AskUserDock` 作为并列或接管槽位传入，提问和权限决策不搬进输入器。不要把尚不存在的 `ConversationSurface` 当成当前模块边界。
+`ComposerDock` 拥有底部浮层、三层输入器和运行中的 `TaskProgressRail`；草稿、附件、队列、模型/权限偏好、发送停止和 Host 调用仍由 `App.tsx` 提供。权限条与 `AskUserDock` 作为并列或接管槽位传入，提问和权限决策不搬进输入器。已连接的 GitHub / Gmail / Drive / Calendar 在输入器显示状态芯片；`@GitHub` 等插入本轮明确调用芯片，未连接插件不能插芯片。连接器协议见 [open-connector.md](./open-connector.md)。`ConversationSurface` 只订阅转录 store，不拥有 Host 协调。Host 在启动时若已有 live session，会立刻 `setViewing` 并把该 session 标为 busy，避免第一批 stream chunk 写进草稿缓存。
+
+流式 Markdown 把已闭合段落冻住，只对尾巴做 drip-reveal。消息数达到 48 条时，中栏窗口化历史并给隐藏行留 spacer；非活动气泡使用 `content-visibility`。空闲会话 transcript 缓存有 LRU，忙碌或当前查看的会话不会被丢掉。
 
 顶部任务菜单与侧栏任务菜单共用 `ContextMenu` 和同一组真实 session 动作。按钮打开时必须暴露 `aria-haspopup="menu"` 与展开状态；菜单按重命名、导出、分叉/回退/复制、归档/删除分组，危险删除保持末项。左下账户菜单只从 `AccountStatus`、当前 Provider 和 billing 快照派生账户、额度、重置时间、主题、设置与登录动作；未实现的宠物、支持、更新检查或云入口不得作为占位项出现。
 
@@ -40,9 +43,9 @@
 
 输入器按以下三层组织：
 
-1. **状态层**：运行计划时显示 `TaskProgressRail`；否则显示当前目标或 `ComposerProjectMenu`。信任项目若存在有界项目说明文件，在项目条下显示只读路径芯片。
+1. **状态层**：运行计划时显示 `TaskProgressRail`；否则显示当前目标或项目芯片。Git 仓库另显示已有 worktree 芯片（只切换已存在的 worktree，不创建）。信任项目若存在有界项目说明文件，在项目条下显示只读路径芯片。空会话在中栏显示四张建议卡，写入草稿，不自动发送。
 2. **内容层**：发送队列、已审阅 Memory 徽章、附件预览和可增长的 `ComposerEditor`。
-3. **操作层**：左侧为加号、权限、启用中的计划模式和目标；右侧为上下文、模型及发送/停止。
+3. **操作层**：左侧为加号、权限（仅授权策略）、启用中的计划模式和目标；右侧为上下文圆环、模型及发送/停止。上下文圆环约 14px，实线进度；悬停显示已用/剩余百分比和标记数，点击打开精确遥测与 Compact。未知用量只画空轨道，不虚线估算。
 
 行为约束：
 
@@ -51,18 +54,23 @@
 - 附件元数据随 `session_send` 写入已有 `ChatMessageStored.attachments`，重载后恢复名称、目录类型和可用缩略图。
 - 旧消息若没有附件元数据，只保留可证明的信息，不猜测回填。
 - 当前 Host 没有语音识别适配器；`HostCapabilities v2` 将 `speechRecognition` / `nativeSpeech` 声明为 `unavailable`，兼容布尔值仍为 `false`，输入器不渲染麦克风。
-- 项目条外层是静态容器；只有内部文件夹、项目名和箭头按钮响应悬停与点击。运行或 pending interaction 锁定设置时不可切换项目。
+- 项目条是输入器上方的紧凑文件夹芯片，不是满宽横条。运行或 pending interaction 锁定设置时不可切换项目。
 - 计划模式启用后只在访问权限右侧出现一次；悬停或键盘聚焦时灯泡变为圆圈叉，点击切回 Agent。Host 保存失败时恢复原模式。
 - 900×600 及更宽的桌面布局保持侧栏在正常文档流中，输入器不得落到侧栏之下；仅 720px 及以下使用侧栏覆盖层。
 - 已审阅 Memory pack 显示为可展开徽章，可清除；只作为该轮上下文，不是指令或授权。排队中的发送不能携带 Memory pack。
 - Composer recovery 只保存 Memory 候选 id 与 content hash；恢复时重新 `memory_context_pack_build_v1`，hash 失效则清空并提示。
-- 项目说明芯片只显示相对路径和是否截断，不展示文件正文；正文只进入该轮 system 提示。
+- 项目说明不单独占一行。相对路径只出现在项目芯片的 tooltip；正文仍只进入该轮 system 提示。
+- `SUNSETZ_ACP=mock` 时中栏显示警告横幅：这是开发桩，不会读取项目或运行工具。产品路径是内建 Sunsetz Runtime，不要把 mock 回复写成真实 Agent。
+- 运行中发送会进入当前会话队列。排队条是紧凑一行：数量、调整方向（先停本轮再立刻发送队首）、删除、更多（编辑 / 关闭或继续自动排队）。不做侧边聊天，不做语音。
+- 流式正文的未闭合尾巴不响应悬停卡片和按钮，避免解析过程中的框闪动。
+- 本轮结束后若有已完成的写/改文件工具，对话里显示文件改动摘要；审核打开 Changes。不做静默 Undo。
+- 按项目分组时，折叠后的项目行若有正在运行的对话，右侧显示与会话行相同的工作中动画。
 
 ## 3. 加号菜单与斜杠面板
 
 `ComposerPlusPanel` 保持两种不同语义：
 
-- 加号入口是 ARIA menu，提供文件、文件夹、macOS Finder 所选项、项目、目标、计划模式、Record a skill，以及已安装且可调用的技能。
+- 加号入口是 ARIA menu，提供文件、文件夹、macOS Finder 所选项、项目、目标、计划模式、Ask 模式、Record a skill，以及已安装且可调用的技能。权限芯片不再列出 Agent/Plan/Ask。
 - `/` 是编辑器内命令 listbox，不与加号菜单合并成同一个命令体系。
 
 所有入口必须由能力或真实命令支撑：
@@ -115,7 +123,11 @@
 
 旧 journal 没有 phase 或插入证据时，按已有存储顺序降级展示，不伪造历史穿插位置。
 
+当前轮若正在 `connecting` / `streaming` / `awaiting_permission`，中栏在**整轮可见内容最底下**固定一条不透明状态 pill（20px thinking-orbs + 文案）：在助手正文、思考段、活动时间线、子代理卡和本轮改动摘要之后，不塞进某一条助手气泡里。从本轮开始到结束都在；回合结束后才卸掉。几何来自 MIT `thinking-orbs`，点色按主题纸色与 `--accent` 混合，不引入第二套珊瑚，不跑 Metal/WebGPU。一轮只有这一条 live 指示；`prefers-reduced-motion: reduce` 时冻在代表帧。映射只使用 Host 已有事实：尚无正文为 `breathing` + 思考中；流式正文为 `composing` + 正在回复；读文件/列为 `searching`；写文件为 `shaping`；命令为 `working`；压缩为 `weaving`；skill 为 `connecting`；提问/无工具的权限等待为 `listening`。已完成思考段和已完成工具仍用原来的折叠条与活动时间线，不挂 live orb。权限条与 `AskUserDock` 仍是决策入口。
+
 ## 7. Agent 提问与计划确认
+
+默认 Sunsetz 内核把模型的 `ask_user_question` 接到同一套提问框：调用后暂停回合，等用户提交或跳过，再把答案写回工具结果。没有提问框时不得把未知工具文案改写成「已跳过」。
 
 `AskUserDock` 与输入器同宽并在底部接管普通输入区：
 
@@ -127,7 +139,7 @@
 
 Host 按会话保存所有 pending interaction：
 
-- 内建 Sunsetz kernel 的 `write_file` / `run_command` 复用同一条 `ComposerDock` 权限条和 `InteractionSnapshotV1` kind `permission`；Host 会话没有 ACP 客户端，回复走 oneshot，不发 JSON-RPC。`AcceptEdits` 只自动放行根内写入，命令仍要问。
+- 内建 Sunsetz kernel 的 `write_file` / `search_replace` / `run_command` 复用同一条 `ComposerDock` 权限条和 `InteractionSnapshotV1` kind `permission`；`ask_user_question` 复用 `AskUserDock` 和 kind `ask_user`。Host 会话没有 ACP 客户端，回复走 oneshot，不发 JSON-RPC。`AcceptEdits` 只自动放行根内写入和替换，命令仍要问。`grep` 只读，不弹权限条。父会话可 `spawn_agent`（explore / plan / general，深度 1）；子代理不能再 spawn。中栏显示子代理卡片，点开资源面板只读记录。不做侧边聊天，不创建 worktree。
 - `InteractionSnapshotV1` 以判别 payload 表示 permission、ask_user 和 plan；三者共享 pending/resolving/resolved/failed/interrupted 生命周期但不混淆业务语义。
 - `session_interactions_list` 返回前台和后台任务的 live interaction；旧 `session_pending_interactions` 继续作为 ask-user 兼容接口。
 - 切换任务或 WebView 重载时可在 Agent 进程仍存活的前提下恢复。

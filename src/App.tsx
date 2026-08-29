@@ -35,7 +35,6 @@ import {
 import {
   applyContextCompact,
   applyGeneratedImage,
-  applyStreamChunk,
   applyToolEvent,
   applyTurnError,
   applyTurnMarker,
@@ -56,8 +55,10 @@ import {
   userPromptIndexOf,
   localRewindPoints,
   IDLE_SNAPSHOT,
+  isDeveloperMockBackend,
   type AskUserPayload,
   type ChatMessage,
+  type SessionState,
   type GeneratedImagePayload,
   type InteractionSnapshotV1,
   type PermissionPayload,
@@ -128,6 +129,7 @@ import {
   type Attachment,
 } from "@/lib/attachments";
 import {
+  applyConnectorAtMention,
   applySkillAtSlash,
   isDraftEmpty,
   hydrateDisplayContent,
@@ -136,6 +138,7 @@ import {
   serializeDisplayForJournal,
   serializeForAgent,
 } from "@/lib/draftDoc";
+import { CONNECTOR_CATALOG } from "@/lib/connectorCatalog";
 import {
   shouldEnqueueSend,
   type QueuedSend,
@@ -171,6 +174,9 @@ import { StatusModal } from "@/components/StatusModal";
 import { McpStatusModal } from "@/components/McpStatusModal";
 import {
   IconSearch,
+  IconAlertTriangle,
+  IconImagine,
+  IconNotes,
   IconAttach,
   IconFolder,
   IconClose,
@@ -188,6 +194,7 @@ import {
   IconCheck,
 } from "@/components/icons";
 import { AutomationsPage } from "@/components/AutomationsPage";
+import { PluginMarketplace } from "@/components/PluginMarketplace";
 import { WorkbenchTopbar } from "@/components/WorkbenchTopbar";
 import { WorkbenchShell } from "@/components/WorkbenchShell";
 import {
@@ -242,7 +249,15 @@ import {
   sessionChangesFromMessages,
   type SessionFileChange,
 } from "@/lib/sessionChanges";
-import { ConversationThread } from "@/components/lobe-chat";
+import { ConversationSurface } from "@/features/workbench/ConversationSurface";
+import { Banner } from "@/shared/ui";
+import {
+  applyStreamChunks,
+  createStreamCoalescer,
+  DRAFT_SESSION_KEY,
+  transcriptStore,
+  useTranscriptMeta,
+} from "@/entities/session";
 import {
   preferPermissionFocus,
   trapTabKey,
@@ -321,6 +336,14 @@ type AppDialog =
       placeholder?: string;
       onSubmit: (value: string) => void | Promise<void>;
     }
+  | {
+      kind: "edit-project";
+      title: string;
+      projectId: string;
+      name: string;
+      path: string;
+      onSubmit: (name: string, path: string) => void | Promise<void>;
+    }
   | null;
 
 interface PlanState {
@@ -367,7 +390,7 @@ export default function App() {
   const [session, setSession] = useState<SessionSnapshot>(IDLE_SNAPSHOT);
   /** Host live agent (may differ from the session currently viewed in the UI). */
   const [liveHost, setLiveHost] = useState<SessionSnapshot>(IDLE_SNAPSHOT);
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const transcriptMeta = useTranscriptMeta();
   /** Context usage chip — known tokens from compact events + estimate fallback. */
   const [contextUsage, setContextUsage] = useState<ContextUsageState>(
     INITIAL_CONTEXT_USAGE,
@@ -427,6 +450,20 @@ export default function App() {
   liveSlashRef.current = liveSlash;
   /** After Escape, suppress re-open until the `/token` text changes. */
   const slashDismissedSigRef = useRef<string | null>(null);
+  const [liveAt, setLiveAt] = useState<{
+    present: boolean;
+    query: string;
+    start: number;
+    end: number;
+  }>({ present: false, query: "", start: 0, end: 0 });
+  const liveAtRef = useRef(liveAt);
+  liveAtRef.current = liveAt;
+  const atDismissedSigRef = useRef<string | null>(null);
+  const [connectorStates, setConnectorStates] = useState<api.ConnectorStateV1[]>(
+    [],
+  );
+  const connectorStatesRef = useRef(connectorStates);
+  connectorStatesRef.current = connectorStates;
   const [slashActiveIndex, setSlashActiveIndex] = useState(0);
   const [showStatusModal, setShowStatusModal] = useState(false);
   const [showMcpModal, setShowMcpModal] = useState(false);
@@ -456,17 +493,17 @@ export default function App() {
   const [activeProject, setActiveProject] = useState<Project | null>(null);
   const [projectInstruction, setProjectInstruction] =
     useState<api.ProjectInstructionInspectV1 | null>(null);
-  /** Per-session message cache so switching away mid-turn does not drop the UI. */
-  const messagesBySessionRef = useRef<Map<string, ChatMessage[]>>(new Map());
   const viewingSessionIdRef = useRef<string | null>(null);
   const liveHostRef = useRef<SessionSnapshot>(IDLE_SNAPSHOT);
-  const messagesRef = useRef<ChatMessage[]>([]);
+  const hostStateBySessionRef = useRef<Map<string, SessionState>>(new Map());
+  const messagesRef = useRef<ChatMessage[]>(transcriptStore.getViewed());
   const [expandedProjects, setExpandedProjects] = useState<Record<string, boolean>>({});
   const [projectsOpen, setProjectsOpen] = useState(true);
   const [historyOpen, setHistoryOpen] = useState(true);
   const [ctxMenu, setCtxMenu] = useState<ContextMenuState>(null);
   const [appDialog, setAppDialog] = useState<AppDialog>(null);
   const [dialogInput, setDialogInput] = useState("");
+  const [dialogPath, setDialogPath] = useState("");
   const dialogInputRef = useRef<HTMLInputElement>(null);
   const confirmBtnRef = useRef<HTMLButtonElement>(null);
   /** Latest dialog for Enter/Escape handlers (avoids stale chained confirms). */
@@ -517,7 +554,9 @@ export default function App() {
   /** Hash route: workbench | settings/:section | automations */
   const [appView, setAppView] = useState<"workbench" | "settings">("workbench");
   /** Inside workbench: chat thread vs scheduled tasks list. */
-  const [mainPane, setMainPane] = useState<"chat" | "automations">("chat");
+  const [mainPane, setMainPane] = useState<
+    "chat" | "automations" | "plugins"
+  >("chat");
   const [settingsSection, setSettingsSection] =
     useState<SettingsSectionId>("general");
   /** Prevent overlapping automation runs. */
@@ -538,6 +577,15 @@ export default function App() {
     if (!appDialog) return;
     if (appDialog.kind === "prompt") {
       setDialogInput(appDialog.initial);
+      const t = window.setTimeout(() => {
+        dialogInputRef.current?.focus();
+        dialogInputRef.current?.select();
+      }, 0);
+      return () => window.clearTimeout(t);
+    }
+    if (appDialog.kind === "edit-project") {
+      setDialogInput(appDialog.name);
+      setDialogPath(appDialog.path);
       const t = window.setTimeout(() => {
         dialogInputRef.current?.focus();
         dialogInputRef.current?.select();
@@ -820,6 +868,7 @@ export default function App() {
   /** Live drag-drop target for zone overlays (null = not dragging). */
   const [dragZone, setDragZone] = useState<"sidebar" | "main" | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+  const [columnNotice, setColumnNotice] = useState<string | null>(null);
   const dragPathsRef = useRef<string[]>([]);
   const layoutRef = useRef(layout);
   layoutRef.current = layout;
@@ -835,6 +884,7 @@ export default function App() {
     cliAuthPresent: boolean;
   }>({ found: false, path: null, version: null, source: "", cliAuthPresent: false });
   const [manualCliPath, setManualCliPath] = useState("");
+  const [runtimeBackend, setRuntimeBackend] = useState("sunsetz");
   const [acpServerAddr, setAcpServerAddr] = useState("");
   const [maxConcurrentAgents, setMaxConcurrentAgents] = useState(3);
   const [agentIdleMinutes, setAgentIdleMinutes] = useState(30);
@@ -1066,6 +1116,7 @@ export default function App() {
           "finder",
       );
       setManualCliPath(settings.manualCliPath || cli.path || "");
+      setRuntimeBackend(settings.runtimeBackend || "sunsetz");
       setAcpServerAddr(settings.acpServerAddr || "");
       setMaxConcurrentAgents(
         typeof settings.maxConcurrentAgents === "number" &&
@@ -1212,13 +1263,12 @@ export default function App() {
     liveHostRef.current = liveHost;
   }, [liveHost]);
 
-  // Mirror viewed-session messages into the cache on every change.
   useEffect(() => {
-    messagesRef.current = messages;
-    const id = session.sessionId;
-    if (!id) return;
-    messagesBySessionRef.current.set(id, messages);
-  }, [messages, session.sessionId]);
+    messagesRef.current = transcriptStore.getViewed();
+    return transcriptStore.subscribeViewed(() => {
+      messagesRef.current = transcriptStore.getViewed();
+    });
+  }, []);
 
   /** Apply a message reducer to the viewed session or only to the cache. */
   const patchSessionMessages = useCallback(
@@ -1226,17 +1276,7 @@ export default function App() {
       targetSessionId: string | undefined | null,
       reduce: (prev: ChatMessage[]) => ChatMessage[],
     ) => {
-      if (!targetSessionId) return;
-      if (viewingSessionIdRef.current === targetSessionId) {
-        setMessages((prev) => {
-          const next = reduce(prev);
-          messagesBySessionRef.current.set(targetSessionId, next);
-          return next;
-        });
-      } else {
-        const prev = messagesBySessionRef.current.get(targetSessionId) ?? [];
-        messagesBySessionRef.current.set(targetSessionId, reduce(prev));
-      }
+      transcriptStore.patch(targetSessionId ?? DRAFT_SESSION_KEY, reduce);
     },
     [],
   );
@@ -1251,7 +1291,7 @@ export default function App() {
     async (sessionId: string) => {
       if (!sessionId) return;
 
-      const msgs = messagesBySessionRef.current.get(sessionId) ?? [];
+      const msgs = transcriptStore.getCached(sessionId) ?? [];
       let lastAssistantIdx = -1;
       for (let i = msgs.length - 1; i >= 0; i--) {
         if (msgs[i]?.role === "assistant" && !msgs[i]?.isError) {
@@ -1309,6 +1349,16 @@ export default function App() {
     let cancelled = false;
     let recoveryActivated = false;
     const cleanups: Array<() => void> = [];
+    const streamCoalescer = createStreamCoalescer((sessionId, chunks) => {
+      if (cancelled) return;
+      const sid = sessionId === DRAFT_SESSION_KEY ? null : sessionId;
+      patchSessionMessages(sid, (prev) => applyStreamChunks(prev, chunks));
+      const last = chunks[chunks.length - 1];
+      if (last?.done && last.sessionId) {
+        void tryApplyAutomationFromSession(last.sessionId);
+      }
+    });
+    cleanups.push(() => streamCoalescer.dispose());
 
     const track = async (p: Promise<() => void>) => {
       const un = await p;
@@ -1334,14 +1384,21 @@ export default function App() {
           liveHostRef.current = snap;
           // Only bind the viewed session when Host already has a live row.
           if (snap.sessionId) {
+            hostStateBySessionRef.current.set(snap.sessionId, snap.state);
             setSession(snap);
             viewingSessionIdRef.current = snap.sessionId;
+            transcriptStore.setViewing(snap.sessionId);
+            transcriptStore.markHostState(snap.sessionId, snap.state);
           }
         }
 
         await track(
           api.listen<SessionSnapshot>("session://state", (s) => {
             if (cancelled) return;
+            if (s.sessionId) {
+              hostStateBySessionRef.current.set(s.sessionId, s.state);
+              transcriptStore.markHostState(s.sessionId, s.state);
+            }
             setLiveHost(s);
             liveHostRef.current = s;
             // Only update the workbench session when the user is viewing it.
@@ -1358,15 +1415,11 @@ export default function App() {
                 setTurnStartedAt(null);
                 // Ensure no assistant is left with streaming=true after the turn
                 // (missed done chunk) — otherwise the next send can bind to it.
-                setMessages((prev) => {
+                patchSessionMessages(s.sessionId, (prev) => {
                   if (!prev.some((m) => m.streaming)) return prev;
-                  const next = prev.map((m) =>
+                  return prev.map((m) =>
                     m.streaming ? { ...m, streaming: false } : m,
                   );
-                  if (s.sessionId) {
-                    messagesBySessionRef.current.set(s.sessionId, next);
-                  }
-                  return next;
                 });
                 if (s.state === "ready") {
                   showDesktopNotification({
@@ -1384,7 +1437,7 @@ export default function App() {
               // After a turn, resolve `images/N.jpg` short paths into image cards
               if (s.state === "ready") {
                 const sid = s.sessionId;
-                setMessages((prev) => {
+                patchSessionMessages(sid, (prev) => {
                   const rels = collectSessionRelativeMediaRefs(prev);
                   if (!rels.length) return prev;
                   void api
@@ -1405,7 +1458,7 @@ export default function App() {
                           a.path,
                         isDir: !!a.isDir,
                       }));
-                      setMessages((cur) =>
+                      patchSessionMessages(sid, (cur) =>
                         applyResolvedSessionMedia(cur, resolved),
                       );
                     })
@@ -1431,12 +1484,18 @@ export default function App() {
             if (cancelled) return;
             // Ignore empty terminal ticks that only flip done
             if (!chunk.text && !chunk.done) return;
-            // Defense-in-depth: drop stream chunks that arrive while no live turn
-            // is active (the host already gates this on FSM Streaming, but stale
-            // or replayed chunks must never re-type history on session switch).
+            // Defense-in-depth: drop stream chunks that arrive while that
+            // session is not producing a turn. Gate on the chunk's session,
+            // not the globally focused host — background Sunsetz turns keep
+            // streaming after the user switches chats.
+            const chunkState = chunk.sessionId
+              ? hostStateBySessionRef.current.get(chunk.sessionId)
+              : undefined;
             if (
               chunk.text &&
-              !isSessionLiveStreaming(liveHostRef.current.state)
+              !isSessionLiveStreaming(
+                chunkState ?? liveHostRef.current.state,
+              )
             ) {
               return;
             }
@@ -1448,18 +1507,7 @@ export default function App() {
               // Progress clears stall banner (I06).
               setStreamStall(null);
             }
-            patchSessionMessages(chunk.sessionId, (prev) => {
-              const next = applyStreamChunk(prev, chunk);
-              // Keep cache in sync immediately so post-turn apply sees final text.
-              if (chunk.sessionId) {
-                messagesBySessionRef.current.set(chunk.sessionId, next);
-              }
-              return next;
-            });
-            // After a completed assistant stream, try silent automation create.
-            if (chunk.done && chunk.sessionId) {
-              void tryApplyAutomationFromSession(chunk.sessionId);
-            }
+            streamCoalescer.enqueue(chunk);
           }),
         );
         await track(
@@ -1959,6 +2007,15 @@ export default function App() {
     }
   }, []);
 
+  const navigatePlugins = useCallback(() => {
+    setAppView("workbench");
+    setMainPane("plugins");
+    setShowUserMenu(false);
+    if (typeof window !== "undefined") {
+      window.location.hash = "#/plugins";
+    }
+  }, []);
+
   const navigateSettings = useCallback((section: SettingsSectionId = "general") => {
     setSettingsSection(section);
     setAppView("settings");
@@ -1978,6 +2035,7 @@ export default function App() {
           "general",
           "appearance",
           "account",
+          "models",
           "archived",
           "extensions",
           "runtime",
@@ -1990,6 +2048,9 @@ export default function App() {
       } else if (raw === "automations" || raw.startsWith("automations")) {
         setAppView("workbench");
         setMainPane("automations");
+      } else if (raw === "plugins" || raw.startsWith("plugins")) {
+        setAppView("workbench");
+        setMainPane("plugins");
       } else if (raw === "" || raw === "workbench" || raw === "home") {
         setAppView("workbench");
         setMainPane("chat");
@@ -2015,7 +2076,7 @@ export default function App() {
     // Snapshot the outgoing thread so a mid-turn switch does not lose the user bubble.
     const leavingId = viewingSessionIdRef.current;
     if (leavingId) {
-      messagesBySessionRef.current.set(leavingId, messagesRef.current);
+      transcriptStore.write(leavingId, messagesRef.current);
     }
 
     // Composer state switches immediately; journal loading may take much longer.
@@ -2023,6 +2084,7 @@ export default function App() {
     // Point viewing id immediately so late stream chunks land in the right cache.
     openingSessionIdRef.current = s.id;
     viewingSessionIdRef.current = s.id;
+    transcriptStore.setViewing(s.id);
     setEditingUserMessageId(null);
     setEditAttachments([]);
     setPlan(emptyPlanState(tr("resources.plan")));
@@ -2121,19 +2183,19 @@ export default function App() {
       }
       // Prefer in-memory cache (optimistic user msg + partial stream) over disk.
       const chosen = preferSessionMessages(
-        messagesBySessionRef.current.get(s.id),
+        transcriptStore.getCached(s.id),
         mapped,
       );
       if (viewingSessionIdRef.current !== s.id) {
         // User switched again while we were loading — keep cache warm, skip UI write.
-        messagesBySessionRef.current.set(s.id, chosen);
+        transcriptStore.write(s.id, chosen);
         if (openingSessionIdRef.current === s.id) {
           openingSessionIdRef.current = null;
         }
         return;
       }
       // Cache raw journal (may include fences) so apply can read them.
-      messagesBySessionRef.current.set(s.id, chosen);
+      transcriptStore.write(s.id, chosen);
       // Rebuild Changes list from tool_step history; preserve live before/after.
       {
         const fromHist = sessionChangesFromMessages(chosen);
@@ -2162,7 +2224,7 @@ export default function App() {
         const { cleanText } = extractAutomationPayload(m.content);
         return cleanText === m.content ? m : { ...m, content: cleanText };
       });
-      setMessages(stripped);
+      transcriptStore.setViewing(s.id, stripped);
       setContextUsage(
         reduceContextUsage(INITIAL_CONTEXT_USAGE, {
           type: "hydrate",
@@ -2194,7 +2256,7 @@ export default function App() {
         void api.pathsClassify(allPaths).then((list) => {
           if (viewingSessionIdRef.current !== s.id) return;
           const byPath = new Map(list.map((c) => [c.path, c]));
-          setMessages((prev) =>
+          patchSessionMessages(s.id, (prev) =>
             prev.map((msg) => {
               if (!msg.attachments?.length) return msg;
               return {
@@ -2217,8 +2279,8 @@ export default function App() {
         }
         return;
       }
-      const cached = messagesBySessionRef.current.get(s.id);
-      setMessages(cached ?? []);
+      const cached = transcriptStore.getCached(s.id);
+      transcriptStore.setViewing(s.id, cached ?? []);
       setContextUsage(
         reduceContextUsage(INITIAL_CONTEXT_USAGE, {
           type: "hydrate",
@@ -2406,9 +2468,9 @@ export default function App() {
     // Preserve outgoing thread in cache before clearing the draft UI.
     const leavingId = viewingSessionIdRef.current;
     if (leavingId) {
-      const cachedLeaving = messagesBySessionRef.current.get(leavingId);
+      const cachedLeaving = transcriptStore.getCached(leavingId);
       if (cachedLeaving) {
-        messagesBySessionRef.current.set(leavingId, cachedLeaving);
+        transcriptStore.write(leavingId, cachedLeaving);
       }
     }
     const seedDraft = opts?.seedDraft ?? "";
@@ -2421,7 +2483,8 @@ export default function App() {
       sendQueue.clearDraftQueue();
     }
     viewingSessionIdRef.current = null;
-    setMessages([]);
+    transcriptStore.setViewing(null);
+    transcriptStore.clearViewed();
     setContextUsage(INITIAL_CONTEXT_USAGE);
     setPlan(emptyPlanState(tr("resources.plan")));
     setPerm(null);
@@ -2596,7 +2659,8 @@ export default function App() {
         }
         openingSessionIdRef.current = null;
         viewingSessionIdRef.current = null;
-        setMessages([]);
+        transcriptStore.setViewing(null);
+        transcriptStore.clearViewed();
         setAttachments([]);
         setPerm(null);
         setAskUser(null);
@@ -2690,7 +2754,8 @@ export default function App() {
             }
             if (viewingSessionIdRef.current === createdSessionId) {
               viewingSessionIdRef.current = null;
-              setMessages([]);
+              transcriptStore.setViewing(null);
+              transcriptStore.clearViewed();
               setSession({ ...IDLE_SNAPSHOT, state: "idle" });
             }
           }
@@ -2719,9 +2784,9 @@ export default function App() {
           },
         ];
         if (sessionId) {
-          messagesBySessionRef.current.set(sessionId, autoMsgs);
+          transcriptStore.write(sessionId, autoMsgs);
         }
-        setMessages(autoMsgs);
+        transcriptStore.replaceViewed(autoMsgs);
         setSession((prev) => ({
           ...prev,
           state: "streaming",
@@ -2744,9 +2809,9 @@ export default function App() {
             },
           ];
           if (sessionId) {
-            messagesBySessionRef.current.set(sessionId, failed);
+            transcriptStore.write(sessionId, failed);
           }
-          setMessages(failed);
+          transcriptStore.replaceViewed(failed);
           setLocalError(errText);
           setSession((prev) =>
             prev.sessionId === sessionId
@@ -2881,21 +2946,37 @@ export default function App() {
     [],
   );
 
-  const renameProject = (proj: Project) => {
+  const editProject = (proj: Project) => {
     setCtxMenu(null);
     setAppDialog({
-      kind: "prompt",
-      title: tr("project.rename"),
-      initial: proj.name,
-      onSubmit: async (name) => {
-        const next = name.trim();
-        if (!next || next === proj.name) return;
+      kind: "edit-project",
+      title: tr("project.editTitle"),
+      projectId: proj.id,
+      name: proj.name,
+      path: proj.path,
+      onSubmit: async (name, path) => {
+        const nextName = name.trim();
+        const nextPath = path.trim();
+        if (!nextName) return;
         try {
-          await api.projectRename(proj.id, next);
+          if (nextName !== proj.name) {
+            await api.projectRename(proj.id, nextName);
+          }
+          if (nextPath && nextPath !== proj.path) {
+            await api.projectSetPath(proj.id, nextPath);
+          }
           await refreshProjects();
           void api.trayRefresh();
           if (activeProject?.id === proj.id) {
-            setActiveProject((p) => (p ? { ...p, name: next } : p));
+            setActiveProject((p) =>
+              p
+                ? {
+                    ...p,
+                    name: nextName,
+                    path: nextPath || p.path,
+                  }
+                : p,
+            );
           }
         } catch (e) {
           setLocalError(String(e));
@@ -2986,7 +3067,7 @@ export default function App() {
     void commit();
   };
 
-  /** Remove project from app list only (disk folder + chats kept). */
+  /** Remove project from the app list and delete its chats. Disk folder kept. */
   const removeProjectFromApp = (proj: Project) => {
     setCtxMenu(null);
     setAppDialog({
@@ -3001,11 +3082,27 @@ export default function App() {
             setLocalError(tr("error.needTauri"));
             return;
           }
+          const removed = sessions.filter((row) => row.projectId === proj.id);
           await api.projectRemove(proj.id);
-          if (activeProject?.id === proj.id) {
+          const recovery = composerRecoveryActionsRef.current;
+          for (const row of removed) {
+            if (recovery) {
+              await recovery.deleteKey(row.id);
+            }
+            transcriptStore.evict(row.id);
+          }
+          if (!recovery) {
+            sendQueue.dropKeys(removed.map((row) => row.id));
+          }
+          const openId =
+            session.sessionId ?? viewingSessionIdRef.current ?? null;
+          if (
+            activeProject?.id === proj.id ||
+            (openId && removed.some((row) => row.id === openId))
+          ) {
             setActiveProject(null);
             setSession(IDLE_SNAPSHOT);
-            setMessages([]);
+            transcriptStore.clearViewed();
           }
           await refreshProjects();
           await refreshSessions();
@@ -3131,7 +3228,7 @@ export default function App() {
               throw new Error(`Failed to delete composer recovery for ${s.id}`);
             }
             await api.sessionDelete(s.id);
-            messagesBySessionRef.current.delete(s.id);
+            transcriptStore.evict(s.id);
             if (!recovery) sendQueue.dropKeys([s.id]);
           }
           await refreshSessions();
@@ -3369,11 +3466,23 @@ export default function App() {
           sendQueue.migrateDraft(meta.id);
           setComposerRecoveryKey(meta.id);
         }
-        // Bind draft messages cache to the new id (was under null / unkeyed).
-        const draftMsgs = messagesBySessionRef.current.get("__draft__");
+        // Bind draft messages cache to the new id without wiping the viewed thread.
+        const draftMsgs = transcriptStore.getCached("__draft__");
         if (draftMsgs?.length) {
-          messagesBySessionRef.current.set(meta.id, draftMsgs);
-          messagesBySessionRef.current.delete("__draft__");
+          const viewingDraft =
+            transcriptStore.getViewingId() == null ||
+            transcriptStore.getViewingId() === DRAFT_SESSION_KEY;
+          if (
+            viewingDraft &&
+            (viewingSessionIdRef.current === viewedBefore ||
+              viewingSessionIdRef.current === null ||
+              viewingSessionIdRef.current === meta.id)
+          ) {
+            transcriptStore.adoptViewing(null, meta.id);
+          } else {
+            transcriptStore.write(meta.id, draftMsgs);
+            transcriptStore.evict("__draft__");
+          }
         }
         // Only take over the workbench if still on this draft / same session.
         if (
@@ -3452,12 +3561,7 @@ export default function App() {
     [tr],
   );
 
-  const lastUserMessageId = useMemo(() => {
-    for (let i = messages.length - 1; i >= 0; i--) {
-      if (messages[i]?.role === "user") return messages[i]!.id;
-    }
-    return null;
-  }, [messages]);
+  const lastUserMessageId = transcriptMeta.lastUserId;
 
   const canEditLastUser =
     !!lastUserMessageId &&
@@ -3589,6 +3693,27 @@ export default function App() {
     const skillSelections = Array.from(boundSkills.values(), (item) =>
       item.binding,
     );
+    const connectorSelections: Array<{ id: string; selection: "explicit" }> =
+      [];
+    for (const segment of segments) {
+      if (segment.type !== "connector") continue;
+      const connected = connectorStatesRef.current.some(
+        (row) => row.id === segment.id && row.connected,
+      );
+      if (!connected) {
+        const entry = CONNECTOR_CATALOG.find((item) => item.id === segment.id);
+        setLocalError(
+          tr("plugin.notConnected", {
+            name: entry ? tr(entry.nameKey as MessageKey) : segment.id,
+          }),
+        );
+        sendInFlightRef.current = false;
+        return false;
+      }
+      if (!connectorSelections.some((row) => row.id === segment.id)) {
+        connectorSelections.push({ id: segment.id, selection: "explicit" });
+      }
+    }
     const journalDisplay = serializeDisplayForJournal(segments);
     const classifiedAttachments = opts.attachmentsClassified
       ? requestedAttachments.map((attachment) => ({ ...attachment }))
@@ -3663,14 +3788,13 @@ export default function App() {
     if (sendTargetId) {
       patchSessionMessages(sendTargetId, appendOptimistic);
     } else if (viewingTarget()) {
-      setMessages((m) => {
-        const next = appendOptimistic(m);
-        messagesBySessionRef.current.set(cacheKey, next);
-        return next;
-      });
+      patchSessionMessages(cacheKey, appendOptimistic);
     } else {
-      const prev = messagesBySessionRef.current.get(cacheKey) ?? [];
-      messagesBySessionRef.current.set(cacheKey, appendOptimistic(prev));
+      const prev = transcriptStore.getCached(cacheKey) ?? [];
+      transcriptStore.write(cacheKey, appendOptimistic(prev));
+    }
+    if (viewingTarget()) {
+      transcriptStore.rebindViewing(sendTargetId ?? null);
     }
     if (viewingTarget()) {
       setSession((prev) =>
@@ -3698,14 +3822,14 @@ export default function App() {
       if (sendTargetId) {
         patchSessionMessages(sendTargetId, stripOptimistic);
       } else {
-        const draftMsgs = messagesBySessionRef.current.get("__draft__");
+        const draftMsgs = transcriptStore.getCached("__draft__");
         if (draftMsgs) {
-          messagesBySessionRef.current.set(
+          transcriptStore.write(
             "__draft__",
             stripOptimistic(draftMsgs),
           );
         }
-        if (viewingTarget()) setMessages((m) => stripOptimistic(m));
+        if (viewingTarget()) patchSessionMessages(cacheKey, stripOptimistic);
       }
       if (viewingTarget()) {
         setSession((prev) =>
@@ -3766,10 +3890,19 @@ export default function App() {
       // Queue migrate waits until sessionSend succeeds so a failed flush can
       // requeue under the original claim key (`__draft__`) without splitting.
       if (!sendTargetId) {
-        const draftMsgs = messagesBySessionRef.current.get("__draft__");
+        const draftMsgs = transcriptStore.getCached("__draft__");
         if (draftMsgs?.length) {
-          messagesBySessionRef.current.set(sessionId, draftMsgs);
-          messagesBySessionRef.current.delete("__draft__");
+          if (
+            transcriptStore.getViewingId() == null ||
+            transcriptStore.getViewingId() === DRAFT_SESSION_KEY
+          ) {
+            transcriptStore.adoptViewing(null, sessionId);
+          } else {
+            transcriptStore.write(sessionId, draftMsgs);
+            transcriptStore.evict("__draft__");
+          }
+        } else if (viewingTarget()) {
+          transcriptStore.rebindViewing(sessionId);
         }
       }
       if (automationSetupDraftRef.current || inAutomationSetup) {
@@ -3790,7 +3923,11 @@ export default function App() {
         name,
         isDir,
       }));
-      if (opts.memoryContextPack || skillSelections.length > 0) {
+      if (
+        opts.memoryContextPack ||
+        skillSelections.length > 0 ||
+        connectorSelections.length > 0
+      ) {
         await api.sessionSendV2({
           sessionId,
           text: agentText,
@@ -3806,6 +3943,7 @@ export default function App() {
               }
             : null,
           skillSelections,
+          connectorSelections,
         });
       } else {
         await api.sessionSend(agentText, journalDisplay, storedAttachments);
@@ -3942,7 +4080,8 @@ export default function App() {
       return;
     }
 
-    const replies = messages
+    const replies = transcriptStore
+      .getViewed()
       .slice(pending.startIndex)
       .filter(
         (message) =>
@@ -3978,7 +4117,8 @@ export default function App() {
     }
   }, [
     connecting,
-    messages,
+    transcriptMeta.streaming,
+    transcriptMeta.length,
     session.lastError,
     session.sessionId,
     session.state,
@@ -4012,7 +4152,7 @@ export default function App() {
       (mode === "agent" || goalMode) &&
       !shouldEnqueueSend(session.state, connecting)
     ) {
-      showToast(tr("composer.noProjectWriteHint"), 4500);
+      showColumnNotice(tr("composer.noProjectWriteHint"), 4500);
     }
     sendQueue.releaseFlushHold();
 
@@ -4228,11 +4368,17 @@ export default function App() {
     if (live.present) {
       slashDismissedSigRef.current = `${live.start}:${live.query}`;
     }
+    const at = liveAtRef.current;
+    if (at.present) {
+      atDismissedSigRef.current = `${at.start}:${at.query}`;
+    }
     setShowComposerPlus(false);
     setSlashQuery(null);
     const cleared = { present: false, query: "", start: 0, end: 0 };
     setLiveSlash(cleared);
     liveSlashRef.current = cleared;
+    setLiveAt(cleared);
+    liveAtRef.current = cleared;
   }, []);
 
   /**
@@ -4269,6 +4415,47 @@ export default function App() {
       liveSlashRef.current = next;
       setLiveSlash(next);
       setSlashQuery(next.present ? q : null);
+      if (next.present) {
+        const cleared = { present: false, query: "", start: 0, end: 0 };
+        liveAtRef.current = cleared;
+        setLiveAt(cleared);
+      }
+    },
+    [],
+  );
+
+  const onAtQueryChange = useCallback(
+    (q: { start: number; query: string; end: number } | null) => {
+      if (liveSlashRef.current.present) {
+        const cleared = { present: false, query: "", start: 0, end: 0 };
+        liveAtRef.current = cleared;
+        setLiveAt(cleared);
+        return;
+      }
+      let next = q
+        ? { present: true, ...q }
+        : { present: false, query: "", start: 0, end: 0 };
+      if (next.present && atDismissedSigRef.current != null) {
+        const signature = `${next.start}:${next.query}`;
+        if (signature === atDismissedSigRef.current) {
+          next = { present: false, query: "", start: 0, end: 0 };
+        } else {
+          atDismissedSigRef.current = null;
+        }
+      } else if (!next.present) {
+        atDismissedSigRef.current = null;
+      }
+      const previous = liveAtRef.current;
+      if (
+        previous.present === next.present &&
+        previous.query === next.query &&
+        previous.start === next.start &&
+        previous.end === next.end
+      ) {
+        return;
+      }
+      liveAtRef.current = next;
+      setLiveAt(next);
     },
     [],
   );
@@ -4502,6 +4689,14 @@ export default function App() {
     hitDragZone,
   ]);
 
+  useEffect(() => {
+    if (!api.isTauri()) return;
+    void api
+      .connectorsList()
+      .then(setConnectorStates)
+      .catch(() => undefined);
+  }, []);
+
   // Drag-resize right resource pane
   useEffect(() => {
     if (!resizingAside) return;
@@ -4653,7 +4848,8 @@ export default function App() {
   );
   /** Filter query from live editor poll only. */
   const slashFilterQuery = liveSlash.present ? liveSlash.query : "";
-  const plusMenuMode = showComposerPlus && !liveSlash.present;
+  const atFilterQuery = liveAt.present ? liveAt.query : "";
+  const plusMenuMode = showComposerPlus && !liveSlash.present && !liveAt.present;
   useEffect(() => {
     if (!plusMenuMode || !api.isTauri()) {
       setRankedSkillIds(new Set());
@@ -4690,18 +4886,8 @@ export default function App() {
     hasAskUserPrompt: !!askUser,
     hasPlanReview: plan.rpcId != null,
   });
-  const canRecordSkill = useMemo(
-    () =>
-      messages.some(
-        (message) =>
-          message.role === "user" && Boolean(message.content?.trim()),
-      ) &&
-      messages.some(
-        (message) =>
-          message.role === "assistant" && Boolean(message.content?.trim()),
-      ),
-    [messages],
-  );
+  const canRecordSkill =
+    transcriptMeta.hasUser && transcriptMeta.hasAssistant;
   const finderSelectionAvailable = api.capabilityAvailable(
     hostCapabilities,
     "finderSelection",
@@ -4763,6 +4949,14 @@ export default function App() {
         disabled: composerSettingsLocked,
       },
       {
+        id: "action:ask",
+        kind: "action",
+        action: "ask",
+        title: tr("composer.askMode"),
+        description: tr("composer.askModeHint"),
+        disabled: composerSettingsLocked,
+      },
+      {
         id: "action:record-skill",
         kind: "action",
         action: "record-skill",
@@ -4810,6 +5004,27 @@ export default function App() {
   );
   const composerMenuEntries = useMemo(
     () => {
+      if (liveAt.present) {
+        const q = liveAt.query.trim().toLowerCase();
+        return CONNECTOR_CATALOG.filter((entry) => {
+          if (!q) return true;
+          const name = tr(entry.nameKey as MessageKey).toLowerCase();
+          return entry.id.includes(q) || name.includes(q);
+        }).map((entry) => {
+          const connected = !!connectorStates.find((row) => row.id === entry.id)
+            ?.connected;
+          return {
+            id: `connector:${entry.id}`,
+            kind: "connector" as const,
+            connectorId: entry.id,
+            title: tr(entry.nameKey as MessageKey),
+            description: connected
+              ? tr("plugin.connectedHint", { id: entry.id })
+              : tr("plugin.connectFirst"),
+            connected,
+          };
+        });
+      }
       if (plusMenuMode) {
         return buildComposerPlusEntries({
           showUpload: true,
@@ -4827,18 +5042,22 @@ export default function App() {
     },
     [
       composerPlusActions,
+      connectorStates,
+      liveAt.present,
+      liveAt.query,
       plusMenuMode,
       showUploadInMenu,
       slashCatalog.skills,
       slashFiltered.commands,
       slashFiltered.skills,
+      tr,
     ],
   );
   const composerMenuEntriesRef = useRef(composerMenuEntries);
   composerMenuEntriesRef.current = composerMenuEntries;
 
   /** + button and `/` open the same panel. */
-  const composerMenuOpen = showComposerPlus || liveSlash.present;
+  const composerMenuOpen = showComposerPlus || liveSlash.present || liveAt.present;
 
   /** Pin above input card; width matches composer shell.
    * Re-anchor when filter results change height (short list must sit on input). */
@@ -4854,7 +5073,7 @@ export default function App() {
     minWidth: 280,
     estHeight: 220,
     gap: 8,
-    deps: [slashFilterQuery, composerMenuEntries.length],
+    deps: [slashFilterQuery, atFilterQuery, composerMenuEntries.length],
   });
 
   // Reset highlight only when the filter *string* changes.
@@ -4895,6 +5114,13 @@ export default function App() {
     setToast(msg);
     window.setTimeout(() => {
       setToast((cur) => (cur === msg ? null : cur));
+    }, ms);
+  }, []);
+
+  const showColumnNotice = useCallback((msg: string, ms = 4500) => {
+    setColumnNotice(msg);
+    window.setTimeout(() => {
+      setColumnNotice((cur) => (cur === msg ? null : cur));
     }, ms);
   }, []);
 
@@ -5103,10 +5329,10 @@ export default function App() {
                 ? kept
                 : mapped
               : mapped.slice(0, result.keptCount);
-          messagesBySessionRef.current.set(sessionId, finalMsgs);
-          setMessages(finalMsgs);
+          transcriptStore.write(sessionId, finalMsgs);
+          transcriptStore.replaceViewed(finalMsgs);
         } else {
-          messagesBySessionRef.current.delete(sessionId);
+          transcriptStore.evict(sessionId);
         }
 
         setRewindTimeline(null);
@@ -5206,9 +5432,9 @@ export default function App() {
         showToast(tr("session.rewindBusy"));
         return;
       }
-      const idx = userPromptIndexOf(messages, msg.id);
+      const idx = userPromptIndexOf(transcriptStore.getViewed(), msg.id);
       if (idx < 0) return;
-      if (!canRewindToUserPrompt(messages, idx)) {
+      if (!canRewindToUserPrompt(transcriptStore.getViewed(), idx)) {
         showToast(tr("session.rewindNoop"));
         return;
       }
@@ -5221,7 +5447,6 @@ export default function App() {
     [
       canRewindSession,
       confirmRewindToPrompt,
-      messages,
       session.sessionId,
       showToast,
       tr,
@@ -5243,14 +5468,13 @@ export default function App() {
           projectId: activeProject?.id ?? null,
           updatedAt: new Date().toISOString(),
         } satisfies SessionRow);
-      const idx = userPromptIndexOf(messages, msg.id);
+      const idx = userPromptIndexOf(transcriptStore.getViewed(), msg.id);
       if (idx < 0) return;
       confirmForkSession(row, idx);
     },
     [
       activeProject?.id,
       confirmForkSession,
-      messages,
       session.sessionId,
       session.title,
       sessions,
@@ -5444,6 +5668,39 @@ export default function App() {
     ],
   );
 
+  const applyConnectorMention = useCallback(
+    (entry: Extract<ComposerPlusEntry, { kind: "connector" }>) => {
+      if (!entry.connected) {
+        setAppView("workbench");
+        setMainPane("plugins");
+        closeComposerMenu();
+        return;
+      }
+      const live = liveAtRef.current;
+      const q = live.present
+        ? { start: live.start, end: live.end }
+        : null;
+      closeComposerMenu();
+      if (q) {
+        setDraft((d) =>
+          applyConnectorAtMention(d, q.start, q.end, entry.connectorId),
+        );
+      } else {
+        setDraft((d) => {
+          const needsSpace = d.length > 0 && !/\s$/.test(d);
+          const base = `${d}${needsSpace ? " " : ""}`;
+          return applyConnectorAtMention(
+            base,
+            base.length,
+            base.length,
+            entry.connectorId,
+          );
+        });
+      }
+    },
+    [closeComposerMenu],
+  );
+
   // Seed draft / clear / pane switch: grow textarea. If a focus request is still
   // pending (e.g. textarea just remounted), retry focus here as a backstop.
   useEffect(() => {
@@ -5473,12 +5730,12 @@ export default function App() {
   const welcomeSession =
     mainPane === "chat" &&
     !session.sessionId &&
-    messages.length === 0 &&
+    transcriptMeta.length === 0 &&
     session.state !== "streaming";
   const emptyExistingSession =
     mainPane === "chat" &&
     !!session.sessionId &&
-    messages.length === 0 &&
+    transcriptMeta.length === 0 &&
     session.state !== "streaming" &&
     session.state !== "connecting";
   const taskProgressVisible =
@@ -5620,7 +5877,9 @@ export default function App() {
           m.map((x) => ({ ...x, streaming: false })),
         );
       } else {
-        setMessages((m) => m.map((x) => ({ ...x, streaming: false })));
+        patchSessionMessages(DRAFT_SESSION_KEY, (m) =>
+          m.map((x) => ({ ...x, streaming: false })),
+        );
       }
     } catch (e) {
       setLocalError(String(e));
@@ -5730,8 +5989,9 @@ export default function App() {
           setGoalMode(true);
           if (mode === "plan") setMode("agent");
           return;
-        case "plan":
+        case "plan": {
           setGoalMode(false);
+          const previousMode = mode;
           setMode("plan");
           void api
             .composerPrefsSet({
@@ -5739,8 +5999,32 @@ export default function App() {
               sessionId: session.sessionId ?? null,
               mode: "plan",
             })
-            .catch((error) => showToast(String(error), 4000));
+            .catch((error) => {
+              setMode((current) =>
+                rollbackOptimisticSetting(current, "plan", previousMode),
+              );
+              showToast(String(error), 4000);
+            });
           return;
+        }
+        case "ask": {
+          setGoalMode(false);
+          const previousMode = mode;
+          setMode("ask");
+          void api
+            .composerPrefsSet({
+              projectId: activeProject?.id ?? null,
+              sessionId: session.sessionId ?? null,
+              mode: "ask",
+            })
+            .catch((error) => {
+              setMode((current) =>
+                rollbackOptimisticSetting(current, "ask", previousMode),
+              );
+              showToast(String(error), 4000);
+            });
+          return;
+        }
         case "record-skill":
           setSkillRecorderOpen(true);
           return;
@@ -5754,6 +6038,7 @@ export default function App() {
       mode,
       pickComposerFolder,
       session.sessionId,
+      showToast,
       tr,
     ],
   );
@@ -6077,10 +6362,7 @@ export default function App() {
     [error, localError, locale],
   );
   /** Prefer in-thread turn error; avoid stacking with the top error banner. */
-  const hasChatTurnError = useMemo(
-    () => messages.some((m) => m.isError),
-    [messages],
-  );
+  const hasChatTurnError = transcriptMeta.hasError;
   // Collapse technical dump whenever the visible error changes.
   useEffect(() => {
     setErrorDetailOpen(false);
@@ -6089,8 +6371,7 @@ export default function App() {
   // T15: announce stream start/end once (avoid token-level noise).
   useEffect(() => {
     const streaming =
-      session.state === "streaming" ||
-      messages.some((m) => m.role === "assistant" && m.streaming);
+      session.state === "streaming" || transcriptMeta.streaming;
     if (streaming && !wasStreamingRef.current) {
       setStreamA11yNote(tr("a11y.assistantStreaming"));
     } else if (!streaming && wasStreamingRef.current) {
@@ -6100,7 +6381,7 @@ export default function App() {
       return () => window.clearTimeout(t);
     }
     wasStreamingRef.current = streaming;
-  }, [session.state, messages, tr]);
+  }, [session.state, transcriptMeta.streaming, tr]);
 
   // T15: permission bar — focus primary action, Tab trap, Escape → deny.
   useEffect(() => {
@@ -6279,10 +6560,10 @@ export default function App() {
           null;
         const proj =
           projects.find((p) => p.id === projectId) || activeProject || null;
-        let msgs = messages;
-        if (id !== session.sessionId) {
-          msgs = (await api.sessionMessages(id)) as ChatMessage[];
-        }
+        let msgs =
+          id === session.sessionId
+            ? transcriptStore.getViewed()
+            : ((await api.sessionMessages(id)) as ChatMessage[]);
         const md = sessionToMarkdown({
           title,
           projectName: proj?.name,
@@ -6311,7 +6592,6 @@ export default function App() {
       session.sessionId,
       session.title,
       sessions,
-      messages,
       projects,
       activeProject,
       showToast,
@@ -6421,9 +6701,9 @@ export default function App() {
 
       // 1) Instant UI commit — same as normal send: user bubble + thinking.
       //    Connect/rewind wait happens under this thinking row, not the edit form.
-      setMessages((m) => {
+      patchSessionMessages(cacheKey, (m) => {
         const kept = truncateBeforeLastUser(m);
-        const next: ChatMessage[] = [
+        return [
           ...kept,
           {
             id: `u-${Date.now()}`,
@@ -6439,8 +6719,6 @@ export default function App() {
             streaming: true,
           },
         ];
-        messagesBySessionRef.current.set(cacheKey, next);
-        return next;
       });
       setEditingUserMessageId(null);
       setEditAttachments([]);
@@ -6498,10 +6776,10 @@ export default function App() {
         }
         // Draft / id migrate after materialize.
         if (sessionId !== cacheKey) {
-          const prevCache = messagesBySessionRef.current.get(cacheKey);
+          const prevCache = transcriptStore.getCached(cacheKey);
           if (prevCache?.length) {
-            messagesBySessionRef.current.set(sessionId, prevCache);
-            messagesBySessionRef.current.delete(cacheKey);
+            transcriptStore.write(sessionId, prevCache);
+            transcriptStore.evict(cacheKey);
           }
           sendTargetId = sessionId;
           cacheKey = sessionId;
@@ -6814,6 +7092,9 @@ export default function App() {
       if (keys.has("manualCliPath")) {
         setManualCliPath(stored.manualCliPath || "");
       }
+      if (keys.has("runtimeBackend")) {
+        setRuntimeBackend(stored.runtimeBackend || "sunsetz");
+      }
       if (keys.has("acpServerAddr")) {
         setAcpServerAddr(stored.acpServerAddr || "");
       }
@@ -6891,6 +7172,7 @@ export default function App() {
       "settings.nav.general",
       "settings.nav.appearance",
       "settings.nav.account",
+      "settings.nav.models",
       "settings.nav.archived",
       "settings.nav.extensions",
       "settings.nav.runtime",
@@ -7198,6 +7480,16 @@ export default function App() {
               }));
             });
           }}
+          kernelBackend={
+            isDeveloperMockBackend(liveHost.backend) ||
+            isDeveloperMockBackend(session.backend)
+              ? "mock_acp"
+              : runtimeBackend
+          }
+          onKernelBackend={(v) => {
+            setRuntimeBackend(v);
+            void patchSettingsSafely({ runtimeBackend: v });
+          }}
           acpServerAddr={acpServerAddr}
           onAcpServerAddr={(v) => {
             setAcpServerAddr(v);
@@ -7288,6 +7580,7 @@ export default function App() {
                   setSession({ ...IDLE_SNAPSHOT });
                 }
                 await refreshProviderRoute();
+                await refreshLists();
                 await refreshAccount({ refreshBilling: false });
                 setToast(tr("prov.switchedHotReload"));
                 window.setTimeout(() => setToast(null), 3200);
@@ -7330,6 +7623,16 @@ export default function App() {
               expandProject: tr("sidebar.expandProject"),
               untrusted: tr("sidebar.untrusted"),
               menu: tr("sidebar.menu"),
+              organize: tr("sidebar.organize"),
+              groupByProject: tr("sidebar.groupByProject"),
+              groupByList: tr("sidebar.groupByList"),
+              chatSort: tr("sidebar.chatSort"),
+              sortPriority: tr("sidebar.sortPriority"),
+              sortRecent: tr("sidebar.sortRecent"),
+              newConversation: tr("sidebar.newConversation"),
+              editProject: tr("sidebar.editProject"),
+              collapseProjects: tr("sidebar.collapseProjects"),
+              expandProjects: tr("sidebar.expandProjects"),
               trustProject: tr("sidebar.trustProject"),
               noChats: tr("sidebar.noChats"),
               otherSessions: tr("sidebar.otherSessions"),
@@ -7388,7 +7691,7 @@ export default function App() {
               setSearchQuery("");
             },
             onOpenAutomations: navigateAutomations,
-            onOpenExtensions: () => navigateSettings("extensions"),
+            onOpenExtensions: navigatePlugins,
           }}
           tree={{
             projectsOpen,
@@ -7399,6 +7702,8 @@ export default function App() {
             pendingAskSessionIds,
             projects: sidebarProjects,
             orphanSessions: sidebarOrphanSessions,
+            groupBy: layout.sidebarGroupBy,
+            sessionSort: layout.sidebarSessionSort,
             onToggleProjects: () => setProjectsOpen((open) => !open),
             onAddProject: () => void addProject(false),
             onToggleProject: (projectId, open) =>
@@ -7408,7 +7713,26 @@ export default function App() {
               })),
             onSelectProject: (projectId) => {
               const project = projects.find((item) => item.id === projectId);
+              if (project && !session.sessionId) setActiveProject(project);
+            },
+            onNewSessionInProject: (projectId) => {
+              const project = projects.find((item) => item.id === projectId);
               if (project) void newChat(project);
+            },
+            onEditProject: (projectId) => {
+              const project = projects.find((item) => item.id === projectId);
+              if (project) editProject(project);
+            },
+            onOrganize: (next) => {
+              setLayout((current) => {
+                const updated = {
+                  ...current,
+                  sidebarGroupBy: next.groupBy,
+                  sidebarSessionSort: next.sessionSort,
+                };
+                saveLayout(localStorage, updated);
+                return updated;
+              });
             },
             onTrustProject: (projectId) => {
               const project = projects.find((item) => item.id === projectId);
@@ -7485,20 +7809,16 @@ export default function App() {
               (candidate) => candidate.id === session.sessionId,
             );
             const automationTitle = mainPane === "automations";
+            const pluginsTitle = mainPane === "plugins";
             const title = automationTitle
               ? tr("automations.title")
+              : pluginsTitle
+                ? tr("plugin.market.title")
               : currentSession?.title ||
                 session.title ||
                 activeProject?.name ||
                 tr("session.new");
-            const scheduled =
-              !automationTitle &&
-              (!!currentSession?.scheduled ||
-                messages.some(
-                  (message) =>
-                    message.role === "user" &&
-                    !!parseScheduledUserContent(message.content || ""),
-                ));
+            const scheduled = !automationTitle && !!currentSession?.scheduled;
             const showConnection =
               mainPane === "chat" &&
               (connecting ||
@@ -7535,7 +7855,9 @@ export default function App() {
                   ctxMenu.id === currentSession?.id
                 }
                 onOpenSessionMenu={
-                  !automationTitle && currentSession
+                  !automationTitle &&
+                  !pluginsTitle &&
+                  currentSession
                     ? (event) => openSessionMenu(event, currentSession)
                     : undefined
                 }
@@ -7588,7 +7910,30 @@ export default function App() {
             );
           })()}
 
-          {mainPane === "automations" ? (
+          {mainPane === "plugins" ? (
+            <PluginMarketplace
+              locale={locale}
+              skills={skillInfos.map((skill) => ({
+                id: skill.id || skill.name,
+                name: skill.name,
+                description: skill.description,
+              }))}
+              onConnectorsChange={setConnectorStates}
+              onUsePrompt={(text) => {
+                setDraft(text);
+                setAppView("workbench");
+                setMainPane("chat");
+                pendingComposerFocus.current = true;
+                if (typeof window !== "undefined") {
+                  window.history.replaceState(
+                    null,
+                    "",
+                    window.location.pathname + window.location.search,
+                  );
+                }
+              }}
+            />
+          ) : mainPane === "automations" ? (
             <AutomationsPage
               t={(k, vars) =>
                 tr(k as Parameters<typeof tr>[0], vars as Record<string, string | number>)
@@ -7610,6 +7955,11 @@ export default function App() {
             />
           ) : (
           <>
+          {columnNotice ? <Banner tone="warning">{columnNotice}</Banner> : null}
+          {(isDeveloperMockBackend(session.backend) ||
+            isDeveloperMockBackend(liveHost.backend)) && (
+            <Banner tone="warning">{tr("runtime.mockBanner")}</Banner>
+          )}
           {activeProject && !activeProject.trusted && (
             <div className="conn-bar">
               <button
@@ -7752,9 +8102,8 @@ export default function App() {
           <div className="sr-only" aria-live="polite" aria-atomic="true">
             {streamA11yNote}
           </div>
-          <ConversationThread
+          <ConversationSurface
             locale={locale}
-            messages={messages}
             sessionState={session.state}
             sessionKey={session.sessionId ?? `draft-${session.title ?? "new"}`}
             projectPath={activeProject?.path ?? null}
@@ -7805,6 +8154,20 @@ export default function App() {
                 : null
             }
             onOpenPlanArtifact={openPlanInResource}
+            sessionChanges={
+              sessionChangesById[session.sessionId || ""] ?? []
+            }
+            onOpenTurnChanges={() => {
+              setLayout((l) => {
+                if (l.asideCollapsed) {
+                  const n = { ...l, asideCollapsed: false };
+                  saveLayout(localStorage, n);
+                  return n;
+                }
+                return l;
+              });
+              setResourceOpenTarget({ type: "changes" });
+            }}
             attachLabels={attachLabels}
           />
 
@@ -7822,6 +8185,51 @@ export default function App() {
                       })
                     : tr("main.welcomeGeneral")}
                 </h2>
+                <div className="composer-empty-hero__cards">
+                  {(
+                    [
+                      {
+                        id: "explore",
+                        icon: <IconSearch size={18} />,
+                        title: tr("welcome.explore"),
+                        prompt: tr("welcome.explorePrompt"),
+                      },
+                      {
+                        id: "build",
+                        icon: <IconImagine size={18} />,
+                        title: tr("welcome.build"),
+                        prompt: tr("welcome.buildPrompt"),
+                      },
+                      {
+                        id: "review",
+                        icon: <IconNotes size={18} />,
+                        title: tr("welcome.review"),
+                        prompt: tr("welcome.reviewPrompt"),
+                      },
+                      {
+                        id: "fix",
+                        icon: <IconAlertTriangle size={18} />,
+                        title: tr("welcome.fix"),
+                        prompt: tr("welcome.fixPrompt"),
+                      },
+                    ] as const
+                  ).map((card) => (
+                    <button
+                      key={card.id}
+                      type="button"
+                      className="composer-empty-hero__card"
+                      onClick={() => {
+                        setDraft(card.prompt);
+                        requestComposerFocus();
+                      }}
+                    >
+                      <span className="composer-empty-hero__card-icon" aria-hidden>
+                        {card.icon}
+                      </span>
+                      <span>{card.title}</span>
+                    </button>
+                  ))}
+                </div>
               </div>
             </div>
           ) : null}
@@ -8105,6 +8513,18 @@ export default function App() {
                 onClear: sendQueue.clearQueue,
                 onRemove: sendQueue.removeItem,
                 onRetry: sendQueue.resumeFlush,
+                onSteer: () => {
+                  sendQueue.releaseFlushHold();
+                  void stop().then(() => sendQueue.resumeFlush());
+                },
+                onEdit: (id) => {
+                  const item = sendQueue.activeQueue.find((row) => row.id === id);
+                  if (!item) return;
+                  sendQueue.removeItem(id);
+                  setDraft(item.storedDisplay);
+                  setAttachments(item.attachments);
+                },
+                onPause: sendQueue.pauseAutoSend,
               }}
               projectInstruction={
                 projectInstruction?.relativePath
@@ -8123,6 +8543,21 @@ export default function App() {
                     }
                   : null
               }
+              connectors={{
+                items: CONNECTOR_CATALOG.filter((entry) =>
+                  connectorStates.some(
+                    (row) => row.id === entry.id && row.connected,
+                  ),
+                ).map((entry) => ({
+                  id: entry.id,
+                  name: tr(entry.nameKey as MessageKey),
+                })),
+                openLabel: tr("plugin.market.title"),
+                onOpen: () => {
+                  setAppView("workbench");
+                  setMainPane("plugins");
+                },
+              }}
               memory={{
                 pack: pendingMemoryContext,
                 labels: {
@@ -8155,7 +8590,9 @@ export default function App() {
                 plusMode: plusMenuMode,
                 showPlus: showComposerPlus,
                 liveSlashPresent: liveSlash.present,
+                liveAtPresent: liveAt.present,
                 slashFilterQuery,
+                atFilterQuery,
                 skillsLoading,
                 activeIndex: slashActiveIndex,
                 entries: composerMenuEntries,
@@ -8164,6 +8601,7 @@ export default function App() {
                 onPickFiles: pickComposerFiles,
                 onSelectAction: selectComposerPlusAction,
                 onSelectSlash: applySlashItem,
+                onSelectConnector: applyConnectorMention,
                 resolveTitle: resolveSlashTitle,
                 resolveDescription: resolveSlashDescription,
                 onClose: closeComposerMenu,
@@ -8238,13 +8676,23 @@ export default function App() {
                   if (!isValidModelId(value, availableModels)) return;
                   const previousModelId = modelId;
                   setModelId(value);
-                  void api
-                    .composerPrefsSet({
-                      projectId: activeProject?.id ?? null,
-                      sessionId: session.sessionId ?? null,
-                      modelId: value,
-                    })
-                    .catch((error) => {
+                  const selected = availableModels.find((item) => item.id === value);
+                  void (async () => {
+                    try {
+                      if (api.isTauri()) {
+                        if (selected?.source === "custom") {
+                          await api.providersActivate("custom", value);
+                        } else {
+                          await api.providersActivate("official");
+                        }
+                        await refreshProviderRoute();
+                      }
+                      await api.composerPrefsSet({
+                        projectId: activeProject?.id ?? null,
+                        sessionId: session.sessionId ?? null,
+                        modelId: value,
+                      });
+                    } catch (error) {
                       setModelId((current) =>
                         rollbackOptimisticSetting(
                           current,
@@ -8253,7 +8701,8 @@ export default function App() {
                         ),
                       );
                       showToast(String(error), 4000);
-                    });
+                    }
+                  })();
                 },
                 onEffort: (value) => {
                   if (composerSettingsLocked) return;
@@ -8332,6 +8781,7 @@ export default function App() {
               onPasteFiles={addAttachmentsFromFiles}
               onPasteMediaFallback={pasteMediaFromNativeClipboard}
               onSlashQueryChange={onSlashQueryChange}
+              onAtQueryChange={onAtQueryChange}
               onCompact={() => {
                 if (composerSettingsLocked) return;
                 setCompactNote("");
@@ -8443,7 +8893,6 @@ export default function App() {
 
       <SkillRecorderSheet
         open={skillRecorderOpen}
-        messages={messages}
         projectPath={activeProject?.path ?? null}
         draft={skillCandidate?.draft ?? null}
         labels={{
@@ -8598,7 +9047,7 @@ export default function App() {
         mode={mode}
         policy={policy}
         projectPath={activeProject?.path}
-        messageCount={messages.length}
+        messageCount={transcriptMeta.length}
         onClose={() => setShowStatusModal(false)}
       />
       <McpStatusModal
@@ -8963,11 +9412,70 @@ export default function App() {
                     </button>
                   </div>
                 </form>
+              ) : appDialog.kind === "edit-project" ? (
+                <form
+                  className="app-dialog__form"
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    if (appDialog.kind !== "edit-project") return;
+                    const submit = appDialog.onSubmit;
+                    const name = dialogInput;
+                    const path = dialogPath;
+                    setAppDialog(null);
+                    void submit(name, path);
+                  }}
+                >
+                  <label className="app-dialog__field">
+                    <span>{tr("project.name")}</span>
+                    <input
+                      ref={dialogInputRef}
+                      className="app-dialog__input"
+                      value={dialogInput}
+                      onChange={(e) => setDialogInput(e.target.value)}
+                      autoComplete="off"
+                    />
+                  </label>
+                  <label className="app-dialog__field">
+                    <span>{tr("project.folder")}</span>
+                    <div className="app-dialog__path-row">
+                      <input
+                        className="app-dialog__input"
+                        value={dialogPath}
+                        onChange={(e) => setDialogPath(e.target.value)}
+                        autoComplete="off"
+                      />
+                      <button
+                        type="button"
+                        className="btn btn--ghost"
+                        onClick={() => {
+                          void api.pickDirectory().then((picked) => {
+                            if (picked) setDialogPath(picked);
+                          });
+                        }}
+                      >
+                        {tr("project.chooseFolder")}
+                      </button>
+                    </div>
+                  </label>
+                  <div className="app-dialog__actions modal-actions">
+                    <button
+                      type="button"
+                      className="btn btn--ghost"
+                      onClick={() => setAppDialog(null)}
+                    >
+                      {tr("common.cancel")}
+                    </button>
+                    <button type="submit" className="btn btn--solid">
+                      {tr("common.save")}
+                    </button>
+                  </div>
+                </form>
               ) : (
                 <form
                   className="app-dialog__form"
                   onSubmit={(e) => {
                     e.preventDefault();
+                    if (appDialog.kind !== "prompt") return;
                     const value = dialogInput;
                     const submit = appDialog.onSubmit;
                     setAppDialog(null);
@@ -9025,20 +9533,21 @@ export default function App() {
                 },
               },
               {
+                id: "rename",
+                label: tr("project.edit"),
+                icon: <IconRename size={16} />,
+                onClick: () => editProject(proj),
+              },
+              {
                 id: "reveal",
                 label: tr("project.reveal"),
                 icon: <IconExternalLink size={16} />,
+                separatorBefore: true,
                 onClick: () => {
                   void api
                     .projectReveal(proj.id)
                     .catch((e) => setLocalError(String(e)));
                 },
-              },
-              {
-                id: "rename",
-                label: tr("project.rename"),
-                icon: <IconRename size={16} />,
-                onClick: () => renameProject(proj),
               },
               ...(proj.trusted
                 ? [
@@ -9061,6 +9570,7 @@ export default function App() {
                 id: "archive-chats",
                 label: tr("project.archiveChats"),
                 icon: <IconArchive size={16} />,
+                separatorBefore: true,
                 onClick: () => {
                   void archiveProjectSessions(proj);
                 },

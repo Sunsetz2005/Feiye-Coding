@@ -126,7 +126,10 @@ pub async fn fetch_quota_snapshot(access_token: &str) -> Result<AccountQuotaSnap
     }
 
     // Cloudflare HTML challenge
-    if bytes.starts_with(b"<!DOCTYPE") || bytes.starts_with(b"<html") || bytes.starts_with(b"<!doctype") {
+    if bytes.starts_with(b"<!DOCTYPE")
+        || bytes.starts_with(b"<html")
+        || bytes.starts_with(b"<!doctype")
+    {
         return Err("quota endpoint returned HTML (blocked)".into());
     }
 
@@ -160,17 +163,18 @@ pub async fn fetch_quota_via_cli_proxy(access_token: &str) -> Result<AccountQuot
         .await
         .map_err(|e| format!("cli-proxy body: {e}"))?;
     if !status.is_success() {
-        return Err(format!("cli-proxy HTTP {}: {}", status.as_u16(), truncate(&body, 160)));
+        return Err(format!(
+            "cli-proxy HTTP {}: {}",
+            status.as_u16(),
+            truncate(&body, 160)
+        ));
     }
     if body.trim_start().starts_with('<') {
         return Err("cli-proxy returned HTML".into());
     }
     let v: serde_json::Value =
         serde_json::from_str(&body).map_err(|e| format!("cli-proxy json: {e}"))?;
-    let root = v
-        .get("config")
-        .cloned()
-        .unwrap_or(v);
+    let root = v.get("config").cloned().unwrap_or(v);
 
     let used = root
         .get("creditUsagePercent")
@@ -392,12 +396,7 @@ pub fn parse_grpc_web_quota(data: &[u8]) -> Result<AccountQuotaSnapshot, String>
                 .fixed32
                 .iter()
                 .filter(|f| f.path.last() == Some(&1) && (0.0..=100.0).contains(&f.value))
-                .min_by(|a, b| {
-                    a.path
-                        .len()
-                        .cmp(&b.path.len())
-                        .then(a.order.cmp(&b.order))
-                })
+                .min_by(|a, b| a.path.len().cmp(&b.path.len()).then(a.order.cmp(&b.order)))
                 .map(|f| f.value);
         }
         if used_percent.is_none() {

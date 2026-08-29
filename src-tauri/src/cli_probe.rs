@@ -48,9 +48,12 @@ pub fn expand_user_path(raw: &str) -> PathBuf {
     let mut out = s.to_string();
     for (key, val) in [
         ("%USERPROFILE%", std::env::var("USERPROFILE").ok()),
-        ("%HOME%", std::env::var("HOME").ok().or_else(|| {
-            std::env::var("USERPROFILE").ok()
-        })),
+        (
+            "%HOME%",
+            std::env::var("HOME")
+                .ok()
+                .or_else(|| std::env::var("USERPROFILE").ok()),
+        ),
         ("%LOCALAPPDATA%", std::env::var("LOCALAPPDATA").ok()),
         ("%APPDATA%", std::env::var("APPDATA").ok()),
     ] {
@@ -164,11 +167,7 @@ fn candidate_paths(manual: Option<&str>) -> Vec<PathBuf> {
             #[cfg(target_os = "windows")]
             {
                 if expanded.extension().is_none() {
-                    push_unique(
-                        &mut out,
-                        &mut seen,
-                        expanded.with_extension("exe"),
-                    );
+                    push_unique(&mut out, &mut seen, expanded.with_extension("exe"));
                 }
             }
         }
@@ -226,14 +225,8 @@ fn candidate_paths(manual: Option<&str>) -> Vec<PathBuf> {
         if let Ok(rd) = std::fs::read_dir(home.join(".grok/downloads")) {
             for ent in rd.flatten() {
                 let p = ent.path();
-                let name = p
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("");
-                if name.starts_with("grok-")
-                    && !name.ends_with(".part")
-                    && !name.contains(".tmp")
-                {
+                let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if name.starts_with("grok-") && !name.ends_with(".part") && !name.contains(".tmp") {
                     push_unique(&mut out, &mut seen, p);
                 }
             }
@@ -301,10 +294,7 @@ fn classify_source(path: &Path, manual_first: bool) -> String {
 
 pub fn probe_cli(manual_path: Option<&str>) -> CliProbeResult {
     let candidates = candidate_paths(manual_path);
-    let tried: Vec<String> = candidates
-        .iter()
-        .map(|p| p.display().to_string())
-        .collect();
+    let tried: Vec<String> = candidates.iter().map(|p| p.display().to_string()).collect();
     let cli_auth_present = cli_auth_json_present();
     let manual_set = manual_path.map(|m| !m.trim().is_empty()).unwrap_or(false);
 
@@ -364,12 +354,11 @@ mod tests {
         assert!(!r.candidates_tried.is_empty() || r.found);
         if r.found {
             assert!(r.path.is_some());
-            assert!(
-                r.version
-                    .as_ref()
-                    .map(|v| v.contains("grok") || !v.is_empty())
-                    .unwrap_or(true)
-            );
+            assert!(r
+                .version
+                .as_ref()
+                .map(|v| v.contains("grok") || !v.is_empty())
+                .unwrap_or(true));
         }
     }
 
@@ -403,7 +392,11 @@ mod tests {
     fn expand_user_path_tilde() {
         let p = expand_user_path("~/foo/bar");
         assert!(p.starts_with(user_home()));
-        assert!(p.ends_with(Path::new("foo").join("bar")) || p.to_string_lossy().ends_with("foo/bar") || p.to_string_lossy().ends_with(r"foo\bar"));
+        assert!(
+            p.ends_with(Path::new("foo").join("bar"))
+                || p.to_string_lossy().ends_with("foo/bar")
+                || p.to_string_lossy().ends_with(r"foo\bar")
+        );
     }
 
     #[test]

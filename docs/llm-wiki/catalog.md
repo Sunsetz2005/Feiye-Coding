@@ -1,15 +1,18 @@
 # Sunsetz Runtime 对齐：模型 / 推理 / 权限 / 模式
 
-源码：`src/lib/grokCatalog.ts`（静态兜底）、`src-tauri/src/models_catalog.rs`、`src-tauri/src/session_manager.rs`、`src-tauri/src/agent_prefs.rs`。
+源码：`src/lib/grokCatalog.ts`（静态兜底）、`src-tauri/src/models_catalog.rs`、`src-tauri/src/session_manager/`、`src-tauri/src/agent_prefs.rs`。
+
+官方模型网关仍未实现。容量与接口草稿见 [`model-gateway-capacity.md`](model-gateway-capacity.md)。桌面 Host 不是千人并发服务器。插件连接器见 [`open-connector.md`](open-connector.md)：GitHub、Gmail、Drive、Calendar 在 App 内连接，其余目录项即将在 App 内连接。
 
 ## 模型与 Runtime capability
 
-UI 只展示 `models_list_available` 返回的可用模型。服务商是后端渠道，只在设置 → 账户 → 自定义提供商切换，不进入 composer 模型菜单。
+UI 只展示 `models_list_available` 返回的可用模型。官方目录与已配置的 OpenAI 兼容渠道都会出现在 composer 模型菜单：官方按 catalog id，自定义渠道按 provider id，标签为「显示名 · 请求模型」。选择自定义行会激活该渠道，实际请求仍使用该渠道的 `base_url` / key / request model。没有渠道时不要把空的服务商名做成模型芯片。
 
 | 来源 | 说明 |
 |------|------|
 | Runtime `models_cache.json` | 当前官方目录与默认模型 |
-| `AvailableModel.capabilities` | 当前模型真实支持的推理档位 |
+| 已配置自定义渠道 | `source = custom`，id 为 provider section id |
+| `AvailableModel.capabilities` | 当前模型真实支持的推理档位；未声明则不显示 |
 | 静态兜底 | 缓存不可用时使用已知可工作的 `grok-4.5` |
 
 Host：`models_list_available`。连接参数为：
@@ -29,9 +32,9 @@ Flags 必须在 `stdio` 之前。连接后 Host 用 `session/set_model` 对齐�
 
 ## 推理强度
 
-UI 不再假定所有模型都有 effort。只有当前 `AvailableModel.capabilities.reasoningEfforts` 返回档位时才显示；当前已知能力为 `low` / `medium` / `high`，默认值为 `medium`。
+UI 不再假定所有模型都有 effort。只有当前 `AvailableModel.capabilities.reasoningEfforts` 返回档位时才显示；当前已知能力为 `low` / `medium` / `high`，默认值为 `medium`。未声明能力的自定义模型不显示思考行，也不按模型 id 猜测。内建 `agent_loop` 仅在该模型声明了档位时把 `reasoning_effort` 写入 OpenAI 兼容请求。
 
-Runtime 没有 mid-session `set_effort` RPC。Host 更新目标 effort 后软断开当前 Agent，下一次连接以新的 `--reasoning-effort` 重建。
+Runtime 没有 mid-session `set_effort` RPC。Host 更新目标 effort 后软断开当前 Agent；默认内核在下一轮请求中带上已声明的档位。
 
 ## H01 / H02 live apply 与回滚
 

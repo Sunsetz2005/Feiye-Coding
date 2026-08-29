@@ -1,0 +1,14 @@
+#!/bin/sh
+# Block per-user runtime data, MCP configs, and credentials from GitHub.
+repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+cd "$repo_root" || exit 0
+
+blocked="$(git diff --cached --name-only -z | tr '\0' '\n' | grep -E \
+  '(^|/)\.env($|\.)|(^|/)secrets\.json$|(^|/)auth\.json$|(^|/)connector-credentials\.json$|(^|/)connectors\.json$|(^|/)extensions\.json$|(^|/)\.mcp\.json$|(^|/)mcp\.json$|(^|/)claude_desktop_config\.json$|\.pem$|\.key$|(^|/)config\.toml$|sunsetz-support-.*\.zip$|sunsetz-session-.*\.zip$' \
+  || true)"
+
+if [ -n "$blocked" ]; then
+  printf '%s\n' "Refusing to commit local user data or credentials:" "$blocked" \
+    "MCP servers, model keys, and connector tokens stay in the current user's Sunsetz data directory — not GitHub."
+  exit 1
+fi

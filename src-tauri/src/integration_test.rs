@@ -25,10 +25,7 @@ mod integration {
     #[test]
     fn probe_cli_shape_and_local_install() {
         let r = probe_cli(None);
-        assert!(
-            !r.candidates_tried.is_empty(),
-            "should try common paths"
-        );
+        assert!(!r.candidates_tried.is_empty(), "should try common paths");
         // Auth flag always populated
         let _ = r.cli_auth_present;
         if std::path::Path::new(&format!(

@@ -12,9 +12,12 @@ export type SkillBindingV1 = {
   selection: "explicit" | "accepted_suggestion";
 };
 
+export type ConnectorSelectionV1 = "explicit";
+
 export type DraftSegment =
   | { type: "text"; text: string }
-  | { type: "skill"; name: string; binding?: SkillBindingV1 };
+  | { type: "skill"; name: string; binding?: SkillBindingV1 }
+  | { type: "connector"; id: string; selection?: ConnectorSelectionV1 };
 
 /** Skill name character class: letters, digits, `_` `.` `:` `-`. */
 const SKILL_NAME_SOURCE = "[a-zA-Z0-9_.:-]+";
@@ -29,6 +32,16 @@ const SKILL_V1_TOKEN_RE = new RegExp(
 );
 const LEGACY_SKILL_TOKEN_PREFIX = "[[skill:";
 const V1_SKILL_TOKEN_PREFIX = "[[skill-v1:";
+const CONNECTOR_ID_SOURCE = "[a-zA-Z0-9_-]+";
+export const CONNECTOR_ID_RE = new RegExp(`^${CONNECTOR_ID_SOURCE}$`);
+const CONNECTOR_TOKEN_RE = new RegExp(
+  `^\\[\\[connector:(${CONNECTOR_ID_SOURCE})\\]\\]$`,
+);
+const CONNECTOR_V1_TOKEN_RE = new RegExp(
+  `^\\[\\[connector-v1:(${CONNECTOR_ID_SOURCE})\\|explicit\\]\\]$`,
+);
+const LEGACY_CONNECTOR_TOKEN_PREFIX = "[[connector:";
+const V1_CONNECTOR_TOKEN_PREFIX = "[[connector-v1:";
 
 function validHex64(value: unknown): value is string {
   return typeof value === "string" && /^[a-fA-F0-9]{64}$/.test(value);
@@ -48,6 +61,33 @@ function validSkillBinding(value: unknown): value is SkillBindingV1 {
     (binding.selection === "explicit" ||
       binding.selection === "accepted_suggestion")
   );
+}
+
+function validConnectorId(value: unknown): value is string {
+  return typeof value === "string" && CONNECTOR_ID_RE.test(value);
+}
+
+function serializeConnectorToken(
+  segment: Extract<DraftSegment, { type: "connector" }>,
+  displayOnly = false,
+): string {
+  if (!validConnectorId(segment.id)) {
+    throw new Error("invalid connector id in draft segment");
+  }
+  if (displayOnly) {
+    return `[[connector:${segment.id}]]`;
+  }
+  return `[[connector-v1:${segment.id}|explicit]]`;
+}
+
+function serializeSegmentToken(
+  segment: Exclude<DraftSegment, { type: "text" }>,
+  displayOnly = false,
+): string {
+  if (segment.type === "skill") {
+    return serializeSkillToken(segment, displayOnly);
+  }
+  return serializeConnectorToken(segment, displayOnly);
 }
 
 function serializeSkillToken(
@@ -105,7 +145,9 @@ export function hydrateDisplayContent(content: string): string {
   if (!content) return content;
   if (
     content.includes(LEGACY_SKILL_TOKEN_PREFIX) ||
-    content.includes(V1_SKILL_TOKEN_PREFIX)
+    content.includes(V1_SKILL_TOKEN_PREFIX) ||
+    content.includes(LEGACY_CONNECTOR_TOKEN_PREFIX) ||
+    content.includes(V1_CONNECTOR_TOKEN_PREFIX)
   ) {
     return content;
   }
@@ -178,38 +220,49 @@ export function parseStoredContent(content: string): DraftSegment[] {
   };
   let cursor = 0;
   while (cursor < content.length) {
-    const legacyStart = content.indexOf(LEGACY_SKILL_TOKEN_PREFIX, cursor);
-    const v1Start = content.indexOf(V1_SKILL_TOKEN_PREFIX, cursor);
-    const starts = [legacyStart, v1Start].filter((index) => index >= 0);
+    const starts = [
+      content.indexOf(LEGACY_SKILL_TOKEN_PREFIX, cursor),
+      content.indexOf(V1_SKILL_TOKEN_PREFIX, cursor),
+      content.indexOf(LEGACY_CONNECTOR_TOKEN_PREFIX, cursor),
+      content.indexOf(V1_CONNECTOR_TOKEN_PREFIX, cursor),
+    ].filter((index) => index >= 0);
     if (starts.length === 0) {
       pushText(content.slice(cursor));
       break;
     }
     const start = Math.min(...starts);
     pushText(content.slice(cursor, start));
-    const isV1 = start === v1Start;
     const end = content.indexOf("]]", start);
     if (end < 0) {
       pushText(content.slice(start));
       break;
     }
     const rawToken = content.slice(start, end + 2);
-    const match = isV1
-      ? SKILL_V1_TOKEN_RE.exec(rawToken)
-      : SKILL_TOKEN_RE.exec(rawToken);
-    if (isV1 && match) {
+    const skillV1 = SKILL_V1_TOKEN_RE.exec(rawToken);
+    const skillLegacy = SKILL_TOKEN_RE.exec(rawToken);
+    const connectorV1 = CONNECTOR_V1_TOKEN_RE.exec(rawToken);
+    const connectorLegacy = CONNECTOR_TOKEN_RE.exec(rawToken);
+    if (skillV1) {
       segments.push({
         type: "skill",
-        name: match[1]!,
+        name: skillV1[1]!,
         binding: {
           version: 1,
-          id: match[2]!,
-          expectedTreeHash: match[3]!,
-          selection: match[4] as SkillBindingV1["selection"],
+          id: skillV1[2]!,
+          expectedTreeHash: skillV1[3]!,
+          selection: skillV1[4] as SkillBindingV1["selection"],
         },
       });
-    } else if (!isV1 && match) {
-      segments.push({ type: "skill", name: match[1]! });
+    } else if (skillLegacy) {
+      segments.push({ type: "skill", name: skillLegacy[1]! });
+    } else if (connectorV1) {
+      segments.push({
+        type: "connector",
+        id: connectorV1[1]!,
+        selection: "explicit",
+      });
+    } else if (connectorLegacy) {
+      segments.push({ type: "connector", id: connectorLegacy[1]! });
     } else {
       pushText(rawToken);
     }
@@ -222,7 +275,7 @@ export function parseStoredContent(content: string): DraftSegment[] {
 export function serializeStored(segments: DraftSegment[]): string {
   return segments
     .map((segment) =>
-      segment.type === "text" ? segment.text : serializeSkillToken(segment),
+      segment.type === "text" ? segment.text : serializeSegmentToken(segment),
     )
     .join("");
 }
@@ -236,7 +289,7 @@ export function serializeDisplayForJournal(segments: DraftSegment[]): string {
     .map((segment) =>
       segment.type === "text"
         ? segment.text
-        : serializeSkillToken(segment, true),
+        : serializeSegmentToken(segment, true),
     )
     .join("");
 }
@@ -250,9 +303,11 @@ export function serializeDisplayForJournal(segments: DraftSegment[]): string {
 export function previewStoredAsSlash(stored: string): string {
   if (!stored) return stored;
   return parseStoredContent(stored)
-    .map((segment) =>
-      segment.type === "text" ? segment.text : `/${segment.name}`,
-    )
+    .map((segment) => {
+      if (segment.type === "text") return segment.text;
+      if (segment.type === "skill") return `/${segment.name}`;
+      return `@${segment.id}`;
+    })
     .join("");
 }
 
@@ -270,7 +325,7 @@ export function plainTextOf(segments: DraftSegment[]): string {
 /** Empty when there are no skills and no non-whitespace text. */
 export function isDraftEmpty(segments: DraftSegment[]): boolean {
   for (const s of segments) {
-    if (s.type === "skill") return false;
+    if (s.type === "skill" || s.type === "connector") return false;
     if (s.type === "text" && s.text.trim() !== "") return false;
   }
   return true;
@@ -290,7 +345,7 @@ export function serializeForAgent(
   const textParts: string[] = [];
   for (const s of segments) {
     if (s.type === "skill") skillTokens.push(`/${s.name}`);
-    else textParts.push(s.text);
+    else if (s.type === "text") textParts.push(s.text);
   }
 
   const skillsPart = skillTokens.join(" ");
@@ -312,6 +367,20 @@ export function serializeForAgent(
  * Replace the active slash range `[slashStart, slashEnd)` with a skill token
  * plus a trailing space.
  */
+export function applyConnectorAtMention(
+  stored: string,
+  mentionStart: number,
+  mentionEnd: number,
+  connectorId: string,
+): string {
+  const token = `${serializeConnectorToken({
+    type: "connector",
+    id: connectorId,
+    selection: "explicit",
+  })} `;
+  return stored.slice(0, mentionStart) + token + stored.slice(mentionEnd);
+}
+
 export function applySkillAtSlash(
   stored: string,
   slashStart: number,
@@ -351,6 +420,18 @@ export function readPlainEditorText(el: HTMLElement): string {
  * Contenteditable almost always serializes a trailing `\n` (from `<br>`).
  * Without trimming, `/目标\n` fails `$` anchor and filtering looks "broken".
  */
+export function detectAtQuery(
+  textBeforeCursor: string,
+): { start: number; query: string } | null {
+  const text = textBeforeCursor
+    .replace(/[\u200B-\u200D\uFEFF\u2060]/g, "")
+    .replace(/[\s\u00a0]+$/u, "");
+  const m = /(^|[\s])@([a-zA-Z0-9_-]*)$/u.exec(text);
+  if (!m) return null;
+  const start = m.index + m[1]!.length;
+  return { start, query: m[2]! };
+}
+
 export function detectSlashQuery(
   textBeforeCursor: string,
 ): { start: number; query: string } | null {

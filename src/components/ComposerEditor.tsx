@@ -27,6 +27,7 @@ import {
   readClipboardMediaFiles,
 } from "@/lib/clipboardPaste";
 import {
+  detectAtQuery,
   detectSlashQuery,
   parseStoredContent,
   serializeStored,
@@ -69,13 +70,40 @@ function makeSkillChipEl(
   return wrap;
 }
 
+function makeConnectorChipEl(
+  segment: Extract<DraftSegment, { type: "connector" }>,
+): HTMLElement {
+  const wrap = document.createElement("span");
+  wrap.className =
+    "skill-chip skill-chip--sm skill-chip--editor connector-chip";
+  wrap.contentEditable = "false";
+  wrap.dataset.connector = segment.id;
+  wrap.dataset.connectorToken = serializeStored([segment]);
+  wrap.setAttribute("data-connector", segment.id);
+
+  const icon = document.createElement("span");
+  icon.className = "skill-chip__glyph";
+  icon.setAttribute("aria-hidden", "true");
+  icon.textContent = "@";
+
+  const label = document.createElement("span");
+  label.className = "skill-chip__name";
+  label.textContent = segment.id;
+
+  wrap.appendChild(icon);
+  wrap.appendChild(label);
+  return wrap;
+}
+
 function renderSegmentsInto(el: HTMLElement, segments: DraftSegment[]) {
   clearNode(el);
   for (const seg of segments) {
     if (seg.type === "text") {
       appendTextWithBreaks(el, seg.text);
-    } else {
+    } else if (seg.type === "skill") {
       el.appendChild(makeSkillChipEl(seg));
+    } else {
+      el.appendChild(makeConnectorChipEl(seg));
     }
   }
 }
@@ -107,6 +135,24 @@ export function serializeDom(el: HTMLElement): string {
         }
       } else {
         segs.push({ type: "skill", name: he.dataset.skill });
+      }
+      return;
+    }
+    if (he.dataset?.connector) {
+      const token = he.dataset.connectorToken;
+      if (token) {
+        const parsed = parseStoredContent(token);
+        const connector = parsed.length === 1 ? parsed[0] : null;
+        if (
+          connector?.type === "connector" &&
+          connector.id === he.dataset.connector
+        ) {
+          segs.push(connector);
+        } else {
+          segs.push({ type: "text", text: token });
+        }
+      } else {
+        segs.push({ type: "connector", id: he.dataset.connector });
       }
       return;
     }
@@ -205,6 +251,9 @@ export type ComposerEditorProps = {
   onSlashQueryChange?: (
     q: { start: number; query: string; end: number } | null,
   ) => void;
+  onAtQueryChange?: (
+    q: { start: number; query: string; end: number } | null,
+  ) => void;
   editorRef?: Ref<HTMLDivElement | null>;
   onPasteFiles?: (files: File[]) => void;
   /**
@@ -225,6 +274,7 @@ export function ComposerEditor({
   className,
   onKeyDown,
   onSlashQueryChange,
+  onAtQueryChange,
   editorRef,
   onPasteFiles,
   onPasteMediaFallback,
@@ -280,6 +330,29 @@ export function ComposerEditor({
     onSlashQueryChange({ start: q.start, query: q.query, end });
   }, [onSlashQueryChange]);
 
+  const emitAt = useCallback(() => {
+    const el = elRef.current;
+    if (!el || !onAtQueryChange) return;
+    const beforeCaret = getTextBeforeCaret(el);
+    const full = serializeDom(el);
+    const fromFull = detectAtQuery(full);
+    const fromCaret =
+      beforeCaret != null ? detectAtQuery(beforeCaret) : null;
+    const q = fromFull ?? fromCaret;
+    if (!q) {
+      if (composing.current) return;
+      onAtQueryChange(null);
+      return;
+    }
+    const end = fromFull ? full.length : (beforeCaret?.length ?? full.length);
+    onAtQueryChange({ start: q.start, query: q.query, end });
+  }, [onAtQueryChange]);
+
+  const emitMentions = useCallback(() => {
+    emitSlash();
+    emitAt();
+  }, [emitSlash, emitAt]);
+
   const syncDomEmpty = useCallback((el: HTMLElement) => {
     const stored = serializeDom(el);
     const empty =
@@ -287,7 +360,8 @@ export function ComposerEditor({
       (parseStoredContent(stored).every(
         (s) => s.type === "text" && !s.text.trim(),
       ) &&
-        !stored.includes("[[skill:"));
+        !stored.includes("[[skill:") &&
+        !stored.includes("[[connector"));
     setDomEmpty(empty);
   }, []);
 
@@ -295,8 +369,12 @@ export function ComposerEditor({
     (el: HTMLElement) => {
       let stored = serializeDom(el);
       if (
-        parseStoredContent(stored).some((segment) => segment.type === "skill") &&
-        !el.querySelector("[data-skill]")
+        (parseStoredContent(stored).some((segment) => segment.type === "skill") &&
+          !el.querySelector("[data-skill]")) ||
+        (parseStoredContent(stored).some(
+          (segment) => segment.type === "connector",
+        ) &&
+          !el.querySelector("[data-connector]"))
       ) {
         renderSegmentsInto(el, parseStoredContent(stored));
         stored = serializeDom(el);
@@ -307,10 +385,10 @@ export function ComposerEditor({
         lastValue.current = stored;
         onChange(stored);
       }
-      emitSlash();
+      emitMentions();
       resize();
     },
-    [onChange, emitSlash, resize, syncDomEmpty],
+    [onChange, emitMentions, resize, syncDomEmpty],
   );
 
   useLayoutEffect(() => {
@@ -332,21 +410,21 @@ export function ComposerEditor({
       lastValue.current = value;
       placeCaretAtEnd(el);
       resize();
-      emitSlash();
+      emitMentions();
       return;
     }
     renderSegmentsInto(el, parseStoredContent(value));
     lastValue.current = value;
     resize();
-    emitSlash();
-  }, [value, resize, emitSlash]);
+    emitMentions();
+  }, [value, resize, emitMentions]);
 
   const onInput = (e: FormEvent<HTMLDivElement>) => {
     // Hide placeholder as soon as the DOM has glyphs (incl. IME preedit).
     syncDomEmpty(e.currentTarget);
     if (composing.current) {
       // Live pinyin in DOM — update slash filter without committing draft yet.
-      emitSlash();
+      emitMentions();
       resize();
       return;
     }
@@ -429,14 +507,14 @@ export function ComposerEditor({
     const sync = () => {
       if (!elRef.current) return;
       if (composing.current) {
-        emitSlash();
+        emitMentions();
         return;
       }
       const live = serializeDom(el);
       if (live !== lastValue.current) {
         commitFromDom(el);
       } else {
-        emitSlash();
+        emitMentions();
       }
     };
     const schedule = () => {
@@ -455,7 +533,7 @@ export function ComposerEditor({
       mo.disconnect();
       if (raf) cancelAnimationFrame(raf);
     };
-  }, [commitFromDom, emitSlash, value]);
+  }, [commitFromDom, emitMentions, value]);
 
   const valueEmpty =
     !value.trim() ||
@@ -502,14 +580,14 @@ export function ComposerEditor({
         onInput={onInput}
         onPaste={onPaste}
         onKeyUp={() => {
-          if (!composing.current) emitSlash();
+          if (!composing.current) emitMentions();
         }}
-        onClick={() => emitSlash()}
+        onClick={() => emitMentions()}
         onCompositionStart={() => {
           composing.current = true;
         }}
         onCompositionUpdate={() => {
-          emitSlash();
+          emitMentions();
         }}
         onCompositionEnd={(e: CompositionEvent<HTMLDivElement>) => {
           flushAfterIme(e.currentTarget);

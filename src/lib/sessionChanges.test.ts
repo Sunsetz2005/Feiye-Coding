@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   buildUnifiedDiff,
+  countLineEdits,
+  enrichFileChanges,
   isEditToolKind,
+  lastTurnFileChanges,
   mergeSessionChange,
   normalizePath,
   pathBaseName,
@@ -163,6 +166,64 @@ describe("sessionChangesFromMessages", () => {
     expect(changes).toHaveLength(1);
     expect(changes[0]?.path).toBe("/tmp/foo.ts");
     expect(changes[0]?.toolKind).toBe("write");
+  });
+});
+
+describe("last-turn file changes", () => {
+  const write = (
+    id: string,
+    path: string,
+    status = "completed",
+  ): ChatMessage => ({
+    id,
+    role: "tool",
+    content: `tool_step|${status}|write|Write ${path}`,
+    marker: "tool_step",
+    toolKind: "write",
+    toolPath: path,
+    toolStatus: status,
+  });
+
+  it("keeps only completed edits after the latest user message", () => {
+    const messages: ChatMessage[] = [
+      { id: "u0", role: "user", content: "first" },
+      write("t0", "/old.ts"),
+      { id: "u1", role: "user", content: "second" },
+      write("t1", "/a.ts"),
+      write("t2", "/b.ts", "failed"),
+      { id: "a1", role: "assistant", content: "done" },
+    ];
+    const turn = lastTurnFileChanges(messages);
+    expect(turn.map((row) => row.path)).toEqual(["/a.ts"]);
+  });
+
+  it("overlays live before/after payloads", () => {
+    const turn: SessionFileChange[] = [
+      {
+        path: "/a.ts",
+        name: "a.ts",
+        toolKind: "write",
+        status: "completed",
+        updatedAt: "t",
+      },
+    ];
+    const live: SessionFileChange[] = [
+      {
+        path: "/a.ts",
+        name: "a.ts",
+        toolKind: "write",
+        status: "completed",
+        updatedAt: "t",
+        before: "old\n",
+        after: "new\nline\n",
+      },
+    ];
+    const merged = enrichFileChanges(turn, live);
+    expect(merged[0]?.before).toBe("old\n");
+    expect(countLineEdits(merged[0]?.before, merged[0]?.after)).toEqual({
+      added: 2,
+      removed: 1,
+    });
   });
 });
 

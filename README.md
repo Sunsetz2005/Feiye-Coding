@@ -49,11 +49,13 @@ pnpm dev
 pnpm dev:ui
 ```
 
-使用本地模拟 Runtime：
+仅做 UI 冒烟时可用本地模拟 Runtime（不会读取项目或运行工具）：
 
 ```bash
 SUNSETZ_ACP=mock pnpm dev
 ```
+
+真实本机工作请直接 `pnpm dev`，并在设置 → 我的模型中添加 API。默认内核是应用内 `agent_loop`，不需要 Grok CLI。
 
 应用数据目录可通过 `SUNSETZ_HOME` 覆盖。
 

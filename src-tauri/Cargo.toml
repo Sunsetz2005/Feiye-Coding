@@ -54,6 +54,7 @@ arboard = "3"
 image = { version = "0.25", default-features = false, features = ["png"] }
 fs2 = "0.4"
 rusqlite = { version = "0.32", features = ["bundled"] }
+regex = "1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

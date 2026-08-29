@@ -76,12 +76,8 @@ pub fn list_cli_sessions(session_data_mode: &str) -> Result<Vec<CliSessionSummar
         if !cwd_path.is_dir() {
             continue;
         }
-        let cwd_decoded = percent_decode_component(
-            cwd_path
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or(""),
-        );
+        let cwd_decoded =
+            percent_decode_component(cwd_path.file_name().and_then(|s| s.to_str()).unwrap_or(""));
         let Ok(sid_dirs) = fs::read_dir(&cwd_path) else {
             continue;
         };
@@ -102,7 +98,8 @@ pub fn list_cli_sessions(session_data_mode: &str) -> Result<Vec<CliSessionSummar
             if !summary_path.is_file() && !dir.join("chat_history.jsonl").is_file() {
                 continue;
             }
-            let (title, cwd, updated, n) = read_summary_bits(&summary_path, &cwd_decoded, &agent_id);
+            let (title, cwd, updated, n) =
+                read_summary_bits(&summary_path, &cwd_decoded, &agent_id);
             out.push(CliSessionSummary {
                 already_linked: linked.contains(&agent_id),
                 agent_session_id: agent_id,
@@ -238,10 +235,7 @@ pub fn parse_chat_history_jsonl(path: &Path) -> Result<Vec<(String, String)>, St
             "assistant" => "assistant",
             _ => continue,
         };
-        let content = v
-            .get("content")
-            .map(content_to_text)
-            .unwrap_or_default();
+        let content = v.get("content").map(content_to_text).unwrap_or_default();
         let content = content.trim().to_string();
         if content.is_empty() {
             continue;
@@ -356,12 +350,7 @@ pub fn import_all_cli_sessions(
     let list = list_cli_sessions(session_data_mode)?;
     let mut imported = Vec::new();
     for s in list.into_iter().filter(|s| !s.already_linked).take(limit) {
-        match import_cli_session(
-            &s.agent_session_id,
-            Some(&s.dir),
-            None,
-            session_data_mode,
-        ) {
+        match import_cli_session(&s.agent_session_id, Some(&s.dir), None, session_data_mode) {
             Ok(m) => imported.push(m),
             Err(e) => tracing::warn!("cli import skip {}: {e}", s.agent_session_id),
         }
@@ -380,10 +369,7 @@ mod tests {
     fn percent_decode_roundtrip_path() {
         let enc = percent_encode_path_component("/Users/me/Code/oss/pq");
         assert!(enc.contains("%2F"));
-        assert_eq!(
-            percent_decode_component(&enc),
-            "/Users/me/Code/oss/pq"
-        );
+        assert_eq!(percent_decode_component(&enc), "/Users/me/Code/oss/pq");
     }
 
     #[test]
@@ -392,21 +378,13 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("chat_history.jsonl");
         let mut f = fs::File::create(&path).unwrap();
-        writeln!(
-            f,
-            r#"{{"type":"system","content":"sys"}}"#
-        )
-        .unwrap();
+        writeln!(f, r#"{{"type":"system","content":"sys"}}"#).unwrap();
         writeln!(
             f,
             r#"{{"type":"user","content":[{{"type":"text","text":"<user_query>\nhello world\n</user_query>"}}]}}"#
         )
         .unwrap();
-        writeln!(
-            f,
-            r#"{{"type":"assistant","content":"hi there"}}"#
-        )
-        .unwrap();
+        writeln!(f, r#"{{"type":"assistant","content":"hi there"}}"#).unwrap();
         let pairs = parse_chat_history_jsonl(&path).unwrap();
         assert_eq!(pairs.len(), 2);
         assert_eq!(pairs[0].0, "user");

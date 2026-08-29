@@ -1,19 +1,10 @@
 # Custom providers & agent profile
 
-Product rules for **OpenAI-compatible relays** (CPA / sub2api / OneAPI / self-hosted) and how they reach Grok Build.
+Product rules for **OpenAI-compatible relays** (CPA / sub2api / OneAPI / self-hosted) used by the built-in agent loop.
 
-## Agent transport (shared with Grok Desktop)
+## Agent transport
 
-Both Sunsetz and community **Grok Desktop** drive intelligence through the same upstream runtime boundary:
-
-| Layer | Implementation |
-|-------|----------------|
-| Runtime | **Grok Build CLI** binary (`grok`) |
-| Entry | `grok agent stdio` |
-| Protocol | **ACP** (Agent Client Protocol) JSON-RPC over stdio |
-| Client | Desktop Host (`AcpClient`) — **not** a reimplemented agent brain |
-
-Desktop never reimplements tools/sampling. It is an ACP client + UI shell.
+Default intelligence is the in-process kernel (`src-tauri/src/agent_loop.rs`) calling the configured OpenAI-compatible chat API. Grok CLI ACP is a legacy flag (`runtimeBackend=grok_acp`) only.
 
 ## Agent profile (`GROK_HOME`)
 
@@ -39,14 +30,16 @@ Custom providers are written to **`$GROK_HOME/config.toml`** as `[model.<id>]` s
 Provider brands are **not special-cased** — any compatible base URL works.
 No bundled third-party presets (e.g. yunyi) ship with the app; users add relays themselves.
 
-## Settings UI (Account → Custom providers)
+## Settings UI (Account → Custom providers / My models)
 
 Left / right split (`ProvidersPanel`):
 
 | Side | Content |
 |------|---------|
-| Left | **Add provider** on top; list of cards. Official Grok card first **only if** signed in / CLI auth / official key; otherwise list starts empty. |
+| Left | **Add provider** on top; list of cards. Official card first **only if** signed in / CLI auth / official key; otherwise list starts empty. |
 | Right | Create/edit form when adding or selecting a custom card; official detail when selecting the official card; empty placeholder otherwise. |
+
+Create/edit fields shown to the user: **display name**, **Base URL**, **message format**, **API key**, **request model**. The config.toml section `id` is generated from the display name (or host) via `uniqueProviderId` and is **not** a visible form field.
 
 Each card has **Use** to activate that route (`providers_activate`). Click card opens detail/edit. No long intro copy, agent-home path, or separate “active route” switcher.
 

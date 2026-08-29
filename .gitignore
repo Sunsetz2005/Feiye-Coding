@@ -33,9 +33,11 @@ src-tauri/target
 src-tauri/gen/schemas
 src-tauri/icons/*.iconset/
 
-# Local runtime data & secrets
+# Local runtime data & secrets — never push MCP, models, tokens, or per-user homes
 *.db
 *.db-*
+*.sqlite
+*.sqlite-*
 .env
 .env.*
 *.pem
@@ -43,7 +45,22 @@ src-tauri/icons/*.iconset/
 *.key
 auth.json
 secrets.json
+connectors.json
+connector-credentials.json
+extensions.json
 config.local.*
+.sunsetz/
+.grok/
+agent-home/
+sunsetz-support-*.zip
+sunsetz-session-*.zip
+
+# MCP / local model runtime files that sometimes land in a checkout
+.mcp.json
+mcp.json
+claude_desktop_config.json
+**/config.toml
+!src-tauri/**/config.toml
 
 # Scratch / local experiments (not part of the published tree)
 .spike-proj
