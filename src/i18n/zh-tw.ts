@@ -4,7 +4,7 @@ import type { MessageKey } from "./messages";
 export const zhTW: Record<MessageKey, string> = {
   "app.name": "Sunsetz",
   "app.tagline": "本機優先的 Agent 工作台",
-  "app.versionFooter": "Sunsetz v1.0.0 · MIT",
+  "app.versionFooter": "Sunsetz v1.0.1 · MIT",
 
   "window.minimize": "最小化",
   "window.maximize": "最大化",

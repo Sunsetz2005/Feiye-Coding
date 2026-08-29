@@ -10,7 +10,7 @@ const en = {
   // App chrome
   "app.name": "Sunsetz",
   "app.tagline": "Local-first agent workbench",
-  "app.versionFooter": "Sunsetz v1.0.0 · MIT",
+  "app.versionFooter": "Sunsetz v1.0.1 · MIT",
 
   // Window chrome (Windows self-drawn controls)
   "window.minimize": "Minimize",
@@ -1725,7 +1725,7 @@ const en = {
 const zh: Record<MessageKey, string> = {
   "app.name": "Sunsetz",
   "app.tagline": "本地优先的 Agent 工作台",
-  "app.versionFooter": "Sunsetz v1.0.0 · MIT",
+  "app.versionFooter": "Sunsetz v1.0.1 · MIT",
 
   "window.minimize": "最小化",
   "window.maximize": "最大化",

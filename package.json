@@ -1,7 +1,7 @@
 {
   "name": "sunsetz",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Sunsetz local desktop agent workbench",
   "author": "Sunsetz contributors",
   "license": "MIT",

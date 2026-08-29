@@ -76,3 +76,5 @@ temp/
 
 # Local agent / IDE workspaces
 .claude/
+AGENTS.md
+CLAUDE.md
