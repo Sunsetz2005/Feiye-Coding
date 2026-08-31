@@ -675,13 +675,10 @@ pub fn reset_app_data(keep_secrets: bool) -> Result<serde_json::Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn reset_keeps_secrets_when_requested() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = crate::runtime_compat::lock_test_process_env();
         let tmp = std::env::temp_dir().join(format!("sunsetz-reset-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(tmp.join("sessions")).unwrap();
@@ -710,7 +707,7 @@ mod tests {
 
     #[test]
     fn support_bundle_creates_zip_without_secrets() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = crate::runtime_compat::lock_test_process_env();
         let tmp = std::env::temp_dir().join(format!("sunsetz-bundle-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(tmp.join("logs")).unwrap();
@@ -741,7 +738,7 @@ mod tests {
 
     #[test]
     fn session_bundle_includes_messages_without_secrets() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = crate::runtime_compat::lock_test_process_env();
         let tmp = std::env::temp_dir().join(format!(
             "sunsetz-session-bundle-test-{}",
             std::process::id()

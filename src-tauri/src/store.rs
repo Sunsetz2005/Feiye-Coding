@@ -2018,8 +2018,6 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
-    static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     struct IsolatedHome {
         home: PathBuf,
         _lock: std::sync::MutexGuard<'static, ()>,
@@ -2027,7 +2025,7 @@ mod tests {
 
     impl IsolatedHome {
         fn new(label: &str) -> Self {
-            let lock = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let lock = crate::runtime_compat::lock_test_process_env();
             let home = std::env::temp_dir().join(format!(
                 "sunsetz-store-{label}-{}-{}",
                 std::process::id(),

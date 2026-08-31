@@ -280,6 +280,14 @@ pub fn product_home_override() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+/// Serialize tests that mutate process environment (`SUNSETZ_HOME`,
+/// `GROK_APP_HOME`, connector URL overrides). Per-module mutexes still race.
+#[cfg(test)]
+pub fn lock_test_process_env() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|error| error.into_inner())
+}
+
 pub fn use_mock_runtime() -> bool {
     std::env::var(PRODUCT_ACP_ENV)
         .or_else(|_| std::env::var(LEGACY_PRODUCT_ACP_ENV))
