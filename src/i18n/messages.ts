@@ -386,6 +386,16 @@ const en = {
   "plugin.credential.placeholder": "ghp_… or github_pat_…",
   "plugin.credential.submit": "Save and connect",
   "plugin.credential.cancel": "Cancel",
+  "plugin.credential.notion.title": "Connect Notion",
+  "plugin.credential.notion.body":
+    "Paste a Notion internal integration token (secret_ or ntn_). Invite the integration to the pages Sunsetz should read or write. Sunsetz stores it in the OS keychain or a local 0600 file — never in chat history.",
+  "plugin.credential.notion.create": "Create an integration in Notion",
+  "plugin.credential.notion.placeholder": "secret_… or ntn_…",
+  "plugin.credential.slack.title": "Connect Slack",
+  "plugin.credential.slack.body":
+    "Paste a Slack bot token (xoxb-). Invite the bot to the channels Sunsetz should read or post in. Sunsetz stores it in the OS keychain or a local 0600 file — never in chat history.",
+  "plugin.credential.slack.create": "Create a Slack app",
+  "plugin.credential.slack.placeholder": "xoxb-…",
   "plugin.credentialMissing": "This plugin needs a credential before it can connect.",
   "plugin.oauthClientMissing":
     "Couldn't start Google sign-in. Try Connect again.",
@@ -399,7 +409,7 @@ const en = {
   "plugin.connectedHint": "Connected · @{id}",
   "plugin.connectFirst": "Connect to use this plugin",
   "plugin.githubPatHint":
-    "GitHub uses a personal access token. Gmail, Drive, and Calendar use Google sign-in in the browser. Other apps will follow — no extra runtime to install.",
+    "GitHub, Notion, and Slack use a pasted token. Gmail, Drive, and Calendar use Google sign-in in the browser. Other apps will follow — no extra runtime to install.",
   "plugin.skills.empty": "No trusted skills are available yet.",
   "plugin.gmail.name": "Gmail",
   "plugin.gmail.desc": "Read and manage Gmail",
@@ -425,10 +435,14 @@ const en = {
   "plugin.notion.desc": "Notion docs and workflows",
   "plugin.notion.about":
     "Find specs, write meeting notes, and keep Notion project pages current.",
+  "plugin.notion.connectHint":
+    "Connect asks for an internal integration token. Invite the integration to the pages Sunsetz should use.",
   "plugin.slack.name": "Slack",
   "plugin.slack.desc": "Read and manage Slack",
   "plugin.slack.about":
     "Catch up on mentions, draft channel updates, and pull incident status from Slack.",
+  "plugin.slack.connectHint":
+    "Connect asks for a bot token (xoxb-). Invite the bot to the channels Sunsetz should use.",
   "plugin.granola.name": "Granola",
   "plugin.granola.desc": "Add your meeting context",
   "plugin.granola.about":
@@ -2087,6 +2101,16 @@ const zh: Record<MessageKey, string> = {
   "plugin.credential.placeholder": "ghp_… 或 github_pat_…",
   "plugin.credential.submit": "保存并连接",
   "plugin.credential.cancel": "取消",
+  "plugin.credential.notion.title": "连接 Notion",
+  "plugin.credential.notion.body":
+    "粘贴 Notion 内部集成令牌（secret_ 或 ntn_）。把集成邀请到 Sunsetz 需要读写的页面。Sunsetz 只把它存在系统钥匙串或本机 0600 文件中，不会写入对话记录。",
+  "plugin.credential.notion.create": "在 Notion 创建集成",
+  "plugin.credential.notion.placeholder": "secret_… 或 ntn_…",
+  "plugin.credential.slack.title": "连接 Slack",
+  "plugin.credential.slack.body":
+    "粘贴 Slack 机器人令牌（xoxb-）。把机器人邀请到 Sunsetz 需要阅读或发帖的频道。Sunsetz 只把它存在系统钥匙串或本机 0600 文件中，不会写入对话记录。",
+  "plugin.credential.slack.create": "创建 Slack 应用",
+  "plugin.credential.slack.placeholder": "xoxb-…",
   "plugin.credentialMissing": "连接前需要凭据。",
   "plugin.oauthClientMissing": "无法开始 Google 登录。请再试一次连接。",
   "plugin.authFailed":
@@ -2098,7 +2122,7 @@ const zh: Record<MessageKey, string> = {
   "plugin.connectedHint": "已连接 · @{id}",
   "plugin.connectFirst": "连接后才能使用",
   "plugin.githubPatHint":
-    "GitHub 用个人访问令牌连接。Gmail、Drive 和 Calendar 用浏览器 Google 登录。其他应用随后跟上，无需再装运行时。",
+    "GitHub、Notion 和 Slack 用粘贴令牌连接。Gmail、Drive 和 Calendar 用浏览器 Google 登录。其他应用随后跟上，无需再装运行时。",
   "plugin.skills.empty": "还没有可调用的已信任技能。",
   "plugin.gmail.name": "Gmail",
   "plugin.gmail.desc": "阅读和管理 Gmail",
@@ -2124,10 +2148,14 @@ const zh: Record<MessageKey, string> = {
   "plugin.notion.desc": "Notion 文档与工作流",
   "plugin.notion.about":
     "查找规格、写会议记录，并保持 Notion 项目页最新。",
+  "plugin.notion.connectHint":
+    "连接时需要内部集成令牌。请把该集成邀请到 Sunsetz 要使用的页面。",
   "plugin.slack.name": "Slack",
   "plugin.slack.desc": "阅读和管理 Slack",
   "plugin.slack.about":
     "处理提及、起草频道更新，并从 Slack 拉取事故状态。",
+  "plugin.slack.connectHint":
+    "连接时需要机器人令牌（xoxb-）。请把机器人邀请到 Sunsetz 要使用的频道。",
   "plugin.granola.name": "Granola",
   "plugin.granola.desc": "加入会议上下文",
   "plugin.granola.about":

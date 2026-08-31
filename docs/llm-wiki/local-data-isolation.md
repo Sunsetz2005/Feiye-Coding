@@ -7,7 +7,7 @@ Sunsetz 的 MCP 配置、自定义模型密钥、连接器 token 和会话 journ
 | 数据 | 位置 |
 |---|---|
 | 应用数据（会话、项目、设置、MCP prefs、agent-home） | macOS `~/Library/Application Support/dev.sunsetz.desktop/`；Windows `%APPDATA%\Sunsetz`；否则 `~/.sunsetz` |
-| GitHub PAT / Google OAuth 令牌 / 连接器凭据 | OS Keychain + `connector-credentials.json`（0600）；Gmail / Drive / Calendar 共用 `google` 键 |
+| GitHub PAT / Notion / Slack 令牌 / Google OAuth 令牌 / 连接器凭据 | OS Keychain + `connector-credentials.json`（0600）；Gmail / Drive / Calendar 共用 `google` 键；Notion 与 Slack 各用独立键 |
 | 模型 API key | OS Keychain，磁盘只留 has-key 标记 |
 | 独立模式模型/MCP 配置 | `{app_data}/agent-home/config.toml` |
 | 共享模式 | 仅当前用户的 `~/.grok`，不跨账号 |

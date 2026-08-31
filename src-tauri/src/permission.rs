@@ -794,6 +794,24 @@ mod tests {
             "github_create_issue",
             "",
         ));
+        assert!(!may_auto_allow(
+            PermissionPolicy::AcceptEdits,
+            &c,
+            "notion_create_page:page-1",
+            None,
+            "",
+            "notion_create_page",
+            "",
+        ));
+        assert!(!may_auto_allow(
+            PermissionPolicy::AcceptEdits,
+            &c,
+            "slack_post_message:C1",
+            None,
+            "",
+            "slack_post_message",
+            "",
+        ));
     }
 
     #[test]

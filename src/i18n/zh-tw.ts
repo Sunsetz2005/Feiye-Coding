@@ -376,6 +376,16 @@ export const zhTW: Record<MessageKey, string> = {
   "plugin.credential.placeholder": "ghp_… 或 github_pat_…",
   "plugin.credential.submit": "儲存並連接",
   "plugin.credential.cancel": "取消",
+  "plugin.credential.notion.title": "連接 Notion",
+  "plugin.credential.notion.body":
+    "貼上 Notion 內部整合權杖（secret_ 或 ntn_）。把整合邀請到 Sunsetz 需要讀寫的頁面。Sunsetz 只會把它存在系統鑰匙圈或本機 0600 檔案，不會寫入對話紀錄。",
+  "plugin.credential.notion.create": "在 Notion 建立整合",
+  "plugin.credential.notion.placeholder": "secret_… 或 ntn_…",
+  "plugin.credential.slack.title": "連接 Slack",
+  "plugin.credential.slack.body":
+    "貼上 Slack 機器人權杖（xoxb-）。把機器人邀請到 Sunsetz 需要閱讀或發文的頻道。Sunsetz 只會把它存在系統鑰匙圈或本機 0600 檔案，不會寫入對話紀錄。",
+  "plugin.credential.slack.create": "建立 Slack 應用",
+  "plugin.credential.slack.placeholder": "xoxb-…",
   "plugin.credentialMissing": "連接前需要憑證。",
   "plugin.oauthClientMissing": "無法開始 Google 登入。請再試一次連接。",
   "plugin.authFailed":
@@ -387,7 +397,7 @@ export const zhTW: Record<MessageKey, string> = {
   "plugin.connectedHint": "已連接 · @{id}",
   "plugin.connectFirst": "連接後才能使用",
   "plugin.githubPatHint":
-    "GitHub 用個人存取權杖連接。Gmail、Drive 和 Calendar 用瀏覽器 Google 登入。其他應用隨後跟上，無需再裝執行環境。",
+    "GitHub、Notion 和 Slack 用貼上權杖連接。Gmail、Drive 和 Calendar 用瀏覽器 Google 登入。其他應用隨後跟上，無需再裝執行環境。",
   "plugin.skills.empty": "還沒有可呼叫的已信任技能。",
   "plugin.gmail.name": "Gmail",
   "plugin.gmail.desc": "讀取與管理 Gmail",
@@ -413,10 +423,14 @@ export const zhTW: Record<MessageKey, string> = {
   "plugin.notion.desc": "Notion 文件與工作流程",
   "plugin.notion.about":
     "查找規格、寫會議紀錄，並保持 Notion 專案頁最新。",
+  "plugin.notion.connectHint":
+    "連接時需要內部整合權杖。請把該整合邀請到 Sunsetz 要使用的頁面。",
   "plugin.slack.name": "Slack",
   "plugin.slack.desc": "讀取與管理 Slack",
   "plugin.slack.about":
     "處理提及、起草頻道更新，並從 Slack 拉取事故狀態。",
+  "plugin.slack.connectHint":
+    "連接時需要機器人權杖（xoxb-）。請把機器人邀請到 Sunsetz 要使用的頻道。",
   "plugin.granola.name": "Granola",
   "plugin.granola.desc": "加入會議脈絡",
   "plugin.granola.about":

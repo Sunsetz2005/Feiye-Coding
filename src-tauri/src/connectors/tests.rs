@@ -4,11 +4,12 @@ use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::PathBuf;
-use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
 
-static ENV_LOCK: Mutex<()> = Mutex::new(());
+fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    crate::runtime_compat::lock_test_process_env()
+}
 
 struct EnvGuard {
     home: PathBuf,
@@ -28,6 +29,8 @@ impl EnvGuard {
         std::env::remove_var("SUNSETZ_GMAIL_API_URL");
         std::env::remove_var("SUNSETZ_DRIVE_API_URL");
         std::env::remove_var("SUNSETZ_CALENDAR_API_URL");
+        std::env::remove_var("SUNSETZ_NOTION_API_URL");
+        std::env::remove_var("SUNSETZ_SLACK_API_URL");
         std::env::remove_var("SUNSETZ_GOOGLE_OAUTH_CLIENT_ID");
         std::env::remove_var("SUNSETZ_GOOGLE_OAUTH_AUTH_URL");
         std::env::remove_var("SUNSETZ_GOOGLE_OAUTH_TOKEN_URL");
@@ -43,6 +46,8 @@ impl Drop for EnvGuard {
         std::env::remove_var("SUNSETZ_GMAIL_API_URL");
         std::env::remove_var("SUNSETZ_DRIVE_API_URL");
         std::env::remove_var("SUNSETZ_CALENDAR_API_URL");
+        std::env::remove_var("SUNSETZ_NOTION_API_URL");
+        std::env::remove_var("SUNSETZ_SLACK_API_URL");
         std::env::remove_var("SUNSETZ_GOOGLE_OAUTH_CLIENT_ID");
         std::env::remove_var("SUNSETZ_GOOGLE_OAUTH_AUTH_URL");
         std::env::remove_var("SUNSETZ_GOOGLE_OAUTH_TOKEN_URL");
@@ -191,26 +196,26 @@ fn catalog_ids_are_stable_and_unique() {
 
 #[tokio::test]
 async fn unknown_connector_is_fail_closed() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = env_lock();
     let error = connect_connector("not-a-plugin", None).await.unwrap_err();
     assert!(error.starts_with("CONNECTOR_UNKNOWN:"));
 }
 
 #[tokio::test]
 async fn connect_without_runtime_does_not_mark_installed() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = env_lock();
     let _guard = EnvGuard::new("missing");
-    let error = connect_connector("slack", None).await.unwrap_err();
+    let error = connect_connector("granola", None).await.unwrap_err();
     assert!(error.contains("CONNECTOR_RUNTIME_MISSING"));
     let listed = list_connectors().unwrap();
-    let slack = listed.iter().find(|row| row.id == "slack").unwrap();
-    assert!(!slack.connected);
-    assert!(!slack.enabled);
+    let granola = listed.iter().find(|row| row.id == "granola").unwrap();
+    assert!(!granola.connected);
+    assert!(!granola.enabled);
 }
 
 #[test]
 fn blank_runtime_url_is_treated_as_missing() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = env_lock();
     std::env::set_var("SUNSETZ_OPEN_CONNECTOR_URL", "   ");
     assert!(open_connector_endpoint().is_none());
     std::env::remove_var("SUNSETZ_OPEN_CONNECTOR_URL");
@@ -224,19 +229,19 @@ async fn disconnect_unknown_is_fail_closed() {
 
 #[tokio::test]
 async fn fake_runtime_url_does_not_mark_connected() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = env_lock();
     let _guard = EnvGuard::new("fake-url");
     std::env::set_var("SUNSETZ_OPEN_CONNECTOR_URL", "http://127.0.0.1:9");
-    let error = connect_connector("slack", None).await.unwrap_err();
+    let error = connect_connector("granola", None).await.unwrap_err();
     assert!(error.contains("CONNECTOR_PROBE_FAILED"));
     let listed = list_connectors().unwrap();
-    let slack = listed.iter().find(|row| row.id == "slack").unwrap();
-    assert!(!slack.connected);
+    let granola = listed.iter().find(|row| row.id == "granola").unwrap();
+    assert!(!granola.connected);
 }
 
 #[test]
 fn non_loopback_url_is_rejected() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = env_lock();
     std::env::set_var("SUNSETZ_OPEN_CONNECTOR_URL", "https://example.com");
     let error = configured_open_connector_url().unwrap_err();
     assert!(error.contains("CONNECTOR_RUNTIME_REJECTED"));
@@ -245,48 +250,48 @@ fn non_loopback_url_is_rejected() {
 
 #[tokio::test]
 async fn open_connector_connects_after_health_and_tools() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = env_lock();
     let _guard = EnvGuard::new("oc-ok");
     let url = spawn_http(vec![
         ("/health".into(), 200, "{\"ok\":true}".into()),
         (
-            "/v1/connectors/slack/tools".into(),
+            "/v1/connectors/granola/tools".into(),
             200,
-            "{\"tools\":[{\"function\":{\"name\":\"slack_search\"}}]}".into(),
+            "{\"tools\":[{\"function\":{\"name\":\"granola_search\"}}]}".into(),
         ),
     ]);
     std::env::set_var("SUNSETZ_OPEN_CONNECTOR_URL", &url);
-    let connected = connect_connector("slack", None).await.expect("connect");
+    let connected = connect_connector("granola", None).await.expect("connect");
     assert!(connected.connected);
-    assert_eq!(connected.tools, vec!["slack_search"]);
-    let disconnected = disconnect_connector("slack").await.expect("disconnect");
+    assert_eq!(connected.tools, vec!["granola_search"]);
+    let disconnected = disconnect_connector("granola").await.expect("disconnect");
     assert!(!disconnected.connected);
 }
 
 #[tokio::test]
 async fn remote_tools_cannot_override_host_tools() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = env_lock();
     let _guard = EnvGuard::new("override");
     let url = spawn_http(vec![
         ("/health".into(), 200, "{\"ok\":true}".into()),
         (
-            "/v1/connectors/slack/tools".into(),
+            "/v1/connectors/granola/tools".into(),
             200,
             "{\"tools\":[{\"function\":{\"name\":\"write_file\"}}]}".into(),
         ),
     ]);
     std::env::set_var("SUNSETZ_OPEN_CONNECTOR_URL", &url);
-    let error = connect_connector("slack", None).await.unwrap_err();
+    let error = connect_connector("granola", None).await.unwrap_err();
     assert!(error.contains("CONNECTOR_PROBE_FAILED"));
     assert!(!list_connectors()
         .unwrap()
         .iter()
-        .any(|row| row.id == "slack" && row.connected));
+        .any(|row| row.id == "granola" && row.connected));
 }
 
 #[tokio::test]
 async fn gmail_connect_without_client_or_token_is_fail_closed() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = env_lock();
     let _guard = EnvGuard::new("gmail-missing");
     let error = connect_connector("gmail", None).await.unwrap_err();
     assert!(error.contains("CONNECTOR_OAUTH_CLIENT_MISSING"));
@@ -298,7 +303,7 @@ async fn gmail_connect_without_client_or_token_is_fail_closed() {
 
 #[tokio::test]
 async fn gmail_browser_oauth_connects_against_mock() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = env_lock();
     let _guard = EnvGuard::new("gmail-oauth");
     let base = spawn_google_oauth_mock();
     std::env::set_var("SUNSETZ_GOOGLE_OAUTH_CLIENT_ID", "test-client");
@@ -319,7 +324,7 @@ async fn gmail_browser_oauth_connects_against_mock() {
 
 #[tokio::test]
 async fn gmail_connects_with_access_token_against_mock_api() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = env_lock();
     let _guard = EnvGuard::new("gmail-ok");
     let url = spawn_http(vec![(
         "/gmail/v1/users/me/profile".into(),
@@ -342,7 +347,7 @@ async fn gmail_connects_with_access_token_against_mock_api() {
 
 #[tokio::test]
 async fn gmail_rejects_unauthorized_token() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = env_lock();
     let _guard = EnvGuard::new("gmail-401");
     let url = spawn_http(vec![(
         "/gmail/v1/users/me/profile".into(),
@@ -362,7 +367,7 @@ async fn gmail_rejects_unauthorized_token() {
 
 #[tokio::test]
 async fn drive_reuses_google_token_without_browser() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = env_lock();
     let _guard = EnvGuard::new("drive-reuse");
     let url = spawn_http(vec![
         (
@@ -481,7 +486,7 @@ fn spawn_drive_incremental_mock() -> String {
 
 #[tokio::test]
 async fn drive_incremental_oauth_when_existing_token_lacks_scope() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = env_lock();
     let _guard = EnvGuard::new("drive-incremental");
     let base = spawn_drive_incremental_mock();
     std::env::set_var("SUNSETZ_GMAIL_API_URL", &base);
@@ -500,7 +505,7 @@ async fn drive_incremental_oauth_when_existing_token_lacks_scope() {
 
 #[tokio::test]
 async fn disconnect_gmail_keeps_google_token_if_drive_connected() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = env_lock();
     let _guard = EnvGuard::new("google-shared-disconnect");
     let url = spawn_http(vec![
         (
@@ -538,7 +543,7 @@ async fn disconnect_gmail_keeps_google_token_if_drive_connected() {
 
 #[tokio::test]
 async fn drive_invoke_lists_files() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = env_lock();
     let _guard = EnvGuard::new("drive-invoke");
     let url = spawn_http(vec![
         (
@@ -566,7 +571,7 @@ async fn drive_invoke_lists_files() {
 
 #[tokio::test]
 async fn calendar_connects_and_lists_events() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = env_lock();
     let _guard = EnvGuard::new("cal-invoke");
     let url = spawn_http(vec![
         (
@@ -594,7 +599,7 @@ async fn calendar_connects_and_lists_events() {
 
 #[tokio::test]
 async fn github_connect_without_token_is_fail_closed() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = env_lock();
     let _guard = EnvGuard::new("gh-missing");
     let error = connect_connector("github", None).await.unwrap_err();
     assert!(error.contains("CONNECTOR_CREDENTIAL_MISSING"));
@@ -613,7 +618,7 @@ fn github_token_strips_scheme_and_quotes() {
 
 #[tokio::test]
 async fn github_fine_grained_token_without_user_scope_still_connects() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = env_lock();
     let _guard = EnvGuard::new("gh-pat");
     let url = spawn_http(vec![
         (
@@ -639,7 +644,7 @@ async fn github_fine_grained_token_without_user_scope_still_connects() {
 
 #[tokio::test]
 async fn github_401_is_auth_failed_not_unreachable() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = env_lock();
     let _guard = EnvGuard::new("gh-401");
     let url = spawn_http(vec![(
         "/user".into(),
@@ -660,7 +665,7 @@ async fn github_401_is_auth_failed_not_unreachable() {
 
 #[tokio::test]
 async fn github_connect_roundtrip_with_mock_api() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = env_lock();
     let _guard = EnvGuard::new("gh-ok");
     let url = spawn_http(vec![("/user".into(), 200, "{\"login\":\"octo\"}".into())]);
     std::env::set_var("SUNSETZ_GITHUB_API_URL", &url);
@@ -685,7 +690,7 @@ async fn github_connect_roundtrip_with_mock_api() {
 
 #[tokio::test]
 async fn github_invoke_lists_pull_requests() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = env_lock();
     let _guard = EnvGuard::new("gh-invoke");
     let url = spawn_http(vec![
         ("/user".into(), 200, "{\"login\":\"octo\"}".into()),
@@ -729,4 +734,171 @@ fn drive_and_calendar_create_tools_are_connector_writes() {
         "google-drive_list_files"
     ));
     assert!(!crate::permission::is_edit_tool("google-drive_create_file"));
+    assert!(crate::permission::is_connector_write_tool(
+        "notion_create_page"
+    ));
+    assert!(crate::permission::is_connector_write_tool(
+        "slack_post_message"
+    ));
+    assert!(!crate::permission::is_connector_write_tool("notion_search"));
+    assert!(!crate::permission::is_connector_write_tool(
+        "slack_list_conversations"
+    ));
+}
+
+#[tokio::test]
+async fn notion_connect_without_token_is_fail_closed() {
+    let _lock = env_lock();
+    let _guard = EnvGuard::new("notion-missing");
+    let error = connect_connector("notion", None).await.unwrap_err();
+    assert!(error.contains("CONNECTOR_CREDENTIAL_MISSING"));
+    assert!(!list_connectors()
+        .unwrap()
+        .iter()
+        .any(|row| row.id == "notion" && row.connected));
+}
+
+#[tokio::test]
+async fn notion_connects_and_searches_against_mock() {
+    let _lock = env_lock();
+    let _guard = EnvGuard::new("notion-ok");
+    let url = spawn_http(vec![
+        (
+            "/v1/users/me".into(),
+            200,
+            "{\"id\":\"user-1\",\"type\":\"bot\"}".into(),
+        ),
+        (
+            "/v1/search".into(),
+            200,
+            "{\"results\":[{\"id\":\"page-1\",\"url\":\"https://notion.so/page-1\",\"properties\":{\"title\":{\"type\":\"title\",\"title\":[{\"plain_text\":\"Spec\"}]}}}]}".into(),
+        ),
+    ]);
+    std::env::set_var("SUNSETZ_NOTION_API_URL", &url);
+    let connected = connect_connector("notion", Some("secret_test"))
+        .await
+        .expect("connect");
+    assert!(connected.connected);
+    assert!(connected.tools.contains(&"notion_search".into()));
+    assert!(connected.tools.contains(&"notion_create_page".into()));
+    let output = invoke_tool("notion_search", &json!({ "query": "spec" })).await;
+    assert!(output.contains("Spec"), "{output}");
+    let disconnected = disconnect_connector("notion").await.expect("disconnect");
+    assert!(!disconnected.connected);
+    assert!(load_credential("notion").is_none());
+}
+
+#[tokio::test]
+async fn notion_401_is_auth_failed() {
+    let _lock = env_lock();
+    let _guard = EnvGuard::new("notion-401");
+    let url = spawn_http(vec![(
+        "/v1/users/me".into(),
+        401,
+        "{\"message\":\"API token is invalid.\"}".into(),
+    )]);
+    std::env::set_var("SUNSETZ_NOTION_API_URL", &url);
+    let error = connect_connector("notion", Some("secret_bad"))
+        .await
+        .unwrap_err();
+    assert!(error.contains("CONNECTOR_AUTH_FAILED"), "{error}");
+    assert!(!list_connectors()
+        .unwrap()
+        .iter()
+        .any(|row| row.id == "notion" && row.connected));
+}
+
+#[tokio::test]
+async fn slack_connect_without_token_is_fail_closed() {
+    let _lock = env_lock();
+    let _guard = EnvGuard::new("slack-missing");
+    let error = connect_connector("slack", None).await.unwrap_err();
+    assert!(error.contains("CONNECTOR_CREDENTIAL_MISSING"));
+    assert!(!list_connectors()
+        .unwrap()
+        .iter()
+        .any(|row| row.id == "slack" && row.connected));
+}
+
+#[tokio::test]
+async fn slack_connects_and_lists_channels_against_mock() {
+    let _lock = env_lock();
+    let _guard = EnvGuard::new("slack-ok");
+    let url = spawn_http(vec![
+        (
+            "/api/auth.test".into(),
+            200,
+            "{\"ok\":true,\"team\":\"Acme\",\"user\":\"bot\"}".into(),
+        ),
+        (
+            "/api/conversations.list".into(),
+            200,
+            "{\"ok\":true,\"channels\":[{\"id\":\"C1\",\"name\":\"eng\"}]}".into(),
+        ),
+        (
+            "/api/chat.postMessage".into(),
+            200,
+            "{\"ok\":true,\"channel\":\"C1\",\"ts\":\"1.0\"}".into(),
+        ),
+    ]);
+    std::env::set_var("SUNSETZ_SLACK_API_URL", &url);
+    let connected = connect_connector("slack", Some("xoxb-test"))
+        .await
+        .expect("connect");
+    assert!(connected.connected);
+    assert!(connected.tools.contains(&"slack_list_conversations".into()));
+    assert!(connected.tools.contains(&"slack_post_message".into()));
+    let listed = invoke_tool("slack_list_conversations", &json!({})).await;
+    assert!(listed.contains("eng"), "{listed}");
+    let posted = invoke_tool(
+        "slack_post_message",
+        &json!({ "channel": "C1", "text": "hello" }),
+    )
+    .await;
+    assert!(posted.contains("1.0"), "{posted}");
+    let disconnected = disconnect_connector("slack").await.expect("disconnect");
+    assert!(!disconnected.connected);
+    assert!(load_credential("slack").is_none());
+}
+
+#[tokio::test]
+async fn slack_invalid_auth_is_auth_failed() {
+    let _lock = env_lock();
+    let _guard = EnvGuard::new("slack-401");
+    let url = spawn_http(vec![(
+        "/api/auth.test".into(),
+        200,
+        "{\"ok\":false,\"error\":\"invalid_auth\"}".into(),
+    )]);
+    std::env::set_var("SUNSETZ_SLACK_API_URL", &url);
+    let error = connect_connector("slack", Some("xoxb-bad"))
+        .await
+        .unwrap_err();
+    assert!(error.contains("CONNECTOR_AUTH_FAILED"), "{error}");
+    assert!(error.contains("invalid_auth"), "{error}");
+    assert!(!list_connectors()
+        .unwrap()
+        .iter()
+        .any(|row| row.id == "slack" && row.connected));
+}
+
+#[tokio::test]
+async fn slack_does_not_use_open_connector_when_token_is_missing() {
+    let _lock = env_lock();
+    let _guard = EnvGuard::new("slack-no-sidecar");
+    let url = spawn_http(vec![
+        ("/health".into(), 200, "{\"ok\":true}".into()),
+        (
+            "/v1/connectors/slack/tools".into(),
+            200,
+            "{\"tools\":[{\"function\":{\"name\":\"slack_search\"}}]}".into(),
+        ),
+    ]);
+    std::env::set_var("SUNSETZ_OPEN_CONNECTOR_URL", &url);
+    let error = connect_connector("slack", None).await.unwrap_err();
+    assert!(error.contains("CONNECTOR_CREDENTIAL_MISSING"), "{error}");
+    assert!(!list_connectors()
+        .unwrap()
+        .iter()
+        .any(|row| row.id == "slack" && row.connected));
 }

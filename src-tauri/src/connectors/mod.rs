@@ -1,7 +1,7 @@
 //! Host-owned connector catalog for the Sunsetz plugin marketplace.
 //!
-//! GitHub (PAT) plus Gmail, Drive, and Calendar (Google OAuth) are first-party
-//! Host adapters. Remaining catalog slugs stay coming-soon unless a loopback
+//! GitHub, Notion, and Slack use pasted tokens. Gmail, Drive, and Calendar use
+//! Google OAuth. Remaining catalog slugs stay coming-soon unless a loopback
 //! Open Connector is explicitly configured. Connect is fail-closed.
 
 use std::collections::HashMap;
@@ -19,7 +19,9 @@ mod drive;
 mod github;
 mod gmail;
 mod google_oauth;
+mod notion;
 mod protocol;
+mod slack;
 #[cfg(test)]
 mod tests;
 
@@ -230,10 +232,17 @@ fn http_client(timeout_secs: u64) -> Result<reqwest::Client, String> {
 
 /// GitHub must honor HTTPS_PROXY / system proxy. Loopback mocks must not.
 fn github_http_client(timeout_secs: u64) -> Result<reqwest::Client, String> {
+    connector_http_client(timeout_secs, "SUNSETZ_GITHUB_API_URL")
+}
+
+fn connector_http_client(
+    timeout_secs: u64,
+    mock_env: &'static str,
+) -> Result<reqwest::Client, String> {
     let mut builder = reqwest::Client::builder()
         .timeout(Duration::from_secs(timeout_secs))
         .user_agent("Sunsetz-Desktop/1.0");
-    let mock = std::env::var("SUNSETZ_GITHUB_API_URL").unwrap_or_default();
+    let mock = std::env::var(mock_env).unwrap_or_default();
     if !mock.trim().is_empty() && is_loopback_http_url(mock.trim()) {
         builder = builder.no_proxy();
     }
@@ -331,7 +340,45 @@ pub async fn connect_connector(
 ) -> Result<ConnectorStateV1, String> {
     let seed = catalog_seed(id)?;
     match seed.id {
-        "github" => connect_github(seed, credential).await,
+        "github" => {
+            connect_token_adapter(
+                seed,
+                credential,
+                "CONNECTOR_CREDENTIAL_MISSING: paste a GitHub personal access token",
+                async {
+                    let token = load_credential("github").unwrap_or_default();
+                    github::verify_token(&token).await.map(|_| ())
+                },
+                github::tool_names(),
+            )
+            .await
+        }
+        "notion" => {
+            connect_token_adapter(
+                seed,
+                credential,
+                "CONNECTOR_CREDENTIAL_MISSING: paste a Notion internal integration token",
+                async {
+                    let token = load_credential("notion").unwrap_or_default();
+                    notion::verify_token(&token).await
+                },
+                notion::tool_names(),
+            )
+            .await
+        }
+        "slack" => {
+            connect_token_adapter(
+                seed,
+                credential,
+                "CONNECTOR_CREDENTIAL_MISSING: paste a Slack bot token",
+                async {
+                    let token = load_credential("slack").unwrap_or_default();
+                    slack::verify_token(&token).await
+                },
+                slack::tool_names(),
+            )
+            .await
+        }
         "gmail" => {
             connect_host_adapter(seed, gmail::connect(credential), gmail::tool_names()).await
         }
@@ -348,7 +395,7 @@ pub async fn connect_connector(
 pub async fn disconnect_connector(id: &str) -> Result<ConnectorStateV1, String> {
     let seed = catalog_seed(id)?;
     let next = persist_state(disconnected_state(seed))?;
-    if seed.id == "github" {
+    if matches!(seed.id, "github" | "notion" | "slack") {
         let _ = delete_credential(seed.id);
     } else if google_oauth::is_google_app(seed.id) {
         let _ = google_oauth::delete_google_credential_if_unused();
@@ -372,6 +419,8 @@ pub fn connected_tool_definitions() -> Vec<Value> {
             "gmail" => tools.extend(gmail::tool_definitions()),
             "google-drive" => tools.extend(drive::tool_definitions()),
             "google-calendar" => tools.extend(calendar::tool_definitions()),
+            "notion" => tools.extend(notion::tool_definitions()),
+            "slack" => tools.extend(slack::tool_definitions()),
             _ => tools.extend(row.cached_remote_tool_defs()),
         }
     }
@@ -386,6 +435,8 @@ pub fn connected_write_tools() -> Vec<String> {
             "gmail" => gmail::write_tools(),
             "google-drive" => drive::write_tools(),
             "google-calendar" => calendar::write_tools(),
+            "notion" => notion::write_tools(),
+            "slack" => slack::write_tools(),
             _ => row
                 .tools
                 .into_iter()
@@ -484,6 +535,8 @@ pub async fn invoke_tool(name: &str, arguments: &Value) -> String {
         "gmail" => gmail::invoke(name, arguments).await,
         "google-drive" => drive::invoke(name, arguments).await,
         "google-calendar" => calendar::invoke(name, arguments).await,
+        "notion" => notion::invoke(name, arguments).await,
+        "slack" => slack::invoke(name, arguments).await,
         _ => protocol::invoke(&owner.slug, name, arguments).await,
     }
 }
@@ -510,21 +563,30 @@ impl ConnectorStateV1 {
     }
 }
 
-async fn connect_github(
+async fn connect_token_adapter<F>(
     seed: &CatalogSeed,
     credential: Option<&str>,
-) -> Result<ConnectorStateV1, String> {
+    missing: &str,
+    verify: F,
+    tools: Vec<String>,
+) -> Result<ConnectorStateV1, String>
+where
+    F: std::future::Future<Output = Result<(), String>>,
+{
     if let Some(token) = credential
         .map(github::normalize_token)
         .filter(|value| !value.is_empty())
     {
         save_credential(seed.id, &token)?;
     }
-    let Some(token) = load_credential(seed.id) else {
-        return Err("CONNECTOR_CREDENTIAL_MISSING: paste a GitHub personal access token".into());
-    };
-    match github::verify_token(&token).await {
-        Ok(_) => persist_state(connected_state(seed, github::tool_names())),
+    if load_credential(seed.id)
+        .filter(|value| !value.trim().is_empty())
+        .is_none()
+    {
+        return Err(missing.into());
+    }
+    match verify.await {
+        Ok(()) => persist_state(connected_state(seed, tools)),
         Err(error) => {
             let _ = persist_state(ConnectorStateV1 {
                 last_error: Some(error.clone()),

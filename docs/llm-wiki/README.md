@@ -11,7 +11,7 @@ Agent 与贡献者的**可执行知识库**。改产品行为或 UI 文案前，
 | [catalog.md](./catalog.md) | 与 Grok Build CLI 对齐的模型 / 推理强度 / 权限（含 YOLO） |
 | [automations.md](./automations.md) | 自动化任务设计（Build `/loop` / scheduler；不阻塞 P0） |
 | [slash-composer.md](./slash-composer.md) | 斜杠面板、技能标签、Goal 模式、Doctor |
-| [open-connector.md](./open-connector.md) | GitHub PAT、Gmail/Drive/Calendar Google 登录、`@` 芯片；其余连接器即将在 App 内连接 |
+| [open-connector.md](./open-connector.md) | GitHub/Notion/Slack 令牌、Gmail/Drive/Calendar Google 登录、`@` 芯片；其余连接器即将在 App 内连接 |
 | [local-data-isolation.md](./local-data-isolation.md) | MCP / 模型 / 连接器数据按操作系统用户隔离，禁止提交到 GitHub |
 | [session-continuity.md](./session-continuity.md) | Agent 续会话（load/bootstrap）、自动压缩归属 |
 | [runtime-migration-v1.md](./runtime-migration-v1.md) | **成熟能力迁移权威边界**：统一交互、桌面安全、原子 Settings、Runtime 事件、检索、Memory/Skill 候选、显式上下文包与 Host 调度 |

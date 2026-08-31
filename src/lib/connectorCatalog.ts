@@ -22,7 +22,7 @@ export interface ConnectorCatalogEntry {
   privacy: string;
   terms: string;
   openConnectorSlug: string;
-  /** GitHub PAT and Google OAuth (Gmail, Drive, Calendar) connect in-app. */
+  /** GitHub/Notion/Slack tokens and Google OAuth connect in-app. */
   connectKind: ConnectorConnectKind;
   color: string;
   glyph: string;
@@ -145,7 +145,7 @@ export const CONNECTOR_CATALOG: readonly ConnectorCatalogEntry[] = [
     privacy: "https://www.notion.so/privacy",
     terms: "https://www.notion.so/terms",
     openConnectorSlug: "notion",
-    connectKind: "coming",
+    connectKind: "in_app",
     color: "#111111",
     glyph: "N",
     prompts: [
@@ -168,7 +168,7 @@ export const CONNECTOR_CATALOG: readonly ConnectorCatalogEntry[] = [
     privacy: "https://slack.com/privacy-policy",
     terms: "https://slack.com/terms-of-service",
     openConnectorSlug: "slack",
-    connectKind: "coming",
+    connectKind: "in_app",
     color: "#611f69",
     glyph: "#",
     prompts: [
@@ -293,4 +293,8 @@ export function connectorUsesGoogleSignIn(entry: ConnectorCatalogEntry): boolean
     entry.id === "google-drive" ||
     entry.id === "google-calendar"
   );
+}
+
+export function connectorUsesTokenPaste(entry: ConnectorCatalogEntry): boolean {
+  return entry.id === "github" || entry.id === "notion" || entry.id === "slack";
 }

@@ -3,6 +3,7 @@ import {
   CONNECTOR_CATALOG,
   connectorById,
   connectorConnectsInApp,
+  connectorUsesTokenPaste,
   featuredConnectors,
   productivityConnectors,
 } from "./connectorCatalog";
@@ -22,13 +23,23 @@ describe("connectorCatalog", () => {
     );
   });
 
-  it("connects GitHub and Google apps in-app and keeps other catalog apps coming soon", () => {
-    const inApp = ["github", "gmail", "google-drive", "google-calendar"];
+  it("connects GitHub, Google, Notion, and Slack in-app and keeps other catalog apps coming soon", () => {
+    const inApp = [
+      "github",
+      "gmail",
+      "google-drive",
+      "google-calendar",
+      "notion",
+      "slack",
+    ];
     for (const id of inApp) {
       const entry = connectorById(id);
       expect(entry?.connectKind).toBe("in_app");
       expect(entry && connectorConnectsInApp(entry)).toBe(true);
     }
+    expect(connectorUsesTokenPaste(connectorById("notion")!)).toBe(true);
+    expect(connectorUsesTokenPaste(connectorById("slack")!)).toBe(true);
+    expect(connectorUsesTokenPaste(connectorById("gmail")!)).toBe(false);
     expect(
       CONNECTOR_CATALOG.filter((row) => !inApp.includes(row.id)).every(
         (row) => row.connectKind === "coming" && !connectorConnectsInApp(row),

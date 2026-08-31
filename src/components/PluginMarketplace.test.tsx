@@ -63,7 +63,7 @@ describe("PluginMarketplace", () => {
     fireEvent.click(screen.getByRole("tab", { name: "Skills" }));
     expect(screen.getByText("Review diffs")).toBeTruthy();
     fireEvent.click(screen.getByRole("tab", { name: "Plugins" }));
-    expect(screen.getAllByRole("button", { name: "Connect" })).toHaveLength(4);
+    expect(screen.getAllByRole("button", { name: "Connect" })).toHaveLength(6);
     const githubCard = screen.getAllByText("GitHub")[0]!.closest("article")!;
     fireEvent.click(within(githubCard).getByRole("button", { name: "Connect" }));
     expect(screen.getByPlaceholderText(/github_pat_/i)).toBeTruthy();
@@ -157,6 +157,64 @@ describe("PluginMarketplace", () => {
     fireEvent.click(screen.getByRole("button", { name: "Connect" }));
     await waitFor(() => {
       expect(connect).toHaveBeenCalledWith("google-calendar", undefined);
+    });
+  });
+
+  it("opens a credential dialog when Notion has no token", async () => {
+    vi.spyOn(api, "isTauri").mockReturnValue(true);
+    vi.spyOn(api, "connectorsList").mockResolvedValue([]);
+    const connect = vi.spyOn(api, "connectorsConnect").mockResolvedValue({
+      id: "notion",
+      slug: "notion",
+      developer: "Notion",
+      version: "0.1.4",
+      enabled: true,
+      connected: true,
+      lastError: null,
+      tools: ["notion_search"],
+    });
+    render(<PluginMarketplace locale="en" onUsePrompt={() => undefined} />);
+    fireEvent.click(screen.getAllByText("Notion")[0]!);
+    expect(
+      screen.getByText(/Connect asks for an internal integration token/i),
+    ).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+    expect(await screen.findByPlaceholderText(/secret_/i)).toBeTruthy();
+    expect(connect).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByPlaceholderText(/secret_/i), {
+      target: { value: "secret_test" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save and connect" }));
+    await waitFor(() => {
+      expect(connect).toHaveBeenCalledWith("notion", "secret_test");
+    });
+  });
+
+  it("opens a credential dialog when Slack has no token", async () => {
+    vi.spyOn(api, "isTauri").mockReturnValue(true);
+    vi.spyOn(api, "connectorsList").mockResolvedValue([]);
+    const connect = vi.spyOn(api, "connectorsConnect").mockResolvedValue({
+      id: "slack",
+      slug: "slack",
+      developer: "Slack",
+      version: "0.1.5",
+      enabled: true,
+      connected: true,
+      lastError: null,
+      tools: ["slack_list_conversations"],
+    });
+    render(<PluginMarketplace locale="en" onUsePrompt={() => undefined} />);
+    fireEvent.click(screen.getAllByText("Slack")[0]!);
+    expect(screen.getByText(/Connect asks for a bot token/i)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+    expect(await screen.findByPlaceholderText(/xoxb-/i)).toBeTruthy();
+    expect(connect).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByPlaceholderText(/xoxb-/i), {
+      target: { value: "xoxb-test" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save and connect" }));
+    await waitFor(() => {
+      expect(connect).toHaveBeenCalledWith("slack", "xoxb-test");
     });
   });
 

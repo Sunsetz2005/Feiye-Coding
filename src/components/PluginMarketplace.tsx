@@ -6,6 +6,7 @@ import {
   connectorById,
   connectorConnectsInApp,
   connectorUsesGoogleSignIn,
+  connectorUsesTokenPaste,
   featuredConnectors,
   productivityConnectors,
   type ConnectorAudience,
@@ -30,6 +31,49 @@ export type PluginSkillRow = {
 };
 
 const GITHUB_TOKEN_URL = "https://github.com/settings/tokens";
+const NOTION_TOKEN_URL = "https://www.notion.so/my-integrations";
+const SLACK_TOKEN_URL = "https://api.slack.com/apps";
+
+function credentialDialogCopy(id: string): {
+  titleKey: MessageKey;
+  bodyKey: MessageKey;
+  createKey: MessageKey;
+  placeholderKey: MessageKey;
+  createUrl: string;
+} {
+  if (id === "notion") {
+    return {
+      titleKey: "plugin.credential.notion.title",
+      bodyKey: "plugin.credential.notion.body",
+      createKey: "plugin.credential.notion.create",
+      placeholderKey: "plugin.credential.notion.placeholder",
+      createUrl: NOTION_TOKEN_URL,
+    };
+  }
+  if (id === "slack") {
+    return {
+      titleKey: "plugin.credential.slack.title",
+      bodyKey: "plugin.credential.slack.body",
+      createKey: "plugin.credential.slack.create",
+      placeholderKey: "plugin.credential.slack.placeholder",
+      createUrl: SLACK_TOKEN_URL,
+    };
+  }
+  return {
+    titleKey: "plugin.credential.title",
+    bodyKey: "plugin.credential.body",
+    createKey: "plugin.credential.create",
+    placeholderKey: "plugin.credential.placeholder",
+    createUrl: GITHUB_TOKEN_URL,
+  };
+}
+
+function detailConnectHint(entry: ConnectorCatalogEntry): MessageKey | null {
+  if (connectorUsesGoogleSignIn(entry)) return "plugin.google.connectHint";
+  if (entry.id === "notion") return "plugin.notion.connectHint";
+  if (entry.id === "slack") return "plugin.slack.connectHint";
+  return null;
+}
 
 function mapConnectorError(raw: string, tr: (key: string) => string): string {
   if (raw.includes("CONNECTOR_CREDENTIAL_MISSING")) return tr("plugin.credentialMissing");
@@ -158,7 +202,7 @@ export function PluginMarketplace({
       return;
     }
     if (!connectorConnectsInApp(entry)) return;
-    if (entry.id === "github") {
+    if (connectorUsesTokenPaste(entry)) {
       setCredentialId(entry.id);
       setCredentialValue("");
       setError(null);
@@ -167,6 +211,7 @@ export function PluginMarketplace({
     void runConnect(entry.id, false);
   };
 
+  const credentialCopy = credentialDialogCopy(credentialId ?? "github");
   const credentialDialog = (
     <GlassModal
       open={credentialId != null}
@@ -174,7 +219,7 @@ export function PluginMarketplace({
         setCredentialId(null);
         setCredentialValue("");
       }}
-      title={tr("plugin.credential.title")}
+      title={tr(credentialCopy.titleKey)}
       closeLabel={tr("plugin.credential.cancel")}
       footer={
         <>
@@ -200,10 +245,10 @@ export function PluginMarketplace({
         </>
       }
     >
-      <p>{tr("plugin.credential.body")}</p>
+      <p>{tr(credentialCopy.bodyKey)}</p>
       <p>
-        <a href={GITHUB_TOKEN_URL} target="_blank" rel="noreferrer">
-          {tr("plugin.credential.create")}
+        <a href={credentialCopy.createUrl} target="_blank" rel="noreferrer">
+          {tr(credentialCopy.createKey)}
         </a>
       </p>
       {error ? (
@@ -215,7 +260,7 @@ export function PluginMarketplace({
         className="plugin-credential-input"
         type="password"
         autoComplete="off"
-        placeholder={tr("plugin.credential.placeholder")}
+        placeholder={tr(credentialCopy.placeholderKey)}
         value={credentialValue}
         onChange={(event) => setCredentialValue(event.target.value)}
       />
@@ -224,6 +269,7 @@ export function PluginMarketplace({
 
   if (detail) {
     const connectedNow = !!stateById.get(detail.id)?.connected;
+    const hintKey = detailConnectHint(detail);
     return (
       <div className="plugin-market" data-testid="plugin-marketplace">
         <button
@@ -274,8 +320,8 @@ export function PluginMarketplace({
             {error}
           </div>
         ) : null}
-        {!connectedNow && connectorUsesGoogleSignIn(detail) ? (
-          <p className="plugin-detail__hint">{tr("plugin.google.connectHint")}</p>
+        {!connectedNow && hintKey ? (
+          <p className="plugin-detail__hint">{tr(hintKey)}</p>
         ) : null}
         <div className="plugin-detail__prompts">
           {detail.prompts.map((prompt) => (
