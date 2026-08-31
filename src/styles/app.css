@@ -1174,6 +1174,18 @@ html.platform-mac[data-theme="light"] .settings-page__content {
   font-size: 0.9em;
 }
 
+.context-menu__caret {
+  margin-left: auto;
+  display: inline-flex;
+  color: var(--text-tertiary);
+}
+
+.context-menu--cascade {
+  position: fixed;
+  z-index: 13001;
+  min-width: 196px;
+}
+
 .context-menu__separator {
   height: 1px;
   margin: 4px 6px;

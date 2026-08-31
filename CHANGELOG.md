@@ -2,6 +2,7 @@
 
 ## [UNRELEASED] — 2026-08-30
 
+- 侧栏和顶栏会话菜单可以把对话移动到已有项目，或改为不归属项目。
 - 到期任务由 Host 在后台点火，不必等 WebView 空闲，也不会抢走当前对话。
 - 设置可注册登录后的后台调度，退出后仍能按间隔唤醒跑已安排任务。
 - 内建内核的命令可按设置使用 Linux bubblewrap、macOS sandbox-exec 或 Windows AppContainer 隔离。

@@ -79,6 +79,10 @@ import {
   type ContextUsageState,
 } from "@/lib/contextUsage";
 import * as api from "@/lib/api";
+import {
+  sessionMoveAvailable,
+  sessionMoveDestinations,
+} from "@/lib/sessionMove";
 import { createT, resolveLocale, type Locale } from "@/i18n";
 import {
   DEFAULT_EFFORT,
@@ -5955,6 +5959,59 @@ export default function App() {
     [session.sessionId, showToast, tr],
   );
 
+  const moveSessionToProject = useCallback(
+    async (row: SessionRow, proj: Project | null) => {
+      const currentId = row.projectId ?? null;
+      const nextId = proj?.id ?? null;
+      if (currentId === nextId) return;
+      if (row.id === session.sessionId) {
+        await bindSessionProject(proj);
+        return;
+      }
+      if (proj && !proj.trusted) {
+        setLocalError(tr("project.trustFirst", { name: proj.name }));
+        return;
+      }
+      if (!api.isTauri()) {
+        setSessions((list) =>
+          list.map((item) =>
+            item.id === row.id ? { ...item, projectId: nextId } : item,
+          ),
+        );
+        if (viewingSessionIdRef.current === row.id) setActiveProject(proj);
+        if (proj) {
+          setExpandedProjects((open) => ({ ...open, [proj.id]: true }));
+        } else {
+          setHistoryOpen(true);
+        }
+        return;
+      }
+      try {
+        await api.sessionSetProject(row.id, nextId);
+        setSessions((list) =>
+          list.map((item) =>
+            item.id === row.id ? { ...item, projectId: nextId } : item,
+          ),
+        );
+        if (viewingSessionIdRef.current === row.id) setActiveProject(proj);
+        setLiveHost((prev) =>
+          prev.sessionId === row.id ? { ...IDLE_SNAPSHOT } : prev,
+        );
+        if (proj) {
+          setExpandedProjects((open) => ({ ...open, [proj.id]: true }));
+          showToast(tr("composer.projectBound", { name: proj.name }), 2500);
+        } else {
+          setHistoryOpen(true);
+          showToast(tr("composer.projectCleared"), 2200);
+        }
+        setLocalError(null);
+      } catch (error) {
+        showToast(String(error) || tr("session.moveFailed"), 4500);
+      }
+    },
+    [bindSessionProject, session.sessionId, showToast, tr],
+  );
+
   const selectComposerPlusAction = useCallback(
     async (entry: Extract<ComposerPlusEntry, { kind: "action" }>) => {
       if (entry.disabled) return;
@@ -9641,12 +9698,38 @@ export default function App() {
             const isOpen =
               session.sessionId === s.id ||
               viewingSessionIdRef.current === s.id;
+            const moveDests = sessionMoveDestinations(
+              projects.map((project) => project.id),
+              s.projectId ?? null,
+            );
             items = [
               {
                 id: "rename",
                 label: tr("session.rename"),
                 icon: <IconRename size={16} />,
                 onClick: () => renameSession(s),
+              },
+              {
+                id: "move",
+                label: tr("session.moveToProject"),
+                icon: <IconFolder size={16} />,
+                disabled: !sessionMoveAvailable(moveDests),
+                submenu: moveDests.map((dest) => {
+                  const project = dest.projectId
+                    ? projects.find((item) => item.id === dest.projectId)
+                    : null;
+                  return {
+                    id: dest.projectId ? `move-${dest.projectId}` : "move-none",
+                    label: project
+                      ? project.name
+                      : tr("session.moveToNone"),
+                    icon: dest.current ? <IconCheck size={16} /> : undefined,
+                    disabled: dest.current,
+                    onClick: () => {
+                      void moveSessionToProject(s, project ?? null);
+                    },
+                  } satisfies ContextMenuItem;
+                }),
               },
               {
                 id: "export-md",
@@ -9723,7 +9806,7 @@ export default function App() {
             restoreFocusTo={ctxMenu?.restoreFocusTo}
             onClose={() => setCtxMenu(null)}
             items={items}
-            estimatedHeight={ctxMenu?.kind === "project-policy" ? 280 : ctxMenu?.kind === "session" ? 330 : 240}
+            estimatedHeight={ctxMenu?.kind === "project-policy" ? 280 : ctxMenu?.kind === "session" ? 360 : 240}
             estimatedWidth={ctxMenu?.kind === "session" ? 236 : 200}
             className={ctxMenu?.kind === "session" ? "context-menu--session" : undefined}
           />

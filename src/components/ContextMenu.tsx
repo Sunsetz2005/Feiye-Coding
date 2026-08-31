@@ -24,6 +24,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { useFloatingSurfacePresence } from "./FloatingSurfaceProvider";
+import { IconChevronRight } from "./icons";
 
 export type ContextMenuItem = {
   id?: string;
@@ -33,7 +34,8 @@ export type ContextMenuItem = {
   disabled?: boolean;
   separatorBefore?: boolean;
   shortcut?: ReactNode;
-  onClick: () => void;
+  onClick?: () => void;
+  submenu?: ContextMenuItem[];
 };
 
 export type ContextMenuAnchor = Pick<
@@ -115,7 +117,10 @@ export function ContextMenu({
   const menuId = useId();
   const rootRef = useRef<HTMLDivElement>(null);
   const itemRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const submenuItemRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const [activeIndex, setActiveIndex] = useState(-1);
+  const [submenuIndex, setSubmenuIndex] = useState<number | null>(null);
+  const [submenuPos, setSubmenuPos] = useState({ left: 0, top: 0 });
   const resolvePos = (width: number, height: number) =>
     anchorRect
       ? contextMenuPosForAnchor(anchorRect, width, height)
@@ -158,10 +163,30 @@ export function ContextMenu({
     if (!open) return;
     const first = items.findIndex((item) => !item.disabled);
     setActiveIndex(first);
+    setSubmenuIndex(null);
     if (first >= 0) {
       requestAnimationFrame(() => itemRefs.current[first]?.focus());
     }
   }, [open, items.length]);
+
+  useLayoutEffect(() => {
+    if (submenuIndex == null) return;
+    const trigger = itemRefs.current[submenuIndex];
+    const submenu = items[submenuIndex]?.submenu;
+    if (!trigger || !submenu?.length || typeof window === "undefined") return;
+    const rect = trigger.getBoundingClientRect();
+    const width = 220;
+    const height = Math.max(48, submenu.length * 32 + 8);
+    let left = rect.right + 4;
+    if (left + width > window.innerWidth - 8) {
+      left = Math.max(8, rect.left - width - 4);
+    }
+    let top = rect.top;
+    if (top + height > window.innerHeight - 8) {
+      top = Math.max(8, window.innerHeight - height - 8);
+    }
+    setSubmenuPos({ left, top });
+  }, [submenuIndex, items]);
 
   useEffect(() => {
     if (!open) return;
@@ -175,10 +200,14 @@ export function ContextMenu({
       closeAndRestore();
     };
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        closeAndRestore();
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      if (submenuIndex != null) {
+        setSubmenuIndex(null);
+        itemRefs.current[submenuIndex]?.focus();
+        return;
       }
+      closeAndRestore();
     };
     // Defer so the opening contextmenu / click does not immediately dismiss.
     const timer = window.setTimeout(() => {
@@ -190,11 +219,23 @@ export function ContextMenu({
       document.removeEventListener("mousedown", onDoc, true);
       document.removeEventListener("keydown", onKey);
     };
-  }, [open, onClose, restoreFocusTo]);
+  }, [open, onClose, restoreFocusTo, submenuIndex]);
 
   if (!open || typeof document === "undefined") return null;
 
   const visibleItems = items.filter(Boolean);
+  const openSubmenu =
+    submenuIndex != null ? visibleItems[submenuIndex]?.submenu : undefined;
+  const closeRoot = () => {
+    setSubmenuIndex(null);
+    onClose();
+  };
+  const activate = (item: ContextMenuItem) => {
+    if (item.disabled) return;
+    if (item.submenu?.length) return;
+    closeRoot();
+    item.onClick?.();
+  };
 
   return createPortal(
     <div
@@ -211,6 +252,44 @@ export function ContextMenu({
       }}
       onMouseDown={(e) => e.stopPropagation()}
       onKeyDown={(e) => {
+        if (e.key === "ArrowRight") {
+          const item = visibleItems[activeIndex];
+          if (item?.submenu?.length && !item.disabled) {
+            e.preventDefault();
+            setSubmenuIndex(activeIndex);
+            requestAnimationFrame(() => submenuItemRefs.current[0]?.focus());
+          }
+          return;
+        }
+        if (e.key === "ArrowLeft" && submenuIndex != null) {
+          e.preventDefault();
+          setSubmenuIndex(null);
+          itemRefs.current[submenuIndex]?.focus();
+          return;
+        }
+        if (submenuIndex != null && (e.key === "ArrowDown" || e.key === "ArrowUp" || e.key === "Home" || e.key === "End")) {
+          const submenu = visibleItems[submenuIndex]?.submenu ?? [];
+          const enabled = submenu
+            .map((item, index) => ({ item, index }))
+            .filter(({ item }) => !item.disabled);
+          if (!enabled.length) return;
+          const focused = submenuItemRefs.current.findIndex(
+            (node) => node === document.activeElement,
+          );
+          const current = Math.max(
+            0,
+            enabled.findIndex(({ index }) => index === focused),
+          );
+          let next = current;
+          if (e.key === "ArrowDown") next = (current + 1) % enabled.length;
+          else if (e.key === "ArrowUp")
+            next = (current - 1 + enabled.length) % enabled.length;
+          else if (e.key === "Home") next = 0;
+          else next = enabled.length - 1;
+          e.preventDefault();
+          submenuItemRefs.current[enabled[next]?.index ?? 0]?.focus();
+          return;
+        }
         const enabled = visibleItems
           .map((item, index) => ({ item, index }))
           .filter(({ item }) => !item.disabled);
@@ -223,7 +302,7 @@ export function ContextMenu({
         else if (e.key === "Home") next = 0;
         else if (e.key === "End") next = enabled.length - 1;
         else if (e.key === "Tab") {
-          onClose();
+          closeRoot();
           return;
         } else {
           return;
@@ -231,6 +310,7 @@ export function ContextMenu({
         e.preventDefault();
         const index = enabled[next]?.index ?? enabled[0].index;
         setActiveIndex(index);
+        setSubmenuIndex(null);
         itemRefs.current[index]?.focus();
       }}
       onContextMenu={(e) => {
@@ -256,11 +336,22 @@ export function ContextMenu({
             role="menuitem"
             tabIndex={activeIndex === i ? 0 : -1}
             disabled={item.disabled}
+            aria-haspopup={item.submenu?.length ? "menu" : undefined}
+            aria-expanded={
+              item.submenu?.length ? submenuIndex === i : undefined
+            }
             onFocus={() => setActiveIndex(i)}
+            onMouseEnter={() => {
+              if (item.disabled) return;
+              setSubmenuIndex(item.submenu?.length ? i : null);
+            }}
             onClick={() => {
               if (item.disabled) return;
-              onClose();
-              item.onClick();
+              if (item.submenu?.length) {
+                setSubmenuIndex(i);
+                return;
+              }
+              activate(item);
             }}
           >
             {item.icon != null ? (
@@ -269,7 +360,11 @@ export function ContextMenu({
               </span>
             ) : null}
             <span className="context-menu__label">{item.label}</span>
-            {item.shortcut != null ? (
+            {item.submenu?.length ? (
+              <span className="context-menu__caret" aria-hidden>
+                <IconChevronRight size={14} />
+              </span>
+            ) : item.shortcut != null ? (
               <span className="context-menu__shortcut" aria-hidden>
                 {item.shortcut}
               </span>
@@ -277,6 +372,45 @@ export function ContextMenu({
           </button>
         </div>
       ))}
+      {openSubmenu?.length && submenuIndex != null ? (
+        <div
+          className="menu-panel context-menu att-menu context-menu--cascade"
+          role="menu"
+          aria-orientation="vertical"
+          style={{ left: submenuPos.left, top: submenuPos.top }}
+          onMouseDown={(e) => e.stopPropagation()}
+        >
+          {openSubmenu.map((item, i) => (
+            <div key={item.id ?? `ctx-sub-${i}`} role="presentation">
+              {item.separatorBefore ? (
+                <div className="context-menu__separator" role="separator" />
+              ) : null}
+              <button
+                ref={(node) => {
+                  submenuItemRefs.current[i] = node;
+                }}
+                type="button"
+                className={cx(
+                  "context-menu__item",
+                  "att-menu__item",
+                  item.danger && "is-danger",
+                )}
+                role="menuitem"
+                tabIndex={-1}
+                disabled={item.disabled}
+                onClick={() => activate(item)}
+              >
+                {item.icon != null ? (
+                  <span className="context-menu__ico att-menu__ico" aria-hidden>
+                    {item.icon}
+                  </span>
+                ) : null}
+                <span className="context-menu__label">{item.label}</span>
+              </button>
+            </div>
+          ))}
+        </div>
+      ) : null}
       {extra}
     </div>,
     document.body,

@@ -69,6 +69,126 @@ describe("ContextMenu", () => {
     trigger.remove();
   });
 
+  it("opens a cascade submenu with ArrowRight and activates a child", async () => {
+    const onMove = vi.fn();
+    const onClose = vi.fn();
+    render(
+      <ContextMenu
+        open
+        x={20}
+        y={20}
+        onClose={onClose}
+        items={[
+          { id: "rename", label: "Rename", onClick: vi.fn() },
+          {
+            id: "move",
+            label: "Move to project",
+            submenu: [
+              { id: "alpha", label: "Alpha", onClick: onMove },
+              { id: "none", label: "No project", onClick: vi.fn() },
+            ],
+          },
+        ]}
+      />,
+    );
+    const parent = screen.getByRole("menuitem", { name: "Move to project" });
+    await waitFor(() =>
+      expect(screen.getByRole("menuitem", { name: "Rename" })).toBeTruthy(),
+    );
+    fireEvent.mouseEnter(parent);
+    const child = await screen.findByRole("menuitem", { name: "Alpha" });
+    fireEvent.click(child);
+    expect(onMove).toHaveBeenCalledTimes(1);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("opens a cascade with ArrowRight and closes it with ArrowLeft", async () => {
+    render(
+      <ContextMenu
+        open
+        x={20}
+        y={20}
+        onClose={vi.fn()}
+        items={[
+          {
+            id: "move",
+            label: "Move to project",
+            submenu: [
+              { id: "alpha", label: "Alpha", onClick: vi.fn() },
+              { id: "beta", label: "Beta", onClick: vi.fn() },
+            ],
+          },
+        ]}
+      />,
+    );
+    const parent = screen.getByRole("menuitem", { name: "Move to project" });
+    await waitFor(() => expect(document.activeElement).toBe(parent));
+    fireEvent.keyDown(screen.getAllByRole("menu")[0], { key: "ArrowRight" });
+    const alpha = await screen.findByRole("menuitem", { name: "Alpha" });
+    await waitFor(() => expect(document.activeElement).toBe(alpha));
+    fireEvent.keyDown(screen.getAllByRole("menu")[0], { key: "ArrowDown" });
+    expect(document.activeElement).toBe(
+      screen.getByRole("menuitem", { name: "Beta" }),
+    );
+    fireEvent.keyDown(screen.getAllByRole("menu")[0], { key: "ArrowLeft" });
+    await waitFor(() =>
+      expect(screen.queryByRole("menuitem", { name: "Alpha" })).toBeNull(),
+    );
+    expect(document.activeElement).toBe(parent);
+  });
+
+  it("keeps the parent open when the cascade trigger is clicked", async () => {
+    const onClose = vi.fn();
+    const onMove = vi.fn();
+    render(
+      <ContextMenu
+        open
+        x={20}
+        y={20}
+        onClose={onClose}
+        items={[
+          {
+            id: "move",
+            label: "Move to project",
+            submenu: [{ id: "alpha", label: "Alpha", onClick: onMove }],
+          },
+        ]}
+      />,
+    );
+    fireEvent.click(screen.getByRole("menuitem", { name: "Move to project" }));
+    expect(onClose).not.toHaveBeenCalled();
+    expect(await screen.findByRole("menuitem", { name: "Alpha" })).toBeTruthy();
+    expect(onMove).not.toHaveBeenCalled();
+  });
+
+  it("closes a cascade with Escape before dismissing the parent menu", async () => {
+    const onClose = vi.fn();
+    render(
+      <ContextMenu
+        open
+        x={20}
+        y={20}
+        onClose={onClose}
+        items={[
+          {
+            id: "move",
+            label: "Move to project",
+            submenu: [{ id: "alpha", label: "Alpha", onClick: vi.fn() }],
+          },
+        ]}
+      />,
+    );
+    fireEvent.mouseEnter(screen.getByRole("menuitem", { name: "Move to project" }));
+    expect(await screen.findByRole("menuitem", { name: "Alpha" })).toBeTruthy();
+    fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() =>
+      expect(screen.queryByRole("menuitem", { name: "Alpha" })).toBeNull(),
+    );
+    expect(onClose).not.toHaveBeenCalled();
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
   it("flips an anchored menu above when there is not enough room below", () => {
     Object.defineProperty(window, "innerWidth", {
       configurable: true,
