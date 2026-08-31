@@ -1,16 +1,27 @@
 //! App-resident automation scheduler.
 //!
 //! Rust owns due-time polling, atomic claims, leases, a bounded run ledger, and
-//! one catch-up attempt. Claimed prompts still execute through the existing
-//! Tauri Host → ACP → Runtime path in the WebView. System-level scheduling while
-//! the app is terminated is intentionally out of scope.
+//! one catch-up attempt. The default kernel ignites claimed prompts from Host
+//! without waiting for WebView. The legacy ACP adapter still emits an unbound
+//! claim for the WebView path. Persistent OS registration is a separate module.
 
 use chrono::{DateTime, Datelike, Duration as ChronoDuration, Local, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+
 use tauri::{AppHandle, Emitter};
 use uuid::Uuid;
 
+use crate::session_manager::SessionManager;
 use crate::store::Automation;
+
+/// Host ignition failed. `bound` means the claim already owns a session and
+/// should not be handed to WebView.
+#[derive(Debug, Clone)]
+pub struct IgniteFailure {
+    pub bound: bool,
+    pub error: String,
+}
 
 const CLAIM_LEASE_MINUTES: i64 = 10;
 const MAX_LEDGER_ROWS: usize = 512;
@@ -200,6 +211,13 @@ fn latest_due_slot(automation: &Automation, now: DateTime<Utc>) -> Option<DateTi
 fn next_slot_after(automation: &Automation, after: DateTime<Utc>) -> Option<DateTime<Utc>> {
     if automation.frequency.eq_ignore_ascii_case("once") {
         return None;
+    }
+    if automation.frequency.eq_ignore_ascii_case("interval") {
+        let minutes = automation.interval_minutes.unwrap_or(15).max(15) as i64;
+        return Some(after + ChronoDuration::minutes(minutes));
+    }
+    if automation.frequency.eq_ignore_ascii_case("hourly") {
+        return Some(after + ChronoDuration::hours(1));
     }
     let local_after = after.with_timezone(&Local);
     for offset in 0..15 {
@@ -986,24 +1004,266 @@ pub fn complete(claim_id: &str, success: bool, error: Option<&str>) -> Result<()
     advance_after_occurrence(&automation, now)
 }
 
-fn tick(app: &AppHandle) {
-    match tick_once() {
-        Ok(Some(claim)) => {
-            let _ = app.emit("automation://claim_v1", claim);
+fn host_ignition_available() -> bool {
+    crate::agent_loop::use_sunsetz_kernel() || crate::acp_client::AcpClient::use_mock()
+}
+
+async fn dispatch_due_claim(app: &AppHandle, mgr: &Arc<SessionManager>) {
+    let claim = match tick_once() {
+        Ok(Some(claim)) => claim,
+        Ok(None) => return,
+        Err(error) => {
+            tracing::warn!("automation scheduler tick failed: {error}");
+            return;
         }
-        Ok(None) => {}
-        Err(error) => tracing::warn!("automation scheduler tick failed: {error}"),
+    };
+    if let Err(error) = validate_attached_skills(&claim.automation) {
+        tracing::warn!(
+            "automation {} blocked before model call: {error}",
+            claim.automation.id
+        );
+        let _ = complete(&claim.claim_id, false, Some(&error));
+        return;
+    }
+    let claim = if host_ignition_available() {
+        match mgr.ignite_automation_claim(app.clone(), claim.clone()).await {
+            Ok(bound) => bound,
+            Err(IgniteFailure { bound: true, error }) => {
+                tracing::warn!("host automation ignition failed after bind: {error}");
+                return;
+            }
+            Err(IgniteFailure { bound: false, error }) => {
+                tracing::warn!("host automation ignition fell back to WebView: {error}");
+                claim
+            }
+        }
+    } else {
+        claim
+    };
+    let _ = app.emit("automation://claim_v1", claim);
+}
+
+pub fn session_has_active_claim(session_id: &str) -> bool {
+    load_ledger().iter().any(|entry| {
+        entry.status == AutomationRunStatusV1::Claimed
+            && entry.session_id.as_deref() == Some(session_id)
+    })
+}
+
+pub fn bound_automation_for_session(session_id: &str) -> Option<crate::store::Automation> {
+    let automation_id = load_ledger().into_iter().find_map(|entry| {
+        (entry.status == AutomationRunStatusV1::Claimed
+            && entry.session_id.as_deref() == Some(session_id))
+        .then_some(entry.automation_id)
+    })?;
+    crate::store::load_automations()
+        .into_iter()
+        .find(|item| item.id == automation_id)
+}
+
+pub fn validate_attached_skills(automation: &Automation) -> Result<(), String> {
+    if automation.skill_ids.is_empty() {
+        return Ok(());
+    }
+    for skill in &automation.skill_ids {
+        crate::skill_inventory::load_skill_md_v1(&skill.id, &skill.tree_hash, None).map_err(
+            |error| {
+                format!(
+                    "blocked_config: attached Skill `{}` is not ready ({error})",
+                    skill.id
+                )
+            },
+        )?;
+    }
+    Ok(())
+}
+
+pub fn apply_schedule_tool(arguments: &serde_json::Value, allowed: bool) -> String {
+    if !allowed {
+        return "schedule_task is disabled during scheduled runs".into();
+    }
+    let action = arguments
+        .get("action")
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    match action.as_str() {
+        "list" => {
+            let list = crate::store::load_automations()
+                .into_iter()
+                .take(32)
+                .map(|item| {
+                    serde_json::json!({
+                        "id": item.id,
+                        "title": item.title,
+                        "enabled": item.enabled,
+                        "frequency": item.frequency,
+                        "nextRunAt": item.next_run_at,
+                        "skillIds": item.skill_ids,
+                    })
+                })
+                .collect::<Vec<_>>();
+            serde_json::to_string_pretty(&list).unwrap_or_else(|_| "[]".into())
+        }
+        "create" => {
+            match schedule_input_from_tool(arguments).and_then(crate::store::create_automation) {
+                Ok(created) => format!("created {}", created.id),
+                Err(error) => error,
+            }
+        }
+        "update" => {
+            let id = tool_id(arguments);
+            if id.is_empty() {
+                return "update requires id".into();
+            }
+            match schedule_input_from_tool(arguments)
+                .and_then(|input| crate::store::update_automation(&id, input))
+            {
+                Ok(updated) => format!("updated {}", updated.id),
+                Err(error) => error,
+            }
+        }
+        "set_enabled" | "pause" | "resume" => {
+            let id = tool_id(arguments);
+            if id.is_empty() {
+                return "set_enabled requires id".into();
+            }
+            let enabled = if action == "pause" {
+                false
+            } else if action == "resume" {
+                true
+            } else {
+                arguments
+                    .get("enabled")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(true)
+            };
+            match crate::store::set_automation_enabled(&id, enabled) {
+                Ok(updated) => format!(
+                    "{} {}",
+                    if updated.enabled { "enabled" } else { "paused" },
+                    updated.id
+                ),
+                Err(error) => error,
+            }
+        }
+        "delete" => {
+            let id = tool_id(arguments);
+            if id.is_empty() {
+                return "delete requires id".into();
+            }
+            match crate::store::delete_automation(&id) {
+                Ok(()) => format!("deleted {id}"),
+                Err(error) => error,
+            }
+        }
+        _ => "schedule_task action must be create, list, update, set_enabled, or delete".into(),
     }
 }
 
-pub fn start(app: AppHandle) {
+fn tool_id(arguments: &serde_json::Value) -> String {
+    arguments
+        .get("id")
+        .or_else(|| arguments.get("automation_id"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string()
+}
+
+fn schedule_input_from_tool(
+    arguments: &serde_json::Value,
+) -> Result<crate::store::AutomationInput, String> {
+    let title = arguments
+        .get("title")
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let prompt = arguments
+        .get("prompt")
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let skill_ids = arguments.get("skill_ids").and_then(|value| {
+        value.as_array().map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    let id = item.get("id").and_then(|value| value.as_str())?;
+                    let tree_hash = item
+                        .get("tree_hash")
+                        .or_else(|| item.get("treeHash"))
+                        .and_then(|value| value.as_str())?;
+                    Some(crate::store::AutomationSkillRefV1 {
+                        id: id.to_string(),
+                        tree_hash: tree_hash.to_string(),
+                    })
+                })
+                .collect()
+        })
+    });
+    Ok(crate::store::AutomationInput {
+        title,
+        prompt,
+        enabled: arguments.get("enabled").and_then(|value| value.as_bool()),
+        project_id: arguments
+            .get("project_id")
+            .or_else(|| arguments.get("projectId"))
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        model_id: arguments
+            .get("model_id")
+            .or_else(|| arguments.get("modelId"))
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        effort: arguments
+            .get("effort")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        frequency: arguments
+            .get("frequency")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        time: arguments
+            .get("time")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        weekdays: arguments.get("weekdays").and_then(|value| {
+            value.as_array().map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_u64().map(|n| n as u8))
+                    .collect()
+            })
+        }),
+        notify: arguments
+            .get("notify")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        missed_run_policy: arguments
+            .get("missed_run_policy")
+            .or_else(|| arguments.get("missedRunPolicy"))
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        next_run_at: None,
+        interval_minutes: arguments
+            .get("interval_minutes")
+            .or_else(|| arguments.get("intervalMinutes"))
+            .and_then(|value| value.as_u64().map(|n| n as u32)),
+        skill_ids,
+    })
+}
+
+pub fn start(app: AppHandle, mgr: Arc<SessionManager>) {
     tauri::async_runtime::spawn(async move {
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(30));
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             ticker.tick().await;
-            let app = app.clone();
-            let _ = tauri::async_runtime::spawn_blocking(move || tick(&app)).await;
+            dispatch_due_claim(&app, &mgr).await;
         }
     });
 }
@@ -1031,7 +1291,14 @@ mod tests {
             updated_at: now,
             last_run_at: None,
             next_run_at: None,
+            interval_minutes: None,
+            skill_ids: Vec::new(),
         }
+    }
+
+    #[test]
+    fn default_kernel_can_ignite_without_webview() {
+        assert!(host_ignition_available());
     }
 
     fn fixed_now() -> DateTime<Utc> {
@@ -1069,6 +1336,28 @@ mod tests {
     #[test]
     fn once_has_no_followup_slot() {
         assert!(next_slot_after(&automation("once", "09:00", vec![]), Utc::now()).is_none());
+    }
+
+    #[test]
+    fn interval_and_hourly_slots_advance_from_the_previous_fire() {
+        let now = fixed_now();
+        let mut interval = automation("interval", "09:00", vec![]);
+        interval.interval_minutes = Some(30);
+        assert_eq!(
+            next_slot_after(&interval, now),
+            Some(now + ChronoDuration::minutes(30))
+        );
+        let hourly = automation("hourly", "09:00", vec![]);
+        assert_eq!(
+            next_slot_after(&hourly, now),
+            Some(now + ChronoDuration::hours(1))
+        );
+    }
+
+    #[test]
+    fn schedule_tool_refuses_nested_runs() {
+        let blocked = apply_schedule_tool(&serde_json::json!({"action":"list"}), false);
+        assert!(blocked.contains("disabled"), "{blocked}");
     }
 
     #[test]

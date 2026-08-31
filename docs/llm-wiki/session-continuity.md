@@ -48,8 +48,9 @@ Same-cwd warm reuse (one process, switch ACP session) still applies when spawn f
 
 | Layer | Behavior |
 |-------|----------|
-| **Agent (Grok Build)** | **Primary.** Auto-compacts when context ≈ **85%** full (`[session] auto_compact_threshold_percent`). User can also run **`/compact [note]`** in-session. |
-| **App Host / UI** | Does **not** auto-compress the agent window. Slash **`/compact`** is a user action: confirm dialog → send `/compact …` as a normal prompt to the agent. Host journal is **not** rewritten by compact (UI history stays full). |
+| **Sunsetz kernel (default)** | **Primary for product sessions.** Host intercepts `/compact [note]` before `run_turn`. A sidecar `context-compact.v1.json` stores the model-facing summary and the first retained message id. Auto-compact runs when last occupancy is ≥ **85%** of a known window, or when reconstructed history would otherwise hit the 24-message / 32k-character cap. Visible journal is not rewritten. |
+| **Grok ACP adapter (legacy)** | Unchanged: the CLI auto-compacts near 85% and handles `/compact` when `runtimeBackend=grok_acp`. |
+| **App Host / UI** | Slash **`/compact`** is a user action: confirm dialog → send `/compact …` as a normal prompt. Host records `context_compact` markers and shows the banner. Host journal is **not** rewritten by compact (UI history stays full). |
 
 ### UI surface for compact (required)
 
@@ -94,6 +95,6 @@ This pending state is not a disk-persistence guarantee across a complete applica
 1. Reopen a multi-turn App session after killing the agent process → next send either loads the same `agentSessionId` or injects bootstrap so the model knows prior turns.  
 2. Soft-respawn (permission change) → resume preferred.  
 3. Brand-new chat → no bootstrap, plain `session/new`.  
-4. `/compact` still only runs when the user (or agent auto-threshold) triggers it on the agent side.
+4. `/compact` still only runs when the user (or auto-threshold) triggers it on the kernel/adapter side.
 5. Assistant → activity/compact → assistant ordering survives journal reload for newly recorded turns.
 6. A failed ask_user reply can be restored with its partial answers while the Agent process remains alive.

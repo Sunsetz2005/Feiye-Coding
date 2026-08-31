@@ -919,6 +919,38 @@ pub async fn memory_candidates_list_v1(
         .map_err(|error| format!("Memory candidate list task failed: {error}"))?
 }
 
+#[tauri::command]
+pub async fn agent_memory_get_v1() -> Result<crate::agent_memory::AgentMemoryStoreV1, String> {
+    tauri::async_runtime::spawn_blocking(crate::agent_memory::load)
+        .await
+        .map_err(|error| format!("Agent memory load task failed: {error}"))?
+}
+
+#[tauri::command]
+pub async fn agent_memory_set_enabled_v1(
+    enabled: bool,
+) -> Result<crate::agent_memory::AgentMemoryStoreV1, String> {
+    tauri::async_runtime::spawn_blocking(move || crate::agent_memory::set_enabled(enabled))
+        .await
+        .map_err(|error| format!("Agent memory enable task failed: {error}"))?
+}
+
+#[tauri::command]
+pub async fn agent_memory_mutate_v1(
+    request: crate::agent_memory::AgentMemoryMutationV1,
+) -> Result<crate::agent_memory::AgentMemoryStoreV1, String> {
+    tauri::async_runtime::spawn_blocking(move || crate::agent_memory::mutate(request))
+        .await
+        .map_err(|error| format!("Agent memory mutate task failed: {error}"))?
+}
+
+#[tauri::command]
+pub async fn agent_memory_clear_v1() -> Result<crate::agent_memory::AgentMemoryStoreV1, String> {
+    tauri::async_runtime::spawn_blocking(crate::agent_memory::clear_entries)
+        .await
+        .map_err(|error| format!("Agent memory clear task failed: {error}"))?
+}
+
 /// Preview approved Memory candidates and clearly separated, untrusted FTS evidence.
 #[tauri::command]
 pub async fn memory_recall_preview_v1(
@@ -1593,6 +1625,13 @@ async fn apply_settings_runtime_side_effects(
     if previous.locale != settings.locale {
         if let Err(error) = crate::tray::refresh_menu(app) {
             tracing::warn!("settings patch tray refresh: {error}");
+        }
+    }
+    if previous.run_scheduled_tasks_in_background != settings.run_scheduled_tasks_in_background {
+        if let Err(error) =
+            crate::persistent_scheduler::apply(settings.run_scheduled_tasks_in_background)
+        {
+            tracing::warn!("persistent scheduler apply: {error}");
         }
     }
 }

@@ -2,7 +2,7 @@
 
 源码：`src/lib/grokCatalog.ts`（静态兜底）、`src-tauri/src/models_catalog.rs`、`src-tauri/src/session_manager/`、`src-tauri/src/agent_prefs.rs`。
 
-官方模型网关仍未实现。容量与接口草稿见 [`model-gateway-capacity.md`](model-gateway-capacity.md)。桌面 Host 不是千人并发服务器。插件连接器见 [`open-connector.md`](open-connector.md)：GitHub、Gmail、Drive、Calendar 在 App 内连接，其余目录项即将在 App 内连接。
+官方模型网关仍未实现。容量与接口草稿见 [`model-gateway-capacity.md`](model-gateway-capacity.md)。桌面 Host 不是千人并发服务器。插件连接器见 [`open-connector.md`](open-connector.md)：GitHub、Gmail、Drive、Calendar、Notion、Slack 在 App 内连接，其余目录项即将在 App 内连接。
 
 ## 模型与 Runtime capability
 
@@ -70,4 +70,4 @@ Runtime 没有 mid-session `set_effort` RPC。Host 更新目标 effort 后软断
 
 ## 上下文
 
-上下文环只展示 Runtime 精确上报的数据；没有容量时显示未知，不按消息长度估算。弹层提供真实 `/compact` 入口，并受同一 busy-state 锁控制。
+上下文环只展示 Runtime 精确上报的数据；没有容量时显示未知，不按消息长度估算。弹层提供真实 `/compact` 入口，并受同一 busy-state 锁控制。默认内核会真正压缩模型窗口并上报最后一次推理占用；Grok ACP 路径仍由 CLI 压缩。

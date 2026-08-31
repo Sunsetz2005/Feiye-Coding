@@ -1,6 +1,6 @@
 # 自动化 / 已安排任务
 
-**状态**：P1 UI + 本地存储 + 对话静默创建 + 应用进程存活时 Rust Host 调度。
+**状态**：P1 UI + 本地存储 + 对话静默创建 + Host 点火；可选 OS 登录/间隔唤醒。
 **原则**：能接 Build 就接 Build；壳层做清单、表单与编排。用户对话不暴露 JSON schema。
 
 ## 产品入口（Codex 对标）
@@ -42,12 +42,14 @@
 
 1. Rust Host 每 30s 检查 `enabled` 且 `nextRunAt` 到期的任务，并在账本中原子认领；同一 occurrence 只能认领一次。
 2. Host 只保留一个 active claim；尚未认领的错过周期按任务的 `run_once | skip` 策略处理，不回放一串历史周期。
-3. WebView 空闲后执行：`session_create` → `automation_claim_bind_v1` → 写 session prefs → `session_connect` → `session_send`。
+3. 默认内核：Host 创建 scheduled 会话、绑定 claim、在后台接通并发送，不抢 live 会话。仍 emit `automation://claim_v1`（带 `sessionId`）让 WebView 刷新列表。legacy ACP 仍由 WebView 空闲后 `session_create` → `automation_claim_bind_v1` → `session_connect` → `session_send`。
 4. 绑定后由 Host 依据真实 ACP turn 结果调用账本完成逻辑；“prompt 已发送”不等于成功。
 5. Host 从版本化 Runtime event envelope 的 `stream`、`tool_call`、`plan`、`ask_user`、`permission`、`retry_state`、`context_compact` 或 `usage` 识别进度；同一 session 最多每 30 秒将严格递增的 Runtime sequence 写入 `lastRuntimeSessionSequence` / `lastHeartbeatAt`，并把 lease 设为 Host 当前时间后 10 分钟。错误、stderr、进程退出和 unknown event 不续租。
 6. WebView 重载时，已绑定 claim 会重新广播但不会再次发送。无进度且 lease 到期的记录为 `interrupted`。heartbeat 钉死 `process_id` 后，`process_exited` 才构成终止证明；有证明且 `run_once` 时 Host CAS 生成一条 replacement。无证明不补跑。已被替换的原 claim 拒绝晚到 completion。
 7. **connect 失败**：删除空壳 session并记 failed；**send/turn 失败**：保留会话错误记录并记 failed。
 8. 完成后原子推进 `lastRunAt` / `nextRunAt`；`once` 任务禁用。
+
+父会话 `schedule_task` 写入同一份清单（create / list / update / set_enabled / delete）。频率除 daily/weekly/weekdays/once 外还可 `hourly` 与 `interval`（`intervalMinutes` ≥ 15）。可选 `skillIds: [{ id, treeHash }]`：到期时重新校验库存，失败则 `blocked_config`、不调用模型。定时回合禁用该工具。默认内核触发会话由 Host 点火；legacy ACP 仍走 WebView。
 
 与 Build 的 `/loop`、`scheduler_*` 可并存：用户也可在会话里让 Agent 直接调度；壳层清单是独立 SoT。
 
@@ -79,6 +81,6 @@
 - [x] 每任务 `run_once | skip` missed-run policy；过期 claim 不自动重试
 - [x] Runtime 进度 heartbeat 严格按 session/sequence 续租，普通会话与错误事件不写 heartbeat
 - [x] connect 失败不留空壳会话；已有空会话不伪装成新建页
-- [ ] 后台无窗口常驻触发（可选 P2：系统服务 / headless CLI）
+- [x] 设置可选登录/间隔 `--background` 唤醒（无 KeepAlive；默认关闭）
 - [x] 基于进程终止证明的 replacement CAS；无证明的过期 claim 仍不重试
 - [ ] 与 CLI scheduler 双向同步（可选 P2）

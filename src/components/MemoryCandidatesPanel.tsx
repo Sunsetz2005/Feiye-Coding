@@ -93,6 +93,11 @@ export function MemoryCandidatesPanel({
   const [copied, setCopied] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [agentMemory, setAgentMemory] = useState<api.AgentMemoryStoreV1 | null>(
+    null,
+  );
+  const [agentMemoryError, setAgentMemoryError] = useState<string | null>(null);
+  const [confirmAgentMemoryClear, setConfirmAgentMemoryClear] = useState(false);
 
   const refresh = useCallback(async () => {
     if (!api.isTauri()) {
@@ -126,6 +131,72 @@ export function MemoryCandidatesPanel({
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  const refreshAgentMemory = useCallback(async () => {
+    if (!api.isTauri()) {
+      setAgentMemory(null);
+      return;
+    }
+    try {
+      setAgentMemory(await api.agentMemoryGetV1());
+      setAgentMemoryError(null);
+    } catch (reason) {
+      setAgentMemoryError(String(reason));
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshAgentMemory();
+  }, [refreshAgentMemory]);
+
+  const setAgentMemoryEnabled = async (enabled: boolean) => {
+    if (busy) return;
+    setBusy("agent-memory-enabled");
+    try {
+      setAgentMemory(await api.agentMemorySetEnabledV1(enabled));
+      setAgentMemoryError(null);
+    } catch (reason) {
+      setAgentMemoryError(String(reason));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const removeAgentMemoryEntry = async (
+    target: "notes" | "user_profile",
+    content: string,
+  ) => {
+    if (busy) return;
+    setBusy(`agent-memory-remove-${target}`);
+    try {
+      setAgentMemory(
+        await api.agentMemoryMutateV1({
+          action: "remove",
+          target,
+          oldText: content,
+        }),
+      );
+      setAgentMemoryError(null);
+    } catch (reason) {
+      setAgentMemoryError(String(reason));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const confirmClearAgentMemory = async () => {
+    if (busy) return;
+    setBusy("agent-memory-clear");
+    try {
+      setAgentMemory(await api.agentMemoryClearV1());
+      setConfirmAgentMemoryClear(false);
+      setAgentMemoryError(null);
+    } catch (reason) {
+      setAgentMemoryError(String(reason));
+    } finally {
+      setBusy(null);
+    }
+  };
 
   useEffect(() => {
     const sessionId = source?.sessionId.trim() || null;
@@ -414,6 +485,89 @@ export function MemoryCandidatesPanel({
       <h2 className="settings-page__h2" id="memory-candidates-title">
         {t("settings.memory.title")}
       </h2>
+      <div className="settings-card">
+        <article
+          className="settings-row settings-row--stack"
+          aria-label={t("settings.memory.auto.title")}
+        >
+          <div className="settings-row__text">
+            <div className="settings-row__label">
+              {t("settings.memory.auto.title")}
+            </div>
+            <div className="settings-row__desc">
+              {t("settings.memory.auto.desc")}
+            </div>
+          </div>
+          <label className="settings-row__hint">
+            <input
+              type="checkbox"
+              checked={agentMemory?.enabled ?? true}
+              disabled={busy !== null || !agentMemory}
+              onChange={(event) =>
+                void setAgentMemoryEnabled(event.target.checked)
+              }
+            />{" "}
+            {t("settings.memory.auto.enabled")}
+          </label>
+          {agentMemoryError ? (
+            <div className="settings-row__hint">{agentMemoryError}</div>
+          ) : null}
+          <AgentMemoryList
+            title={t("settings.memory.auto.notes")}
+            empty={t("settings.memory.auto.empty")}
+            entries={agentMemory?.notes ?? []}
+            onRemove={(content) =>
+              void removeAgentMemoryEntry("notes", content)
+            }
+            busy={busy !== null}
+            removeLabel={t("settings.memory.delete")}
+          />
+          <AgentMemoryList
+            title={t("settings.memory.auto.profile")}
+            empty={t("settings.memory.auto.empty")}
+            entries={agentMemory?.userProfile ?? []}
+            onRemove={(content) =>
+              void removeAgentMemoryEntry("user_profile", content)
+            }
+            busy={busy !== null}
+            removeLabel={t("settings.memory.delete")}
+          />
+          {confirmAgentMemoryClear ? (
+            <div className="settings-row__actions">
+              <button
+                type="button"
+                className="btn btn--danger btn--sm"
+                disabled={busy !== null}
+                onClick={() => void confirmClearAgentMemory()}
+              >
+                {t("settings.memory.auto.confirmClear")}
+              </button>
+              <button
+                type="button"
+                className="btn btn--ghost btn--sm"
+                disabled={busy !== null}
+                onClick={() => setConfirmAgentMemoryClear(false)}
+              >
+                {t("common.cancel")}
+              </button>
+            </div>
+          ) : (
+            <button
+              type="button"
+              className="btn btn--ghost btn--sm btn--danger"
+              disabled={
+                busy !== null ||
+                !agentMemory ||
+                (agentMemory.notes.length === 0 &&
+                  agentMemory.userProfile.length === 0)
+              }
+              onClick={() => setConfirmAgentMemoryClear(true)}
+            >
+              {t("settings.memory.auto.clear")}
+            </button>
+          )}
+        </article>
+      </div>
       <div className="settings-card">
         <div className="settings-row settings-row--stack">
           <div className="settings-row__text">
@@ -883,5 +1037,44 @@ export function MemoryCandidatesPanel({
         </article>
       </div>
     </section>
+  );
+}
+
+function AgentMemoryList({
+  title,
+  empty,
+  entries,
+  onRemove,
+  busy,
+  removeLabel,
+}: {
+  title: string;
+  empty: string;
+  entries: api.AgentMemoryEntryV1[];
+  onRemove: (content: string) => void;
+  busy: boolean;
+  removeLabel: string;
+}) {
+  return (
+    <div>
+      <div className="settings-row__label">{title}</div>
+      {entries.length === 0 ? (
+        <div className="settings-row__hint">{empty}</div>
+      ) : (
+        entries.map((entry) => (
+          <article key={entry.id} className="settings-row settings-row--stack">
+            <div className="settings-row__desc">{entry.content}</div>
+            <button
+              type="button"
+              className="btn btn--ghost btn--sm btn--danger"
+              disabled={busy}
+              onClick={() => onRemove(entry.content)}
+            >
+              {removeLabel}
+            </button>
+          </article>
+        ))
+      )}
+    </div>
   );
 }

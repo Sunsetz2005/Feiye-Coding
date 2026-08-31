@@ -10,7 +10,7 @@ Raw upstream terms may appear in opt-in diagnostic bundles or externally control
 
 - `runtime_capabilities_v1` reports Runtime/client/protocol versions and the actual state of sandbox, memory, plugin catalog, hooks inventory, and MCP. It never reads or serializes API keys or authentication material.
 - Raw ACP events are dual-emitted as the bounded `session://runtime_event_v1` envelope for one compatibility cycle. Unknown notifications remain observable; unknown requests are rejected on the wire.
-- Sandbox profile is spawn-critical. `off` is the default; Linux uses bubblewrap when a non-off profile is requested. macOS and Windows currently fail closed for non-off profiles because no verified adapter exists.
+- Sandbox profile is spawn-critical. `off` is the default. The built-in kernel uses Linux bubblewrap, macOS sandbox-exec, or Windows AppContainer for each `run_command`. The legacy ACP adapter still fail-closes non-off profiles except on Linux.
 - TCP ACP accepts only loopback endpoints. Use a user-managed local SSH tunnel for a Runtime on another machine.
 
 The detailed migration and remaining platform gates are documented in [`llm-wiki/runtime-migration-v1.md`](llm-wiki/runtime-migration-v1.md).

@@ -9,13 +9,16 @@
 //!
 //! Writes and commands wait on the Host permission dock (or an explicit
 //! auto-allow policy) before they run. Reads stay immediate inside a trusted
-//! root. This slice is unsandboxed: no bubblewrap / seatbelt / job object.
+//! root. `run_command` isolation follows Host `sandboxProfile`: off, Linux
+//! bubblewrap, macOS sandbox-exec, or Windows AppContainer.
 //!
 //! Project instructions are a bounded, trusted-root file attach. Memory and
 //! Skill fragments are prepended by the session Host, not this loop.
 //! Connected marketplace connectors inject extra tools for this turn; they do
-//! not require a trusted project. Out of scope this slice: Hermes skill runner,
-//! cron, sandbox. The Grok ACP adapter stays behind an explicit legacy flag.
+//! not require a trusted project. Context compact (`/compact` and auto-compact)
+//! is owned by `context_compact` and the session Host; this loop reports last-
+//! inference occupancy. Out of scope this slice: Hermes skill runner, cron.
+//! The Grok ACP adapter stays behind an explicit legacy flag.
 
 use std::collections::{BTreeMap, HashSet};
 use std::ffi::OsString;
@@ -23,14 +26,16 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncReadExt;
+#[cfg(test)]
+use tokio::io::AsyncWriteExt;
 
 use crate::acp_client::{parse_ask_user_question_params, AcpEvent, StreamKind};
 use crate::error::{AgentError, AgentErrorCode};
@@ -61,7 +66,7 @@ const MAX_GREP_MATCHES: usize = 200;
 const MAX_GREP_FILES: usize = 2_000;
 const MAX_GREP_FILE_BYTES: u64 = 1_048_576;
 const MAX_GREP_LINE_CHARS: usize = 240;
-const MAX_HISTORY_MESSAGES: usize = 24;
+
 const GREP_SKIP_DIRS: &[&str] = &[
     ".git",
     "node_modules",
@@ -72,7 +77,7 @@ const GREP_SKIP_DIRS: &[&str] = &[
     ".sunsetz",
     "vendor",
 ];
-const MAX_HISTORY_CHARS: usize = 32_768;
+
 const HTTP_TIMEOUT_SECS: u64 = 120;
 const COMMAND_TIMEOUT_SECS: u64 = 60;
 
@@ -235,6 +240,10 @@ pub struct AgentTurnConfig {
     pub kind: AgentKind,
     pub spawn_depth: u32,
     pub subagents: SubagentHooks,
+    pub sandbox_profile: runtime_compat::SandboxProfileV1,
+    pub skill_prompt_chars: Arc<AtomicUsize>,
+    pub allow_schedule_task: bool,
+    pub allow_skill_save: bool,
 }
 
 pub fn default_runtime_backend() -> String {
@@ -436,50 +445,7 @@ fn paths_equal(a: &Path, b: &Path) -> bool {
 }
 
 pub fn chat_history_from_journal(messages: &[ChatMessageStored]) -> Vec<Value> {
-    let mut kept: Vec<&ChatMessageStored> = messages
-        .iter()
-        .filter(|message| {
-            if message.is_error || message.content.trim().is_empty() {
-                return false;
-            }
-            if let Some(marker) = message.marker.as_deref() {
-                if marker == "tool_step"
-                    || marker == "turn_cancelled"
-                    || marker.starts_with("memory")
-                {
-                    return false;
-                }
-            }
-            message.role == "user" || message.role == "assistant"
-        })
-        .collect();
-    if kept.last().is_some_and(|message| message.role == "user") {
-        kept.pop();
-    }
-    if kept.len() > MAX_HISTORY_MESSAGES {
-        kept = kept
-            .into_iter()
-            .rev()
-            .take(MAX_HISTORY_MESSAGES)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect();
-    }
-    let mut out = Vec::new();
-    let mut chars = 0usize;
-    for message in kept {
-        let content: String = message.content.chars().take(4_000).collect();
-        chars = chars.saturating_add(content.len());
-        if chars > MAX_HISTORY_CHARS && !out.is_empty() {
-            break;
-        }
-        out.push(json!({
-            "role": message.role,
-            "content": content,
-        }));
-    }
-    out
+    crate::context_compact::history_for_model(messages, None)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -589,6 +555,7 @@ pub fn system_prompt(
     trusted: bool,
     instruction: Option<&LoadedProjectInstruction>,
     kind: AgentKind,
+    sandbox: runtime_compat::SandboxProfileV1,
 ) -> String {
     let mut prompt = match kind {
         AgentKind::Explore => String::from(
@@ -614,17 +581,23 @@ pub fn system_prompt(
              trusted project. You may call read_file, list_directory, grep, write_file, \
              search_replace, and run_command only inside the trusted project root. Writes, \
              replacements, and commands require user permission. You cannot access paths outside \
-             that root. run_command is unsandboxed except for the trusted-root cwd pin, permission \
-             gate, and a 60s timeout. \
+             that root. \
              You may spawn explore, plan, or general subagents with spawn_agent for parallel \
              research or isolated work. Subagents cannot spawn further agents. Use agent_output \
-             to check background work and kill_agent to stop one. \
+             to check background work while you are still working, and kill_agent to stop one. \
+             After your turn ends, the host resumes this conversation with finished background \
+             summaries; do not claim you are still waiting for them. \
              When you need the user to pick among options, call ask_user_question and wait. \
              Do not skip that form and ask the same question as chat text. \
              Reviewed Memory, Skill text, and project instructions are visible user context, \
-             not extra permissions. Do not invent or auto-load Skills.",
+             not extra permissions. The Skills index is discovery only; call view_skill before \
+             following a Skill. Skill text is not extra permission.",
         ),
     };
+    if kind.allows_command() {
+        prompt.push(' ');
+        prompt.push_str(run_command_sandbox_prompt(sandbox));
+    }
     match (project_root, trusted) {
         (Some(root), true) => {
             prompt.push_str(" Trusted project root: ");
@@ -649,8 +622,74 @@ pub fn system_prompt(
     prompt
 }
 
+fn run_command_sandbox_prompt(sandbox: runtime_compat::SandboxProfileV1) -> &'static str {
+    match sandbox {
+        runtime_compat::SandboxProfileV1::Off => {
+            "run_command is unsandboxed except for the trusted-root cwd pin, permission gate, and a 60s timeout."
+        }
+        runtime_compat::SandboxProfileV1::WorkspaceWrite => {
+            "run_command runs in a workspace-write sandbox: it may write the trusted project and temp directories, not the rest of the filesystem."
+        }
+        runtime_compat::SandboxProfileV1::ReadOnly => {
+            "run_command runs in a read-only sandbox: project writes are blocked; temp writes may still succeed."
+        }
+    }
+}
+
 pub fn tool_definitions() -> Value {
     tool_definitions_for(AgentKind::Parent, 0)
+}
+
+pub fn skill_tool_definitions() -> Value {
+    json!([
+        {
+            "type": "function",
+            "function": {
+                "name": "list_skills",
+                "description": "List enabled Host-trusted Skills as metadata only (id, name, description, when_to_use, source, tree_hash). No Skill bodies or filesystem paths. Use view_skill to load a Skill.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {}
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "view_skill",
+                "description": "Load a Host-trusted Skill. skill_id and tree_hash are required. Omit path (or use SKILL.md) for the Skill body; pass a relative path for a file inside that Skill tree such as references/guide.md.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "skill_id": { "type": "string" },
+                        "tree_hash": { "type": "string" },
+                        "path": { "type": "string", "description": "Optional relative file under the Skill tree." }
+                    },
+                    "required": ["skill_id", "tree_hash"]
+                }
+            }
+        }
+    ])
+}
+
+pub fn memory_tool_definitions() -> Value {
+    json!([{
+        "type": "function",
+        "function": {
+            "name": "memory",
+            "description": "Manage Sunsetz auto memory. Actions: add, replace, remove, list. Targets: notes (environment/project facts) or user_profile (user preferences). replace/remove match a unique old_text substring. Overflow returns an error instead of dropping entries. Do not store secrets.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": { "type": "string" },
+                    "target": { "type": "string" },
+                    "content": { "type": "string" },
+                    "old_text": { "type": "string" }
+                },
+                "required": ["action"]
+            }
+        }
+    }])
 }
 
 pub fn tool_definitions_for(kind: AgentKind, spawn_depth: u32) -> Value {
@@ -738,7 +777,7 @@ pub fn tool_definitions_for(kind: AgentKind, spawn_depth: u32) -> Value {
             "type": "function",
             "function": {
                 "name": "run_command",
-                "description": "Run a shell command with cwd pinned to a directory inside the trusted project root. Unsandboxed except for the cwd pin, permission gate, and 60s timeout. Requires permission; AcceptEdits does not auto-allow this tool.",
+                "description": "Run a shell command with cwd pinned to a directory inside the trusted project root. Isolation follows the Host sandbox profile (off, workspace_write, or read_only). Requires permission; AcceptEdits does not auto-allow this tool. 60s timeout.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -930,6 +969,11 @@ fn is_host_tool(name: &str) -> bool {
             | "agent_output"
             | "kill_agent"
             | "ask_user_question"
+            | "list_skills"
+            | "view_skill"
+            | "memory"
+            | "schedule_task"
+            | "skill_save"
     )
 }
 
@@ -1543,12 +1587,16 @@ async fn execute_run_command(
     command: &str,
     cwd: &Path,
     stop: Arc<AtomicBool>,
+    profile: runtime_compat::SandboxProfileV1,
+    project_root: &Path,
 ) -> Result<RunCommandOutcome, String> {
     execute_run_command_timed(
         command,
         cwd,
         stop,
         Duration::from_secs(COMMAND_TIMEOUT_SECS),
+        profile,
+        project_root,
     )
     .await
 }
@@ -1558,24 +1606,50 @@ async fn execute_run_command_timed(
     cwd: &Path,
     stop: Arc<AtomicBool>,
     timeout: Duration,
+    profile: runtime_compat::SandboxProfileV1,
+    project_root: &Path,
 ) -> Result<RunCommandOutcome, String> {
-    if command.trim().is_empty() {
-        return Err("empty command".into());
+    let plan = crate::command_sandbox::plan_run_command(command, cwd, project_root, profile)?;
+    #[cfg(windows)]
+    if plan.application.applied != "off" {
+        let isolated = crate::command_sandbox::run_windows_isolated(
+            plan,
+            Arc::clone(&stop),
+            timeout,
+        )
+        .await?;
+        let (out, err, code, cancelled) = isolated;
+        if cancelled {
+            return Ok(RunCommandOutcome::Cancelled);
+        }
+        let success = code == 0;
+        let mut text = String::from_utf8_lossy(&out).into_owned();
+        if !err.is_empty() {
+            if !text.is_empty() && !text.ends_with('\n') {
+                text.push('\n');
+            }
+            text.push_str(&String::from_utf8_lossy(&err));
+        }
+        if text.is_empty() {
+            text = if success {
+                String::new()
+            } else {
+                format!("exit {code}")
+            };
+        } else if !success {
+            if !text.ends_with('\n') {
+                text.push('\n');
+            }
+            text.push_str(&format!("exit {code}"));
+        }
+        return Ok(RunCommandOutcome::Output(bound_command_output(text)));
     }
-    if command.contains('\0') {
-        return Err("invalid command".into());
+    let mut cmd = tokio::process::Command::new(&plan.executable);
+    cmd.args(&plan.args);
+    if cfg!(windows) {
+        process_util::apply_no_window_tokio(&mut cmd);
     }
-    let mut cmd = if cfg!(windows) {
-        let mut spawned = tokio::process::Command::new("cmd.exe");
-        spawned.arg("/C").arg(command);
-        process_util::apply_no_window_tokio(&mut spawned);
-        spawned
-    } else {
-        let mut spawned = tokio::process::Command::new("/bin/sh");
-        spawned.arg("-lc").arg(command);
-        spawned
-    };
-    cmd.current_dir(cwd)
+    cmd.current_dir(&plan.current_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1739,8 +1813,10 @@ async fn wait_until_stopped(stop: Arc<AtomicBool>) {
 }
 
 fn needs_permission(name: &str) -> bool {
-    matches!(name, "write_file" | "search_replace" | "run_command")
-        || crate::permission::is_connector_tool(name)
+    matches!(
+        name,
+        "write_file" | "search_replace" | "run_command" | "skill_save"
+    ) || crate::permission::is_connector_tool(name)
 }
 
 fn connector_permission_preview(arguments: &Value) -> String {
@@ -1804,6 +1880,123 @@ async fn dispatch_host_tool(
     prepared_write: Option<Result<PreparedWrite, String>>,
     prepared_command: Option<Result<PreparedCommand, String>>,
 ) -> HostToolDispatch {
+    if name == "schedule_task" {
+        if cfg.kind != AgentKind::Parent || cfg.spawn_depth != 0 {
+            return HostToolDispatch::Output(
+                "schedule_task is only available on the parent agent".into(),
+            );
+        }
+        return HostToolDispatch::Output(crate::automation_scheduler::apply_schedule_tool(
+            arguments,
+            cfg.allow_schedule_task,
+        ));
+    }
+    if name == "skill_save" {
+        if cfg.kind != AgentKind::Parent || cfg.spawn_depth != 0 {
+            return HostToolDispatch::Output("skill_save is only available on the parent agent".into());
+        }
+        if !cfg.allow_skill_save {
+            return HostToolDispatch::Output("skill_save is disabled during scheduled runs".into());
+        }
+        let project = if cfg.trusted {
+            cfg.project_root.as_deref()
+        } else {
+            None
+        };
+        let preview = match crate::skill_draft::permission_preview_from_tool(arguments, project) {
+            Ok(preview) => preview,
+            Err(error) => return HostToolDispatch::Output(error),
+        };
+        let decision = request_tool_permission(
+            cfg,
+            HostToolPermission {
+                tool_name: name.into(),
+                title: preview.title.clone(),
+                preview: preview.preview.clone(),
+                path_target: preview.path_target.clone(),
+                command: String::new(),
+                tool_call_id: tool_call_id.into(),
+            },
+        )
+        .await;
+        match decision {
+            HostToolPermissionDecision::Allow => {}
+            HostToolPermissionDecision::Deny => {
+                return HostToolDispatch::Output("permission denied by user".into());
+            }
+            HostToolPermissionDecision::Cancelled => {
+                return HostToolDispatch::Cancelled;
+            }
+        }
+        return HostToolDispatch::Output(
+            crate::skill_draft::save_from_agent_tool(arguments, project)
+                .unwrap_or_else(|error| error),
+        );
+    }
+    if name == "memory" {
+        if cfg.kind != AgentKind::Parent || cfg.spawn_depth != 0 {
+            return HostToolDispatch::Output(
+                "memory writes are only available on the parent agent".into(),
+            );
+        }
+        if !crate::agent_memory::is_enabled() {
+            return HostToolDispatch::Output("agent memory is disabled".into());
+        }
+        return HostToolDispatch::Output(crate::agent_memory::apply_tool(arguments));
+    }
+    if name == "list_skills" || name == "view_skill" {
+        let project = if cfg.trusted {
+            cfg.project_root
+                .as_ref()
+                .and_then(|path| path.to_str())
+                .map(str::to_string)
+        } else {
+            None
+        };
+        if name == "list_skills" {
+            return match crate::skill_inventory::list_enabled_skills_v1(project.as_deref()) {
+                Ok(items) => HostToolDispatch::Output(
+                    serde_json::to_string_pretty(&items).unwrap_or_else(|_| "[]".into()),
+                ),
+                Err(error) => HostToolDispatch::Output(error),
+            };
+        }
+        let skill_id = tool_string_field(arguments, &["skill_id", "skillId", "id"])
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        let tree_hash = tool_string_field(arguments, &["tree_hash", "treeHash"])
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if skill_id.is_empty() || tree_hash.is_empty() {
+            return HostToolDispatch::Output("view_skill requires skill_id and tree_hash".into());
+        }
+        let relative = tool_string_field(arguments, &["path", "relative_path", "relativePath"]);
+        return match crate::skill_inventory::view_skill_file_v1(
+            &skill_id,
+            &tree_hash,
+            relative.as_deref(),
+            project.as_deref(),
+        ) {
+            Ok(body) => {
+                let extra = body.chars().count();
+                let used = cfg.skill_prompt_chars.load(Ordering::SeqCst);
+                if used.saturating_add(extra)
+                    > crate::skill_inventory::HOST_SKILL_PROMPT_BUDGET_CHARS
+                {
+                    HostToolDispatch::Output(format!(
+                        "SKILL_USE_LIMIT: attached Skill text exceeds {} characters",
+                        crate::skill_inventory::HOST_SKILL_PROMPT_BUDGET_CHARS
+                    ))
+                } else {
+                    cfg.skill_prompt_chars.fetch_add(extra, Ordering::SeqCst);
+                    HostToolDispatch::Output(body)
+                }
+            }
+            Err(error) => HostToolDispatch::Output(error),
+        };
+    }
     if name == "ask_user_question" {
         if cfg.kind != AgentKind::Parent || cfg.spawn_depth != 0 {
             return HostToolDispatch::Output(
@@ -1999,6 +2192,8 @@ async fn dispatch_host_tool(
             &prepared.command,
             &prepared.cwd_canon,
             Arc::clone(&cfg.stop),
+            cfg.sandbox_profile,
+            root,
         )
         .await
         {
@@ -2027,6 +2222,7 @@ where
         cfg.trusted,
         instruction.as_ref(),
         cfg.kind,
+        cfg.sandbox_profile,
     );
     if cfg.kind.allows_connectors() && !cfg.connectors.tools.is_empty() {
         system.push_str(
@@ -2039,7 +2235,84 @@ where
             ));
         }
     }
+    if let Some(index) = Some(crate::skill_inventory::skill_index_prompt_v1(
+        if cfg.trusted {
+            cfg.project_root.as_ref().and_then(|path| path.to_str())
+        } else {
+            None
+        },
+    ))
+    .filter(|text| !text.is_empty())
+    {
+        system.push_str("\n\n");
+        system.push_str(&index);
+    }
     let mut tool_defs = Vec::new();
+    if crate::agent_memory::is_enabled() {
+        let snapshot = crate::agent_memory::snapshot_prompt();
+        if !snapshot.is_empty() {
+            system.push_str(&snapshot);
+        }
+        if cfg.kind == AgentKind::Parent && cfg.spawn_depth == 0 {
+            if let Value::Array(memory_tools) = memory_tool_definitions() {
+                tool_defs.extend(memory_tools);
+            }
+        }
+    }
+    if cfg.kind == AgentKind::Parent && cfg.spawn_depth == 0 && cfg.allow_schedule_task {
+        tool_defs.push(json!({
+            "type": "function",
+            "function": {
+                "name": "schedule_task",
+                "description": "Create, list, update, pause, or delete app-resident scheduled tasks. Actions: create, list, update, set_enabled, delete. Frequencies: daily, weekly, weekdays, once, hourly, interval (interval_minutes >= 15). Optional skill_ids: [{id, tree_hash}]. Disabled during scheduled runs.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string" },
+                        "id": { "type": "string" },
+                        "title": { "type": "string" },
+                        "prompt": { "type": "string" },
+                        "frequency": { "type": "string" },
+                        "time": { "type": "string" },
+                        "weekdays": { "type": "array", "items": { "type": "integer" } },
+                        "interval_minutes": { "type": "integer" },
+                        "enabled": { "type": "boolean" },
+                        "model_id": { "type": "string" },
+                        "effort": { "type": "string" },
+                        "project_id": { "type": "string" },
+                        "skill_ids": { "type": "array" }
+                    },
+                    "required": ["action"]
+                }
+            }
+        }));
+    }
+    if cfg.kind == AgentKind::Parent && cfg.spawn_depth == 0 && cfg.allow_skill_save {
+        tool_defs.push(json!({
+            "type": "function",
+            "function": {
+                "name": "skill_save",
+                "description": "Create or update a Host-owned user or project Skill. Actions: create, update. Update requires skill_id and expected_tree_hash. Cannot overwrite plugin or external Skills. Requires permission; disabled during scheduled runs.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string" },
+                        "name": { "type": "string" },
+                        "description": { "type": "string" },
+                        "skill_md": { "type": "string" },
+                        "references": { "type": "array" },
+                        "scope": { "type": "string" },
+                        "skill_id": { "type": "string" },
+                        "expected_tree_hash": { "type": "string" }
+                    },
+                    "required": ["action"]
+                }
+            }
+        }));
+    }
+    if let Value::Array(skills) = skill_tool_definitions() {
+        tool_defs.extend(skills);
+    }
     if host_tools_enabled {
         if let Value::Array(host) = tool_definitions_for(cfg.kind, cfg.spawn_depth) {
             tool_defs.extend(host);
@@ -2065,6 +2338,8 @@ where
 
     let mut last_tool_fingerprint = String::new();
     let mut identical_tool_streak: u32 = 0;
+    let mut last_usage: Option<CompletionUsage> = None;
+    let mut model_calls: u32 = 0;
 
     for round in 0..cfg.max_tool_rounds.max(1) {
         if cfg.stop.load(Ordering::SeqCst) {
@@ -2082,18 +2357,33 @@ where
                 cfg.reasoning_effort.as_deref(),
                 &cfg.stop,
                 &mut emit,
+                true,
             ) => outcome,
         };
         match outcome {
-            Ok(ChatOutcome::Text) => {
+            Ok((ChatOutcome::Text, usage)) => {
+                model_calls = model_calls.saturating_add(1);
+                if let Some(usage) = usage {
+                    last_usage = Some(usage);
+                }
                 if !cfg.stop.load(Ordering::SeqCst) {
+                    emit_last_usage(
+                        &mut emit,
+                        &cfg.endpoint.model,
+                        model_calls,
+                        last_usage.as_ref(),
+                    );
                     emit(AcpEvent::PromptComplete {
                         stop_reason: "end_turn".into(),
                     });
                 }
                 return;
             }
-            Ok(ChatOutcome::ToolCalls(calls)) => {
+            Ok((ChatOutcome::ToolCalls(calls), usage)) => {
+                model_calls = model_calls.saturating_add(1);
+                if let Some(usage) = usage {
+                    last_usage = Some(usage);
+                }
                 if calls.is_empty() {
                     emit(AcpEvent::PromptComplete {
                         stop_reason: "end_turn".into(),
@@ -2197,6 +2487,11 @@ where
                                     format!("Run {command}")
                                 }
                             }),
+                        "list_skills" => "List Skills".into(),
+                        "view_skill" => "View Skill".into(),
+                        "memory" => "Memory".into(),
+                        "schedule_task" => "Schedule".into(),
+                        "skill_save" => "Save Skill".into(),
                         other if crate::permission::is_connector_tool(other) => {
                             format!("Connector {other}")
                         }
@@ -2210,6 +2505,8 @@ where
                         "ask_user_question" => "ask",
                         "write_file" | "search_replace" => "edit",
                         "run_command" => "execute",
+                        "list_skills" | "view_skill" | "memory" => "read",
+                        "skill_save" => "edit",
                         other if crate::permission::is_connector_write_tool(other) => "execute",
                         other if crate::permission::is_connector_tool(other) => "fetch",
                         other => other,
@@ -2344,6 +2641,58 @@ enum ChatOutcome {
     ToolCalls(Vec<PendingToolCall>),
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CompletionUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cached_read_tokens: u64,
+    pub reasoning_tokens: u64,
+}
+
+fn emit_last_usage<F>(
+    emit: &mut F,
+    model_id: &str,
+    model_calls: u32,
+    usage: Option<&CompletionUsage>,
+) where
+    F: FnMut(AcpEvent) + Send,
+{
+    let Some(usage) = usage else {
+        return;
+    };
+    emit(AcpEvent::Usage {
+        input_tokens: usage.input_tokens,
+        output_tokens: usage.output_tokens,
+        cached_read_tokens: usage.cached_read_tokens,
+        reasoning_tokens: usage.reasoning_tokens,
+        model_calls,
+        model_id: Some(model_id.to_string()),
+    });
+}
+
+fn json_u64_field(value: &Value, camel: &str, snake: &str) -> u64 {
+    value
+        .get(camel)
+        .or_else(|| value.get(snake))
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+}
+
+fn parse_completion_usage(parsed: &Value) -> Option<CompletionUsage> {
+    let usage = parsed.get("usage")?;
+    let input_tokens = json_u64_field(usage, "promptTokens", "prompt_tokens");
+    let output_tokens = json_u64_field(usage, "completionTokens", "completion_tokens");
+    if input_tokens == 0 && output_tokens == 0 {
+        return None;
+    }
+    Some(CompletionUsage {
+        input_tokens,
+        output_tokens,
+        cached_read_tokens: json_u64_field(usage, "cachedPromptTokens", "cached_prompt_tokens"),
+        reasoning_tokens: json_u64_field(usage, "reasoningTokens", "reasoning_tokens"),
+    })
+}
+
 fn chat_completion_body(
     model: &str,
     messages: &[Value],
@@ -2354,6 +2703,7 @@ fn chat_completion_body(
         "model": model,
         "messages": messages,
         "stream": true,
+        "stream_options": { "include_usage": true },
     });
     if let Some(tools) = tools {
         body["tools"] = tools.clone();
@@ -2370,6 +2720,34 @@ fn chat_completion_body(
     body
 }
 
+pub async fn complete_text(
+    client: &reqwest::Client,
+    endpoint: &LlmEndpoint,
+    messages: &[Value],
+    stop: &AtomicBool,
+) -> Result<String, AgentError> {
+    let mut collected = String::new();
+    let mut emit = |event: AcpEvent| {
+        if let AcpEvent::Stream {
+            text, done: false, ..
+        } = event
+        {
+            collected.push_str(&text);
+        }
+    };
+    let _ = stream_chat_completion(
+        client, endpoint, messages, None, None, stop, &mut emit, true,
+    )
+    .await?;
+    if stop.load(Ordering::SeqCst) {
+        return Err(AgentError::new(
+            AgentErrorCode::AgentCrashed,
+            "compact cancelled",
+        ));
+    }
+    Ok(collected)
+}
+
 async fn stream_chat_completion<F>(
     client: &reqwest::Client,
     endpoint: &LlmEndpoint,
@@ -2378,7 +2756,8 @@ async fn stream_chat_completion<F>(
     reasoning_effort: Option<&str>,
     stop: &AtomicBool,
     emit: &mut F,
-) -> Result<ChatOutcome, AgentError>
+    emit_text: bool,
+) -> Result<(ChatOutcome, Option<CompletionUsage>), AgentError>
 where
     F: FnMut(AcpEvent) + Send,
 {
@@ -2423,9 +2802,10 @@ where
     let mut pending = String::new();
     let mut tool_calls: BTreeMap<u32, PendingToolCall> = BTreeMap::new();
     let mut saw_text = false;
+    let mut usage = None;
     while let Some(chunk) = stream.next().await {
         if stop.load(Ordering::SeqCst) {
-            return Ok(ChatOutcome::Text);
+            return Ok((ChatOutcome::Text, usage));
         }
         let chunk = chunk.map_err(|error| {
             AgentError::new(
@@ -2449,36 +2829,35 @@ where
                 let parsed: Value = serde_json::from_str(data).map_err(|_| {
                     AgentError::new(AgentErrorCode::NetworkProvider, "chat stream is not JSON")
                 })?;
+                if let Some(next_usage) = parse_completion_usage(&parsed) {
+                    usage = Some(next_usage);
+                }
                 let choice = parsed.pointer("/choices/0").cloned().unwrap_or(Value::Null);
                 let delta = choice.get("delta").cloned().unwrap_or(Value::Null);
                 if let Some(text) = delta.get("content").and_then(Value::as_str) {
                     if !text.is_empty() {
                         saw_text = true;
-                        emit(AcpEvent::Stream {
-                            kind: StreamKind::Assistant,
-                            text: text.to_string(),
-                            message_id: None,
-                            done: false,
-                        });
+                        if emit_text {
+                            emit(AcpEvent::Stream {
+                                kind: StreamKind::Assistant,
+                                text: text.to_string(),
+                                message_id: None,
+                                done: false,
+                            });
+                        }
                     }
                 }
                 apply_tool_delta(&mut tool_calls, &delta);
-                if let Some(reason) = choice
-                    .get("finish_reason")
-                    .and_then(Value::as_str)
-                    .filter(|value| !value.is_empty() && *value != "null")
-                {
-                    if reason == "tool_calls" {
-                        return Ok(ChatOutcome::ToolCalls(tool_calls.into_values().collect()));
-                    }
-                }
             }
         }
     }
     if !tool_calls.is_empty() {
-        return Ok(ChatOutcome::ToolCalls(tool_calls.into_values().collect()));
+        return Ok((
+            ChatOutcome::ToolCalls(tool_calls.into_values().collect()),
+            usage,
+        ));
     }
-    if saw_text {
+    if saw_text && emit_text {
         emit(AcpEvent::Stream {
             kind: StreamKind::Assistant,
             text: String::new(),
@@ -2486,7 +2865,7 @@ where
             done: true,
         });
     }
-    Ok(ChatOutcome::Text)
+    Ok((ChatOutcome::Text, usage))
 }
 
 #[cfg(test)]
@@ -2524,10 +2903,26 @@ mod tests {
         assert_eq!(loaded.body, "from agents");
         assert!(!loaded.truncated);
         assert!(load_project_instruction(Some(&root), false).is_none());
-        let prompt = system_prompt(Some(&root), true, Some(&loaded), AgentKind::Parent);
+        let prompt = system_prompt(
+            Some(&root),
+            true,
+            Some(&loaded),
+            AgentKind::Parent,
+            runtime_compat::SandboxProfileV1::Off,
+        );
         assert!(prompt.contains("from agents"));
         assert!(prompt.contains("cannot override permission policy"));
         assert!(prompt.contains("grep, list_directory, or read_file"));
+        assert!(prompt.contains("unsandboxed"));
+        let sandboxed = system_prompt(
+            Some(&root),
+            true,
+            Some(&loaded),
+            AgentKind::Parent,
+            runtime_compat::SandboxProfileV1::ReadOnly,
+        );
+        assert!(sandboxed.contains("read-only sandbox"));
+        assert!(!sandboxed.contains("unsandboxed"));
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -2583,6 +2978,27 @@ mod tests {
             out.push_str("\n\n");
         }
         out.push_str("data: [DONE]\n\n");
+        out
+    }
+
+    fn sse_text_with_usage(parts: &[&str], prompt_tokens: u64, completion_tokens: u64) -> String {
+        let mut out = sse_text(parts);
+        let usage = json!({
+            "id": "chatcmpl-test",
+            "object": "chat.completion.chunk",
+            "choices": [],
+            "usage": {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "cached_prompt_tokens": 4,
+                "reasoning_tokens": 1
+            }
+        });
+        // Insert the usage chunk before [DONE].
+        out = out.replace(
+            "data: [DONE]\n\n",
+            &format!("data: {usage}\n\ndata: [DONE]\n\n"),
+        );
         out
     }
 
@@ -2737,6 +3153,10 @@ mod tests {
             kind: AgentKind::Parent,
             spawn_depth: 0,
             subagents: SubagentHooks::default(),
+            sandbox_profile: runtime_compat::SandboxProfileV1::Off,
+            skill_prompt_chars: Arc::new(AtomicUsize::new(0)),
+            allow_schedule_task: true,
+            allow_skill_save: true,
         }
     }
 
@@ -2791,6 +3211,10 @@ mod tests {
         let messages = vec![json!({ "role": "user", "content": "hi" })];
         let supported = chat_completion_body("grok-4.5", &messages, None, Some("high"));
         assert_eq!(supported["reasoning_effort"], json!("high"));
+        assert_eq!(
+            supported["stream_options"],
+            json!({ "include_usage": true })
+        );
         let custom = chat_completion_body("claude-opus-4-6", &messages, None, Some("high"));
         assert!(custom.get("reasoning_effort").is_none());
     }
@@ -2806,6 +3230,9 @@ mod tests {
         assert!(listed.contains("run_command"));
         assert!(listed.contains("spawn_agent"));
         assert!(listed.contains("ask_user_question"));
+        let skills = skill_tool_definitions().to_string();
+        assert!(skills.contains("list_skills"));
+        assert!(skills.contains("view_skill"));
         let explore = tool_definitions_for(AgentKind::Explore, 0).to_string();
         assert!(explore.contains("grep"));
         assert!(!explore.contains("write_file"));
@@ -2844,6 +3271,27 @@ mod tests {
                 assert!(text.contains("报名"), "{text}");
             }
             HostToolDispatch::Cancelled => panic!("expected answers"),
+        }
+    }
+
+    #[tokio::test]
+    async fn skill_save_is_disabled_during_scheduled_runs() {
+        let mut cfg = base_cfg("http://127.0.0.1/v1".into(), None, false, "hi");
+        cfg.allow_skill_save = false;
+        let output = dispatch_host_tool(
+            &cfg,
+            "skill_save",
+            &json!({ "action": "create", "name": "X" }),
+            "skill-1",
+            None,
+            None,
+        )
+        .await;
+        match output {
+            HostToolDispatch::Output(text) => {
+                assert!(text.contains("disabled during scheduled runs"), "{text}");
+            }
+            HostToolDispatch::Cancelled => panic!("expected disabled message"),
         }
     }
 
@@ -3087,6 +3535,8 @@ mod tests {
             &echo.command,
             &echo.cwd_canon,
             Arc::new(AtomicBool::new(false)),
+            runtime_compat::SandboxProfileV1::Off,
+            &root,
         )
         .await
         .unwrap()
@@ -3107,6 +3557,43 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    #[cfg(target_os = "macos")]
+    fn sandbox_project_root(label: &str) -> PathBuf {
+        let home = std::env::var("HOME").expect("HOME");
+        let path = PathBuf::from(home)
+            .join("Library/Caches/sunsetz-command-sandbox-tests")
+            .join(format!("agent-loop-{label}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn run_command_read_only_sandbox_blocks_project_write() {
+        let root = sandbox_project_root("run-ro");
+        let prepared =
+            prepare_run_command(&root, &json!({"command":"printf blocked > inside.txt"})).unwrap();
+        match execute_run_command(
+            &prepared.command,
+            &prepared.cwd_canon,
+            Arc::new(AtomicBool::new(false)),
+            runtime_compat::SandboxProfileV1::ReadOnly,
+            &root,
+        )
+        .await
+        .unwrap()
+        {
+            RunCommandOutcome::Output(text) => {
+                assert!(
+                    !root.join("inside.txt").exists(),
+                    "read_only wrote the project file: {text}"
+                );
+            }
+            RunCommandOutcome::Cancelled => panic!("read_only command cancelled"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[tokio::test]
     async fn run_command_timeout_kills_child() {
         let root = temp_root("run-timeout");
@@ -3122,6 +3609,8 @@ mod tests {
             &prepared.cwd_canon,
             Arc::new(AtomicBool::new(false)),
             Duration::from_millis(400),
+            runtime_compat::SandboxProfileV1::Off,
+            &root,
         )
         .await
         .unwrap_err();
@@ -3197,6 +3686,44 @@ mod tests {
             event,
             AcpEvent::PromptComplete { stop_reason } if stop_reason == "end_turn"
         )));
+    }
+
+    #[tokio::test]
+    async fn emits_last_inference_usage_from_stream() {
+        let (base, server) =
+            spawn_mock_llm(vec![sse_text_with_usage(&["Hello"], 34128, 641)]).await;
+        let events = collect_events(base_cfg(base, None, false, "hi")).await;
+        server.abort();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AcpEvent::Usage {
+                input_tokens: 34128,
+                output_tokens: 641,
+                cached_read_tokens: 4,
+                reasoning_tokens: 1,
+                model_calls: 1,
+                ..
+            }
+        )));
+    }
+
+    #[tokio::test]
+    async fn complete_text_collects_summary_without_tools() {
+        let (base, server) = spawn_mock_llm(vec![sse_text(&["Auth is in ", "session.ts."])]).await;
+        let text = complete_text(
+            &http_client().unwrap(),
+            &LlmEndpoint {
+                base_url: base,
+                api_key: "test-key".into(),
+                model: "grok-4.5".into(),
+            },
+            &[json!({ "role": "user", "content": "summarize" })],
+            &AtomicBool::new(false),
+        )
+        .await
+        .unwrap();
+        server.abort();
+        assert_eq!(text, "Auth is in session.ts.");
     }
 
     #[tokio::test]
@@ -3701,6 +4228,28 @@ mod tests {
             event,
             AcpEvent::ToolCall { kind, status, .. }
                 if kind == "execute" && status == "completed"
+        )));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn list_skills_turn_does_not_require_permission() {
+        let root = temp_root("list-skills");
+        let (tool, answer) = sse_tool_then("list_skills", r#"{}"#, &["listed"]);
+        let (base, server) = spawn_mock_llm(vec![tool, answer]).await;
+        let mut cfg = base_cfg(base, Some(root.clone()), true, "skills");
+        let hits = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        cfg.permission_gate = Some(counting_gate(
+            Arc::clone(&hits),
+            HostToolPermissionDecision::Allow,
+        ));
+        let events = collect_events(cfg).await;
+        server.abort();
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AcpEvent::ToolCall { kind, status, title, .. }
+                if kind == "read" && status == "completed" && title == "List Skills"
         )));
         let _ = std::fs::remove_dir_all(&root);
     }

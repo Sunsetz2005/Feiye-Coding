@@ -4,7 +4,7 @@
 
 `Tauri 工作台 → Host 会话层 → Sunsetz agent loop（默认）`
 
-默认不再 spawn `grok agent stdio`。Grok ACP 适配器保留在显式 legacy 开关后（`runtimeBackend=grok_acp` / `SUNSETZ_RUNTIME_BACKEND=grok_acp`），本切片不删除。Host 工具是可信项目根内的 `read_file`、`list_directory`、`grep`、`write_file`、`search_replace`、`run_command`，以及父会话的 `spawn_agent` / `agent_output` / `kill_agent`。`grep` 只读。子代理是同一进程内的 `run_turn`，深度上限 1，不 spawn grok、不创建 worktree。explore / plan 只有读工具；general 的写和命令走父会话同一条权限条。写入、替换和命令必须经过现有权限条（或明确自动放行策略）才执行；`AcceptEdits` 只自动放行根内 `write_file` / `search_replace`，不能自动放行 `run_command`。权限预览只有相对路径加字节数或替换次数，或精确命令加相对 cwd，不得带文件正文。相同工具加相同参数连续 3 次会被打断并把错误交回模型。逃出根目录、拒绝和 Stop 不得有副作用。`run_command` 本切片无沙箱，只靠信任根、权限闸、cwd 钉死和 60 秒超时。第三方项目只作为设计与契约研究材料；本轮没有复制 OpenWork `/ee` 或其他受限源码。
+默认不再 spawn `grok agent stdio`。Grok ACP 适配器保留在显式 legacy 开关后（`runtimeBackend=grok_acp` / `SUNSETZ_RUNTIME_BACKEND=grok_acp`），本切片不删除。Host 工具是可信项目根内的 `read_file`、`list_directory`、`grep`、`write_file`、`search_replace`、`run_command`，以及父会话的 `spawn_agent` / `agent_output` / `kill_agent`。`grep` 只读。子代理是同一进程内的 `run_turn`，深度上限 1，不 spawn grok、不创建 worktree。父回合只 join 本轮后台 child；后台结束后 Host 可开无用户气泡的 wake turn。explore / plan 只有读工具；general 的写和命令走父会话同一条权限条。写入、替换和命令必须经过现有权限条（或明确自动放行策略）才执行；`AcceptEdits` 只自动放行根内 `write_file` / `search_replace`，不能自动放行 `run_command`。权限预览只有相对路径加字节数或替换次数，或精确命令加相对 cwd，不得带文件正文。相同工具加相同参数连续 3 次会被打断并把错误交回模型。逃出根目录、拒绝和 Stop 不得有副作用。`run_command` 跟随 Host `sandboxProfile`：默认 `off`；Linux 用 bubblewrap，macOS 用 `sandbox-exec`，Windows 用 AppContainer + Job Object 包住该条命令；非支持平台在非 off 时 fail-closed，不会静默降级。权限闸仍然先于沙箱。第三方项目只作为设计与契约研究材料；本轮没有复制 OpenWork `/ee` 或其他受限源码。
 
 ## 交互生命周期
 
@@ -38,7 +38,7 @@
 - `runtime_capabilities_v1` 返回 Runtime/client/protocol 版本，以及 sandbox、memory、plugin catalog、hooks inventory、MCP 的真实状态；不读取或返回 Secret。
 - `session://runtime_event_v1` 与旧 `session://*` 双发。`RuntimeEventEnvelopeV1` 含事件 ID、单会话 sequence、session/agent/process/turn/tool 标识和有界去敏 payload。
 - 未识别通知进入 `unknown` envelope；未识别的带 ID 请求仍返回 JSON-RPC method-not-found，不能静默吞掉。
-- Sandbox profile 是进程复用键的一部分，修改会回收不匹配 Runtime。默认 `off`；Linux 通过 bubblewrap 实际执行 `workspace_write` / `read_only`。macOS 与 Windows 当前无受支持适配器，请求非 `off` 时 fail-closed，UI 分开显示 requested、applied、verified。
+- Sandbox profile 默认 `off`。内建内核把它应用到每条 `run_command`（Linux bubblewrap，macOS sandbox-exec，Windows AppContainer）；改设置不必重启 grok 进程。旧版 ACP 适配器仍把 profile 当作 spawn 键，且仅 Linux 可隔离整个 Runtime 进程。macOS/Linux/Windows 非 off 会在命令上实际应用。UI 分开显示 requested、applied、verified。项目若位于 `/tmp` 或 `/var/folders`，read_only 无法挡住临时目录写入。Windows AppContainer 保证写隔离与 Job 生命周期，不是把整个文件系统藏起来。
 - `HostCapabilities v2` 已纠正已实现的 session/project preview、git summary、resource review 和 app-resident background scheduler 状态。
 
 ## 后续能力的当前实现
@@ -55,7 +55,7 @@ JSON journal 仍是事实源。`session-search.v1.sqlite3` 是可删除、可重
 
 只有完成且实际使用工具的任务才可能生成 Host-owned pending candidate。候选记录来源 session/message、来源内容哈希、审阅内容哈希、所有权和有界去敏审计；用户审阅后才复用 `skill_draft_save` 的原子保存。V2 决策用 expected hash 拒绝陈旧窗口，编辑后的最终草稿另以 final hash 绑定。目标 Skill 的所有权检查、树 hash 和替换位于目标级事务边界内；候选状态提交失败必须回滚或由恢复记录重放。自动流程不能覆盖用户、插件或外部 Skill；覆盖冲突必须再次明确确认。
 
-Host 内核路径在用户显式选择 Skill 后，从库存已经信任的用户/项目/插件 Skill 目录读取有界 `SKILL.md`，按 tree hash 复核后写入该轮模型提示，不写入可见 journal。清单 DTO 仍不含正文或本地路径。默认内核不 spawn grok 二进制，也不把 GROK_HOME 当作产品内核；ACP legacy 路径仍可用 Runtime inspect。Ranking 只是 suggestion，必须用户接受才变成 `accepted_suggestion`。扩展页的 Skill learning 面板只展示本会话使用证据和改进建议，不能直接写 Skill。单轮最多 8 个 Skill、合计 16,000 字；哈希过期、符号链接、逃出可信目录或敏感材料 fail-closed。
+Host 内核路径在用户显式选择 Skill 后，从库存已经信任的用户/项目/插件 Skill 目录读取有界 `SKILL.md`，按 tree hash 复核后写入该轮模型提示，不写入可见 journal。内核还会把已启用 Skill 的有界索引写入 system 提示，并提供只读工具 `list_skills` / `view_skill`（可加载 `SKILL.md` 或该树内相对文件）。父会话另有 `skill_save`（create/update）：走现有原子目录保存和权限条，`AcceptEdits` 不自动放行，不能覆盖插件/外部 Skill，update 必须带 expected tree hash。定时回合禁用。自动学习提案的 `may_write_skill` 仍为 false。清单 DTO 仍不含正文或本地路径。默认内核不 spawn grok 二进制，也不把 GROK_HOME 当作产品内核；ACP legacy 路径仍可用 Runtime inspect。Ranking 只是 suggestion，必须用户接受才变成 `accepted_suggestion`。扩展页的 Skill learning 面板只展示本会话使用证据和改进建议，不能直接写 Skill。单轮最多 8 个 Skill、合计 16,000 字（芯片强制装载与 `view_skill` 共用）；哈希过期、符号链接、逃出可信目录或敏感材料 fail-closed。
 
 ### 项目说明文件
 
@@ -63,21 +63,31 @@ Host 内核路径在用户显式选择 Skill 后，从库存已经信任的用�
 
 默认内核单轮最多 16 次工具调用。
 
+### 进程内子代理 join 与 wake
+
+父会话 `spawn_agent` 深度 1。前台 spawn 在本轮工具结果里交回摘要。后台 spawn 立即返回 id：本轮 PromptComplete 只等 **本轮** 仍在排队/运行的后台 child，不 join 上一轮残留 child。Stop 与输入器 Steer（先停本轮再发队首）只取消本轮 child。后台 child 结束后关掉 spawn 工具终态；若父模型循环已停且不是 Stop/Steer，Host 开一轮 **无用户气泡** 的父 `run_turn`，把有界英文摘要交给模型。父仍在 `run_turn` 时只更新卡片，不插话。Parked 会话保留 pending wake，下次真实发送再注入。mock 与 Grok ACP 不走这条。不新增 command。
+
+### 内建上下文压缩
+
+默认 `agent_loop` 拥有压缩。`/compact [note]` 不是普通用户问题：Host 用同模型、无工具的一轮请求摘要 cutoff 之前的 user/assistant 正文，最近 6 条原文保留。产物写在会话目录 `context-compact.v1.json`，可见 `messages.json` 不删气泡。成功后发已有 `AcpEvent::ContextCompact`，中栏横幅与圆环沿用现入口。自动压缩：上次占用 ≥ 已知窗口的 85%，或未压缩历史会撞上 24 条 / 32,768 字硬顶。自动失败不得阻断用户回合，回退硬截断（保留最新）。子代理、mock、Grok ACP 不走这条。Sunsetz 多轮工具的占用是最后一次 completion 的 prompt+completion，不再去读 grok `unified.jsonl`。未知模型的窗口仍为 `null`，圆环不编造分母。分叉会话若仍含 cutoff 消息则 remap sidecar，否则丢弃。
+
 ### 有界 Memory 候选
 
 `memory-candidates.v1.json` 是独立的待审事实源，只接受 `user_preference | project_fact | workflow_hint`，状态为 `pending | approved | rejected | superseded`。创建必须引用 Host 已持久化的真实 user 消息；内容限制为 2,000 字符、总量限制为 256 条，并在写入前拒绝 API key、token、私钥、带密码数据库 URL 和 JWT 等敏感材料。批准、拒绝、替代和删除都使用内容 hash CAS。
 
-批准只表示用户确认了候选；不会自动注入 Runtime prompt、工具上下文或 FTS，会话检索也不会被称作长期记忆。用户可显式选择已批准且 hash 未变化的候选，通过 `memory_context_pack_build_v1` 构建确定性只读 JSON：最多 8 条、单条 1,000 字、总计 4,000 字。Host 在锁定快照内重新校验 approved、CAS、来源、所有权和敏感材料。选用后输入器显示 `MemoryContextBadge`；`session_send_v2` 把有界 `prompt_fragment` 写入该轮 Sunsetz 内核提示，journal 只留 `memory_injection` marker。注入账本状态为 prepared / dispatching / applied / failed / removed，可反馈或删除。Composer recovery 只存候选 id 与 hash，恢复时重新构建 pack。
+批准只表示用户确认了候选；显式 pack 不会自动注入 Runtime prompt、工具上下文或 FTS，会话检索也不会被称作长期记忆。用户可显式选择已批准且 hash 未变化的候选，通过 `memory_context_pack_build_v1` 构建确定性只读 JSON：最多 8 条、单条 1,000 字、总计 4,000 字。Host 在锁定快照内重新校验 approved、CAS、来源、所有权和敏感材料。选用后输入器显示 `MemoryContextBadge`；`session_send_v2` 把有界 `prompt_fragment` 写入该轮 Sunsetz 内核提示，journal 只留 `memory_injection` marker。注入账本状态为 prepared / dispatching / applied / failed / removed，可反馈或删除。Composer recovery 只存候选 id 与 hash，恢复时重新构建 pack。
+
+另有独立契约 `agent-memory.v1.json`：有界 notes（2,200 字）和 user profile（1,375 字）。默认开启时，Sunsetz 内核每轮把当前快照写入 system 提示，父会话可用 `memory` 工具 add/replace/remove/list，不经权限条。满额返回错误而不是丢条目；密钥与控制字符 fail-closed。可见 journal 不存正文。设置 → Memory 可开关、查看和清空。这不是 FTS，也不能替代已审阅候选。
 
 ### 自动化
 
-Rust Host 每 30 秒通过可独立调用的 `tick_once` 检查到期任务，并在 `automation-runs.v1.json` 中原子认领、设置 10 分钟 lease、记录 claimed/succeeded/failed/interrupted/skipped。每个任务显式保存 `run_once | skip` missed-run policy。WebView 只负责为认领项创建会话并绑定 `claimId → sessionId`；真实 ACP turn 完成后由 Host 结账。重载后的已绑定 claim 不会重复发送。
+Rust Host 每 30 秒通过可独立调用的 `tick_once` 检查到期任务，并在 `automation-runs.v1.json` 中原子认领、设置 10 分钟 lease、记录 claimed/succeeded/failed/interrupted/skipped。每个任务显式保存 `run_once | skip` missed-run policy。默认内核认领后由 Host 在后台创建会话并发送，不抢 live 焦点；仍 emit `automation://claim_v1`（已绑定 `sessionId`）给 WebView 刷新列表。legacy ACP 仍走 WebView 点火。真实 ACP/内核 turn 完成后由 Host 结账。重载后的已绑定 claim 不会重复发送。
 
 绑定会话产生真实 Runtime 进度事件时，Host 使用单会话严格递增 sequence 作为 heartbeat 证据，同一 session 最多每 30 秒原子记录一次，并把 lease 重设为 Host 当前时间后 10 分钟。只有 stream、tool call、plan、ask-user、permission、retry、compact 和 usage 算进度；错误、stderr、process exit 与 unknown event 不续租。普通会话没有绑定 claim 时不写账本，新字段均可选，旧 JSON 无需迁移。
 
 Heartbeat 只能证明近期有 Runtime 进度，不能证明过期 Runtime 已终止。第一次进度 heartbeat 会把 claim 钉到 `session_id + process_id`；`process_exited` 才能写入终止证明。无证明的 lease 过期仍只标记 interrupted。有证明且 `missedRunPolicy=run_once` 时，Host 用 CAS 生成恰好一条 replacement claim；`skip` 仍不补跑。已被替换的原 claim 拒绝晚到 completion，避免双跑副作用。应用关闭后的系统服务仍是独立里程碑。
 
-该调度器只在应用进程存活时运行。应用关闭后的系统服务、launchd、Task Scheduler 或 headless 常驻仍是独立里程碑。
+父会话可用 `schedule_task` 创建/列出/更新/停用/删除同一套 automations 账本；频率增加 `hourly` 与 `interval`（最少 15 分钟）。任务可附带 Skill id+tree hash，触发前重新校验，失败记 `blocked_config` 且不调用模型。定时回合禁用 `schedule_task` 和 `skill_save`，避免套娃调度或无人值守改 Skill。默认内核触发后由 Host 点火。设置 → Runtime 的「退出后继续跑已安排任务」默认关闭；打开后注册登录启动和约 5 分钟间隔，用 `--background` 拉起（无 KeepAlive）。`backgroundScheduler` 仍表示进程内 30 秒调度；`persistentScheduler` 表示 OS 注册。
 
 ### 跨 Agent 共享
 
@@ -86,13 +96,13 @@ Heartbeat 只能证明近期有 Runtime 进度，不能证明过期 Runtime 已�
 ## 已知技术债与发布门禁
 
 1. Windows 物理机仍需验证文件 replace、WebView CSP/resource protocol、loopback ACP、沙箱 fail-closed、200% 缩放与完整键盘路径；没有实机证据不得宣称本阶段发布完成。
-2. macOS/Windows Runtime 子进程沙箱适配器尚未实现；默认 `off` 不等于已隔离。
-3. 交互式 HTML 容器、应用退出后的系统级自动化、稳定机器可读插件安装/卸载仍未实现。
+2. 内建内核命令沙箱已在 Linux（bubblewrap）、macOS（sandbox-exec）和 Windows（AppContainer）落地。Darwin 集成测试覆盖 workspace_write / read_only；Windows 隔离测试在 Windows CI 跑。默认 `off` 不等于已隔离。旧版 ACP 进程沙箱仍仅 Linux。
+3. 交互式 HTML 容器、稳定机器可读插件安装/卸载仍未实现。系统常驻调度需用户打开设置开关；未做完整登录周期手测。
 4. `media://` 是受 provenance 校验的兼容通道；全部调用方迁移到 ResourceHandle 后再删除。
 5. 旧 `session://*` 事件至少保留一个完整版本周期；移除必须单独立项并更新契约 golden。
 6. SQLite 索引可在崩溃后短暂落后，下一次搜索会按 journal 指纹重建并清理已删除会话；不得把索引当事实源或备份。
-7. Memory 对 Sunsetz 内核是显式、可见、可审计注入，不是自动长时记忆；未审阅的 FTS 证据不得进入 pack。信任项目的 `AGENTS.md` / `Sunsetz.md` / `.sunsetz/instructions.md` / `CLAUDE.md` 作为有界项目说明进入 system 提示，符号链接和超限失败则跳过。
-8. Automation 已有进程终止证明与 replacement CAS；无证明的过期 claim 仍不重试。系统级常驻调度仍需单独里程碑。
+7. 已审阅 Memory pack 仍是显式、可见、可审计注入。自动记忆是另一份 `agent-memory.v1` 契约，不得把 FTS 当长期记忆。信任项目的 `AGENTS.md` / `Sunsetz.md` / `.sunsetz/instructions.md` / `CLAUDE.md` 作为有界项目说明进入 system 提示，符号链接和超限失败则跳过。
+8. Automation 已有进程终止证明与 replacement CAS；无证明的过期 claim 仍不重试。系统常驻调度是可选设置，不是默认常驻服务。
 
 ## 验证入口
 

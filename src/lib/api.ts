@@ -645,6 +645,42 @@ export async function memoryCandidatesListV1() {
   return invoke<MemoryCandidateV1[]>("memory_candidates_list_v1");
 }
 
+export interface AgentMemoryEntryV1 {
+  id: string;
+  content: string;
+  updatedAt: string;
+}
+
+export interface AgentMemoryStoreV1 {
+  version: 1 | number;
+  enabled: boolean;
+  notes: AgentMemoryEntryV1[];
+  userProfile: AgentMemoryEntryV1[];
+}
+
+export interface AgentMemoryMutationV1 {
+  action: string;
+  target: string;
+  content?: string | null;
+  oldText?: string | null;
+}
+
+export async function agentMemoryGetV1() {
+  return invoke<AgentMemoryStoreV1>("agent_memory_get_v1");
+}
+
+export async function agentMemorySetEnabledV1(enabled: boolean) {
+  return invoke<AgentMemoryStoreV1>("agent_memory_set_enabled_v1", { enabled });
+}
+
+export async function agentMemoryMutateV1(request: AgentMemoryMutationV1) {
+  return invoke<AgentMemoryStoreV1>("agent_memory_mutate_v1", { request });
+}
+
+export async function agentMemoryClearV1() {
+  return invoke<AgentMemoryStoreV1>("agent_memory_clear_v1");
+}
+
 export async function memoryContextPackBuildV1(
   selections: MemoryCandidateMutationRequestV1[],
 ) {
@@ -1823,6 +1859,8 @@ export interface AppSettings {
   storeApiKeysInKeychain?: boolean;
   /** Product kernel: `sunsetz` (default) or legacy `grok_acp`. */
   runtimeBackend?: string;
+  /** Register login/interval OS job that starts Sunsetz with `--background`. */
+  runScheduledTasksInBackground?: boolean;
 }
 
 export interface AvailableModel {
@@ -2748,6 +2786,8 @@ export interface AutomationDto {
   updatedAt: string;
   lastRunAt?: string | null;
   nextRunAt?: string | null;
+  intervalMinutes?: number | null;
+  skillIds?: Array<{ id: string; treeHash: string }>;
 }
 
 export interface AutomationClaimV1 {
@@ -2772,6 +2812,8 @@ export interface AutomationInputDto {
   notify?: string;
   missedRunPolicy?: "skip" | "run_once";
   nextRunAt?: string | null;
+  intervalMinutes?: number | null;
+  skillIds?: Array<{ id: string; treeHash: string }>;
 }
 
 export async function automationsList(): Promise<AutomationDto[]> {

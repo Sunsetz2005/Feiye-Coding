@@ -759,12 +759,23 @@ mod tests {
             "write_file",
             "",
         ));
+        let skill = root.join("review-helper-skill");
+        assert!(!may_auto_allow(
+            PermissionPolicy::AcceptEdits,
+            &c,
+            &format!("skill_save:{}", skill.to_string_lossy()),
+            Some(&root),
+            &skill.to_string_lossy(),
+            "skill_save",
+            "",
+        ));
     }
 
     #[test]
     fn accept_edits_does_not_auto_allow_connector_writes() {
         let c = SessionAllowCache::default();
         assert!(!is_edit_tool("github_create_issue"));
+        assert!(!is_edit_tool("skill_save"));
         assert!(is_connector_tool("github_create_issue"));
         assert!(is_connector_write_tool("github_create_issue"));
         assert!(!may_auto_allow(

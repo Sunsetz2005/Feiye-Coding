@@ -138,7 +138,7 @@ function createProps(
       historyOpen: true,
       activeProjectId: "project-1",
       activeSessionId: "session-1",
-      busySessionId: null,
+      busySessionIds: new Set(),
       pendingAskSessionIds: new Set(),
       projects: [
         {
@@ -347,7 +347,7 @@ describe("SidebarNavigator", () => {
         {...createProps({
           tree: {
             ...base.tree,
-            busySessionId: "session-1",
+            busySessionIds: new Set(["session-1"]),
             projects: [
               {
                 ...base.tree.projects[0]!,
@@ -363,6 +363,34 @@ describe("SidebarNavigator", () => {
     expect(
       within(row).getByLabelText("Working"),
     ).toBeTruthy();
+  });
+
+  it("shows working spinners on two background sessions at once", () => {
+    const base = createProps();
+    const extra = {
+      id: "session-2",
+      title: "Nightly review",
+      updatedAt: "2026-07-27T08:31:00Z",
+      archived: false,
+      scheduled: true,
+    };
+    render(
+      <SidebarNavigator
+        {...createProps({
+          tree: {
+            ...base.tree,
+            busySessionIds: new Set(["session-1", "session-2"]),
+            projects: [
+              {
+                ...base.tree.projects[0]!,
+                sessions: [...base.tree.projects[0]!.sessions, extra],
+              },
+            ],
+          },
+        })}
+      />,
+    );
+    expect(screen.getAllByLabelText("Working")).toHaveLength(2);
   });
 
   it("uses a native current-page button for tasks", async () => {
@@ -597,7 +625,7 @@ describe("SidebarNavigator", () => {
       tree: {
         ...base.tree,
         activeSessionId: null,
-        busySessionId: "session-1",
+        busySessionIds: new Set(["session-1"]),
       },
     });
     rerender(<SidebarNavigator {...workingProps} />);
@@ -608,7 +636,7 @@ describe("SidebarNavigator", () => {
       tree: {
         ...base.tree,
         activeSessionId: null,
-        busySessionId: "session-1",
+        busySessionIds: new Set(["session-1"]),
         pendingAskSessionIds: new Set(["session-1"]),
       },
     });

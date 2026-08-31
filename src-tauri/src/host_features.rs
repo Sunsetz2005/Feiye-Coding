@@ -100,6 +100,11 @@ pub fn capabilities() -> HostCapabilities {
         "backgroundScheduler".to_string(),
         HostCapability::available("1"),
     );
+    capability_map.insert(
+        "persistentScheduler".to_string(),
+        persistent_scheduler_capability(),
+    );
+    capability_map.insert("commandSandbox".to_string(), command_sandbox_capability());
     HostCapabilities {
         version: 2,
         platform: if cfg!(target_os = "macos") {
@@ -118,6 +123,35 @@ pub fn capabilities() -> HostCapabilities {
         speech_recognition: false,
         skill_draft_save: true,
         capabilities: capability_map,
+    }
+}
+
+fn persistent_scheduler_capability() -> HostCapability {
+    match crate::persistent_scheduler::registration_state() {
+        Ok(true) => HostCapability::available("1"),
+        Ok(false) => HostCapability::unavailable(
+            "No persistent background scheduler is registered",
+        ),
+        Err(error) => HostCapability::unsupported_platform(&error),
+    }
+}
+
+fn command_sandbox_capability() -> HostCapability {
+    let status =
+        crate::command_sandbox::support(crate::runtime_compat::SandboxProfileV1::WorkspaceWrite);
+    match status.state.as_str() {
+        "applied" => HostCapability::available("1"),
+        "needs_install" => HostCapability {
+            state: CapabilityState::NeedsInstall,
+            reason: status.reason,
+            version: None,
+        },
+        _ => HostCapability::unsupported_platform(
+            status
+                .reason
+                .as_deref()
+                .unwrap_or("run_command sandbox is not supported on this platform"),
+        ),
     }
 }
 
@@ -228,6 +262,22 @@ mod tests {
             "available"
         );
         assert!(value["capabilities"]["backgroundScheduler"]["reason"].is_null());
+        assert!(value["capabilities"]["persistentScheduler"]["state"].is_string());
+    }
+
+    #[test]
+    fn command_sandbox_capability_matches_platform_adapter() {
+        let caps = capabilities();
+        let capability = caps.capabilities.get("commandSandbox").unwrap();
+        #[cfg(target_os = "macos")]
+        assert_eq!(capability.state, CapabilityState::Available);
+        #[cfg(target_os = "windows")]
+        assert_eq!(capability.state, CapabilityState::Available);
+        #[cfg(target_os = "linux")]
+        assert!(matches!(
+            capability.state,
+            CapabilityState::Available | CapabilityState::NeedsInstall
+        ));
     }
 
     #[test]

@@ -11,7 +11,7 @@
 - 账户。
 - 已归档会话。
 - 扩展。
-- Runtime（内建内核为主，CLI / ACP 仅旧版折叠区）。
+- Runtime（内建内核为主，CLI / ACP 仅旧版折叠区；可选退出后继续跑已安排任务）。
 - 关于。
 
 新增栏目必须同时具备真实页面、数据读取和必要的保存命令，才能进入注册表。语音、智能快照、浏览器、电脑控制、Hooks、Git、Environment、Worktree 和快捷键编辑等未完成能力不得作为占位入口出现。
@@ -29,7 +29,9 @@
 
 常规页在 Tauri 环境提供 `MemoryCandidatesPanel`。候选必须引用 Host 已持久化的 user 消息，类型只允许 user preference、project fact 或 workflow hint；创建只产生 pending，批准、拒绝、替代和删除均用内容 hash CAS。内容与总量有界并在写入前拒绝敏感材料。
 
-已批准候选可由用户逐条显式选择，通过 `memory_context_pack_build_v1` 生成只读 JSON 上下文包。Host 在同一锁定快照内重新校验 approved 状态、内容 hash、来源、所有权与敏感材料；每包最多 8 条、每条 1,000 字、总计 4,000 字。UI 显示来源并只提供预览和复制，不会自动写入 Runtime prompt、会话检索、工具上下文或任何 `session_send` 路径。
+已批准候选可由用户逐条显式选择，通过 `memory_context_pack_build_v1` 生成只读 JSON 上下文包。Host 在同一锁定快照内重新校验 approved 状态、内容 hash、来源、所有权与敏感材料；每包最多 8 条、每条 1,000 字、总计 4,000 字。UI 显示来源并只提供预览和复制；这条路径不会自动写入 Runtime prompt。
+
+同一栏目另有「自动记忆」卡片：开关 `agent-memory.v1.json`、查看 notes / user profile、删除条目或清空。这是 Sunsetz 内核的有界自动注入，与已审阅候选和 FTS 分开。
 
 ## 视觉与交互
 

@@ -28,6 +28,10 @@ const apiMocks = vi.hoisted(() => ({
   injectionsList: vi.fn(),
   injectionFeedback: vi.fn(),
   injectionRemove: vi.fn(),
+  agentMemoryGet: vi.fn(),
+  agentMemorySetEnabled: vi.fn(),
+  agentMemoryMutate: vi.fn(),
+  agentMemoryClear: vi.fn(),
 }));
 
 vi.mock("@/lib/api", async (importOriginal) => {
@@ -49,6 +53,10 @@ vi.mock("@/lib/api", async (importOriginal) => {
     memoryInjectionsListV1: apiMocks.injectionsList,
     memoryInjectionFeedbackV1: apiMocks.injectionFeedback,
     memoryInjectionRemoveV1: apiMocks.injectionRemove,
+    agentMemoryGetV1: apiMocks.agentMemoryGet,
+    agentMemorySetEnabledV1: apiMocks.agentMemorySetEnabled,
+    agentMemoryMutateV1: apiMocks.agentMemoryMutate,
+    agentMemoryClearV1: apiMocks.agentMemoryClear,
   };
 });
 
@@ -143,6 +151,30 @@ beforeEach(() => {
     skipped: [],
     sessionSearchIndexMutated: false,
     sessionSearchIndexIsRebuildableCache: true,
+  });
+  apiMocks.agentMemoryGet.mockResolvedValue({
+    version: 1,
+    enabled: true,
+    notes: [],
+    userProfile: [],
+  });
+  apiMocks.agentMemorySetEnabled.mockImplementation(async (enabled: boolean) => ({
+    version: 1,
+    enabled,
+    notes: [],
+    userProfile: [],
+  }));
+  apiMocks.agentMemoryMutate.mockResolvedValue({
+    version: 1,
+    enabled: true,
+    notes: [],
+    userProfile: [],
+  });
+  apiMocks.agentMemoryClear.mockResolvedValue({
+    version: 1,
+    enabled: true,
+    notes: [],
+    userProfile: [],
   });
   apiMocks.injectionsList.mockResolvedValue([]);
   apiMocks.injectionFeedback.mockImplementation(
@@ -725,5 +757,32 @@ describe("MemoryCandidatesPanel", () => {
     await waitFor(() =>
       expect(within(audit).getAllByRole("listitem")).toHaveLength(128),
     );
+  });
+
+  it("toggles auto memory without touching reviewed candidates", async () => {
+    const user = userEvent.setup();
+    apiMocks.agentMemoryGet.mockResolvedValue({
+      version: 1,
+      enabled: true,
+      notes: [
+        {
+          id: "n1",
+          content: "Uses pnpm.",
+          updatedAt: "2026-08-30T00:00:00Z",
+        },
+      ],
+      userProfile: [],
+    });
+    render(<MemoryCandidatesPanel locale="en" source={source} />);
+    const checkbox = await screen.findByRole("checkbox", {
+      name: /Enable auto memory/i,
+    });
+    expect((checkbox as HTMLInputElement).checked).toBe(true);
+    expect(screen.getByText("Uses pnpm.")).toBeTruthy();
+    await user.click(checkbox);
+    await waitFor(() =>
+      expect(apiMocks.agentMemorySetEnabled).toHaveBeenCalledWith(false),
+    );
+    expect(apiMocks.list).toHaveBeenCalled();
   });
 });

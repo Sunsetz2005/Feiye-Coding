@@ -891,6 +891,8 @@ export default function App() {
   const [streamStallSeconds, setStreamStallSeconds] = useState(120);
   const [sandboxProfile, setSandboxProfile] =
     useState<api.SandboxProfileV1>("off");
+  const [runScheduledTasksInBackground, setRunScheduledTasksInBackground] =
+    useState(false);
   const [storeApiKeysInKeychain, setStoreApiKeysInKeychain] = useState(false);
   const [gitWorktrees, setGitWorktrees] = useState<api.GitWorktreeEntry[]>([]);
   /** null = unknown/loading; true = git work tree; false = not a git repo. */
@@ -1137,6 +1139,7 @@ export default function App() {
           : 120,
       );
       setSandboxProfile(normalizeSandboxProfile(settings.sandboxProfile));
+      setRunScheduledTasksInBackground(!!settings.runScheduledTasksInBackground);
       setStoreApiKeysInKeychain(!!settings.storeApiKeysInKeychain);
       setCliInfo({
         found: cli.found,
@@ -2601,10 +2604,13 @@ export default function App() {
   }, [sessions, projects, tr]);
 
   /** Session id currently running on the Host (for sidebar spinner). */
-  const busySessionId =
-    liveHost.sessionId && isSessionBusy(liveHost.state)
-      ? liveHost.sessionId
-      : null;
+  const busySessionIds = useMemo(() => {
+    const ids = new Set(liveHost.busySessionIds ?? []);
+    if (liveHost.sessionId && isSessionBusy(liveHost.state)) {
+      ids.add(liveHost.sessionId);
+    }
+    return ids;
+  }, [liveHost.busySessionIds, liveHost.sessionId, liveHost.state]);
 
   const refreshSessions = async () => {
     try {
@@ -2867,6 +2873,7 @@ export default function App() {
         // scheduled prompt a second time.
         if (intake === "bound") {
           handledAutomationClaimIds.current.add(claim.claimId);
+          void refreshSessions();
           return;
         }
         setPendingAutomationClaim((current) => current ?? claim);
@@ -7128,6 +7135,9 @@ export default function App() {
       if (keys.has("sandboxProfile")) {
         setSandboxProfile(normalizeSandboxProfile(stored.sandboxProfile));
       }
+      if (keys.has("runScheduledTasksInBackground")) {
+        setRunScheduledTasksInBackground(!!stored.runScheduledTasksInBackground);
+      }
     },
     [],
   );
@@ -7571,6 +7581,11 @@ export default function App() {
             setSandboxProfile(v);
             void patchSettingsSafely({ sandboxProfile: v });
           }}
+          runScheduledTasksInBackground={runScheduledTasksInBackground}
+          onRunScheduledTasksInBackground={(v) => {
+            setRunScheduledTasksInBackground(v);
+            void patchSettingsSafely({ runScheduledTasksInBackground: v });
+          }}
           onProviderActivated={() => {
             // Hot-reload Sunsetz Runtime: drop live ACP so next send re-spawns with new GROK_HOME config.
             void (async () => {
@@ -7698,7 +7713,7 @@ export default function App() {
             historyOpen,
             activeProjectId: activeProject?.id ?? null,
             activeSessionId: session.sessionId,
-            busySessionId,
+            busySessionIds,
             pendingAskSessionIds,
             projects: sidebarProjects,
             orphanSessions: sidebarOrphanSessions,

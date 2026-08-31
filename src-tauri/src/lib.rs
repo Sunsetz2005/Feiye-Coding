@@ -8,10 +8,12 @@ mod acp_client;
 #[cfg(test)]
 mod acp_golden_test;
 mod agent_loop;
+mod agent_memory;
 mod agent_prefs;
 mod cli_install;
 mod cli_probe;
 mod cli_sessions;
+mod command_sandbox;
 mod commands;
 mod connectors;
 mod context_usage;
@@ -30,6 +32,7 @@ mod paths;
 mod permission;
 #[cfg(test)]
 mod permission_host_test;
+mod persistent_scheduler;
 mod process_limits;
 mod process_util;
 mod providers;
@@ -54,6 +57,7 @@ mod turn_complete;
 mod automation_scheduler;
 mod capability_exchange;
 mod composer_recovery;
+mod context_compact;
 mod ecosystem_packages;
 mod interactions;
 mod memory_candidates;
@@ -115,6 +119,7 @@ fn constrain_windows_window_to_work_area(window: &tauri::WebviewWindow) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let start_in_background = std::env::args().any(|arg| arg == "--background");
     let _ = paths::ensure_app_dirs();
 
     tracing_subscriber::fmt()
@@ -139,8 +144,11 @@ pub fn run() {
 
     tauri::Builder::default()
         // Must be registered first so a second process exits and focuses the primary window.
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             use tauri::Manager;
+            if argv.iter().any(|arg| arg == "--background") {
+                return;
+            }
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.unminimize();
                 let _ = window.show();
@@ -178,7 +186,7 @@ pub fn run() {
                 tray::hide_to_tray(window.app_handle());
             }
         })
-        .setup(|app| {
+        .setup(move |app| {
             use tauri::Manager;
             if let Some(window) = app.get_webview_window("main") {
                 #[cfg(target_os = "macos")]
@@ -201,6 +209,9 @@ pub fn run() {
                     let _ =
                         window.set_background_color(Some(tauri::window::Color(13, 13, 13, 255)));
                 }
+                if start_in_background {
+                    let _ = window.hide();
+                }
             }
             // Menu-bar / system tray — logo.svg tray icon (not dock app icon)
             if let Err(e) = tray::setup_tray(app.handle()) {
@@ -213,8 +224,8 @@ pub fn run() {
                 let mgr = app.state::<Arc<SessionManager>>().inner().clone();
                 mgr.start_idle_watchdog(app.handle().clone());
                 mgr.start_stream_stall_watchdog(app.handle().clone());
+                automation_scheduler::start(app.handle().clone(), mgr);
             }
-            automation_scheduler::start(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -254,6 +265,10 @@ pub fn run() {
             commands::skill_candidate_reject_v2,
             commands::skill_candidate_cancel_v2,
             commands::memory_candidates_list_v1,
+            commands::agent_memory_get_v1,
+            commands::agent_memory_set_enabled_v1,
+            commands::agent_memory_mutate_v1,
+            commands::agent_memory_clear_v1,
             commands::memory_recall_preview_v1,
             commands::memory_context_pack_build_v1,
             commands::memory_injections_list_v1,

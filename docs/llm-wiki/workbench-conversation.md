@@ -29,15 +29,15 @@
 - `src/components/ContextUsageChip.tsx`
 - `src/components/FloatingSurfaceProvider.tsx`
 
-`SidebarNavigator` 拥有侧栏渲染、项目/任务选择、当前项语义、虚拟任务行、悬停预览和账户入口；数据加载、菜单动作与 Host 协调仍由 `App.tsx` 提供。单个项目不再使用独立披露箭头：点击项目行选中并切换其会话列表；整个「项目」栏的折叠箭头只在该栏悬停或聚焦时出现。任务预览停留 450ms 后调用 `session_preview`，以 30 秒短缓存合并同一 session 的并发请求，并丢弃移出、滚动、折叠、菜单打开或虚拟行卸载后的过期响应。键盘聚焦跳过停留延迟。会话预览仍只读、不夺取焦点。项目预览可移入并包含「编辑项目」；卡片贴在项目栏右缘外侧，不得挡住行内 ⋯ / 新对话。编辑对话框可改名称和源文件夹（`project_rename` / `project_set_path`）。从应用移除项目会删除该项目下的对话，磁盘文件夹保留。Host 只返回最近 `user` 与 `assistant` 的可见正文摘要；思考、附件、工具输出和完整 journal 不进入 DTO。项目预览使用已加载的项目与 session 元数据，Git 摘要完成惰性能力前不显示。侧栏「整理」偏好（按项目 / 平铺列表，最近更新 / 优先级）写入 `sunsetz.layout`。
+`SidebarNavigator` 拥有侧栏渲染、项目/任务选择、当前项语义、虚拟任务行、悬停预览和账户入口；数据加载、菜单动作与 Host 协调仍由 `App.tsx` 提供。单个项目不再使用独立披露箭头：点击项目行选中并切换其会话列表；整个「项目」栏的折叠箭头只在该栏悬停或聚焦时出现。任务预览停留 450ms 后调用 `session_preview`，以 30 秒短缓存合并同一 session 的并发请求，并丢弃移出、滚动、折叠、菜单打开或虚拟行卸载后的过期响应。键盘聚焦跳过停留延迟。会话预览仍只读、不夺取焦点。项目预览可移入并包含「编辑项目」；卡片贴在项目栏右缘外侧，不得挡住行内 ⋯ / 新对话。编辑对话框可改名称和源文件夹（`project_rename` / `project_set_path`）。从应用移除项目会删除该项目下的对话，磁盘文件夹保留。Host 只返回最近 `user` 与 `assistant` 的可见正文摘要；思考、附件、工具输出和完整 journal 不进入 DTO。项目预览使用已加载的项目与 session 元数据，并在悬停后惰性读取 Git 摘要。侧栏「整理」偏好（按项目 / 平铺列表，最近更新 / 优先级）写入 `sunsetz.layout`。
 
 `WorkbenchShell` 拥有三栏布局根节点，并在侧栏或资源面板关闭后把焦点恢复到对应顶部栏按钮。会话中栏在面板切换时保持挂载，因此原生滚动位置不被重建。
 
-`ComposerDock` 拥有底部浮层、三层输入器和运行中的 `TaskProgressRail`；草稿、附件、队列、模型/权限偏好、发送停止和 Host 调用仍由 `App.tsx` 提供。权限条与 `AskUserDock` 作为并列或接管槽位传入，提问和权限决策不搬进输入器。已连接的 GitHub / Gmail / Drive / Calendar 在输入器显示状态芯片；`@GitHub` 等插入本轮明确调用芯片，未连接插件不能插芯片。连接器协议见 [open-connector.md](./open-connector.md)。`ConversationSurface` 只订阅转录 store，不拥有 Host 协调。Host 在启动时若已有 live session，会立刻 `setViewing` 并把该 session 标为 busy，避免第一批 stream chunk 写进草稿缓存。
+`ComposerDock` 拥有底部浮层、三层输入器和运行中的 `TaskProgressRail`；草稿、附件、队列、模型/权限偏好、发送停止和 Host 调用仍由 `App.tsx` 提供。权限条与 `AskUserDock` 作为并列或接管槽位传入，提问和权限决策不搬进输入器。已连接的 GitHub / Gmail / Drive / Calendar / Notion / Slack 在输入器显示状态芯片；`@GitHub` 等插入本轮明确调用芯片，未连接插件不能插芯片。连接器协议见 [open-connector.md](./open-connector.md)。`ConversationSurface` 只订阅转录 store，不拥有 Host 协调。Host 在启动时若已有 live session，会立刻 `setViewing` 并把该 session 标为 busy，避免第一批 stream chunk 写进草稿缓存。
 
 流式 Markdown 把已闭合段落冻住，只对尾巴做 drip-reveal。消息数达到 48 条时，中栏窗口化历史并给隐藏行留 spacer；非活动气泡使用 `content-visibility`。空闲会话 transcript 缓存有 LRU，忙碌或当前查看的会话不会被丢掉。
 
-顶部任务菜单与侧栏任务菜单共用 `ContextMenu` 和同一组真实 session 动作。按钮打开时必须暴露 `aria-haspopup="menu"` 与展开状态；菜单按重命名、导出、分叉/回退/复制、归档/删除分组，危险删除保持末项。左下账户菜单只从 `AccountStatus`、当前 Provider 和 billing 快照派生账户、额度、重置时间、主题、设置与登录动作；未实现的宠物、支持、更新检查或云入口不得作为占位项出现。
+顶部任务菜单与侧栏任务菜单共用 `ContextMenu` 和同一组真实 session 动作。按钮打开时必须暴露 `aria-haspopup="menu"` 与展开状态；菜单按重命名、移动到项目、导出、分叉/回退/复制、归档/删除分组，危险删除保持末项。移动到项目是级联：列出已有项目和「不归属项目」，当前归属打勾且不可再选；未信任目标仍拒绝绑定。走现有 `session_set_project`，不创建项目。左下账户菜单只从 `AccountStatus`、当前 Provider 和 billing 快照派生账户、额度、重置时间、主题、设置与登录动作；未实现的宠物、支持、更新检查或云入口不得作为占位项出现。
 
 ## 2. 三层输入器
 
@@ -101,7 +101,7 @@
 - 只有使用量时显示 token 数，不推算百分比。
 - 没有可靠数据时显示未知状态 `—`，不按字符数估算。
 - 悬停或键盘聚焦显示紧凑摘要；点击同一圆环才打开详细 Runtime 遥测与 `/compact`。摘要和详情使用同一精确数据源。
-- `/compact` 是真实 Agent 操作；Host 只发送命令、记录事件和展示结果，不改写可见历史。
+- `/compact` 是真实 Agent 操作；Host 只发送命令、记录事件和展示结果，不改写可见历史。默认内核把该命令收成压缩回合（写 `context-compact.v1.json`，发 `session://context_compact`），不再把 `/compact` 当普通问答。自动压缩在已知窗口占用 ≥ 85%，或重建历史会超过 24 条 / 32k 字时触发。未知窗口不得用字符数填圆环。
 
 ## 6. 活动记录与 assistant phase
 
@@ -139,7 +139,7 @@
 
 Host 按会话保存所有 pending interaction：
 
-- 内建 Sunsetz kernel 的 `write_file` / `search_replace` / `run_command` 复用同一条 `ComposerDock` 权限条和 `InteractionSnapshotV1` kind `permission`；`ask_user_question` 复用 `AskUserDock` 和 kind `ask_user`。Host 会话没有 ACP 客户端，回复走 oneshot，不发 JSON-RPC。`AcceptEdits` 只自动放行根内写入和替换，命令仍要问。`grep` 只读，不弹权限条。父会话可 `spawn_agent`（explore / plan / general，深度 1）；子代理不能再 spawn。中栏显示子代理卡片，点开资源面板只读记录。不做侧边聊天，不创建 worktree。
+- 内建 Sunsetz kernel 的 `write_file` / `search_replace` / `run_command` 复用同一条 `ComposerDock` 权限条和 `InteractionSnapshotV1` kind `permission`；`ask_user_question` 复用 `AskUserDock` 和 kind `ask_user`。Host 会话没有 ACP 客户端，回复走 oneshot，不发 JSON-RPC。`AcceptEdits` 只自动放行根内写入和替换，命令仍要问。`grep` 只读，不弹权限条。父会话可 `spawn_agent`（explore / plan / general，深度 1）；子代理不能再 spawn。中栏显示子代理卡片，点开资源面板只读记录。父回合只 join 本轮后台 child：PromptComplete 可以等它们结束，Stop / Steer 只取消本轮 child，上一轮残留后台 child 不挡住本轮。后台 child 在父循环结束后由 Host 开一轮无用户气泡的 wake turn，把有界摘要交给父模型；Steer 之后的用户发送会吃掉已完成的 pending 摘要。不做侧边聊天，不创建 worktree。
 - `InteractionSnapshotV1` 以判别 payload 表示 permission、ask_user 和 plan；三者共享 pending/resolving/resolved/failed/interrupted 生命周期但不混淆业务语义。
 - `session_interactions_list` 返回前台和后台任务的 live interaction；旧 `session_pending_interactions` 继续作为 ask-user 兼容接口。
 - 切换任务或 WebView 重载时可在 Agent 进程仍存活的前提下恢复。
@@ -211,7 +211,7 @@ Host 校验名称、frontmatter、相对路径、体积、路径穿越、符号�
 | 应用存活期间后台调度 | `available` | Rust claim ledger + 现有 ACP 会话路径 |
 | 智能快照、电脑控制、系统级常驻调度 | `unavailable` | v2 能力表或专项里程碑 |
 
-Runtime sandbox 默认 `off`。Linux 在 bubblewrap 可用时可验证应用 `workspace_write` / `read_only`；macOS、Windows 请求非 off 配置会拒绝启动，不会静默降级。完整边界见 [runtime-migration-v1.md](./runtime-migration-v1.md)。
+Runtime sandbox 默认 `off`。内建内核把 `workspace_write` / `read_only` 应用到 `run_command`：Linux 用 bubblewrap，macOS 用 sandbox-exec。Windows 和非支持平台请求非 off 会拒绝该命令，不会静默降级。旧版 ACP 仍仅 Linux 可隔离 Runtime 进程。完整边界见 [runtime-migration-v1.md](./runtime-migration-v1.md)。
 
 不得据此声称以下项目已经完成：
 

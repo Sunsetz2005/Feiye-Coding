@@ -231,11 +231,36 @@ pub struct RuntimeCapabilitiesV1 {
     pub mcp: RuntimeFeatureV1,
 }
 
+fn requested_kernel_uses_command_sandbox(runtime_backend: &str) -> bool {
+    if use_mock_runtime() {
+        return false;
+    }
+    if let Ok(env) = std::env::var(PRODUCT_RUNTIME_BACKEND_ENV) {
+        let parsed = env.trim().to_ascii_lowercase();
+        if parsed == "grok_acp" || parsed == "grok_agent_stdio" {
+            return false;
+        }
+        if parsed == "mock" || parsed == "mock_acp" {
+            return false;
+        }
+    }
+    !matches!(
+        runtime_backend.trim().to_ascii_lowercase().as_str(),
+        "grok_acp" | "grok_agent_stdio"
+    )
+}
+
 pub fn runtime_capabilities(active_sandbox: Option<SandboxApplicationV1>) -> RuntimeCapabilitiesV1 {
     let settings = crate::store::load_settings();
     let probe = crate::cli_probe::probe_cli(settings.manual_cli_path.as_deref());
     let requested = SandboxProfileV1::parse(&settings.sandbox_profile);
-    let sandbox = active_sandbox.unwrap_or_else(|| sandbox_support(requested));
+    let sandbox = match active_sandbox {
+        Some(active) => active,
+        None if requested_kernel_uses_command_sandbox(&settings.runtime_backend) => {
+            crate::command_sandbox::support(requested)
+        }
+        None => sandbox_support(requested),
+    };
     let runtime_state = if probe.found {
         "available"
     } else {
@@ -250,9 +275,18 @@ pub fn runtime_capabilities(active_sandbox: Option<SandboxApplicationV1>) -> Run
         platform: platform_name().into(),
         sandbox,
         memory: RuntimeFeatureV1 {
-            state: "unavailable".into(),
+            state: if crate::agent_memory::is_enabled() {
+                "available"
+            } else {
+                "unavailable"
+            }
+            .into(),
             source: "host".into(),
-            reason: Some("No machine-readable Runtime memory bridge is registered".into()),
+            reason: if crate::agent_memory::is_enabled() {
+                Some("Sunsetz kernel auto-injects bounded agent memory".into())
+            } else {
+                Some("Agent auto memory is disabled".into())
+            },
         },
         plugin_catalog: RuntimeFeatureV1 {
             state: runtime_state.into(),

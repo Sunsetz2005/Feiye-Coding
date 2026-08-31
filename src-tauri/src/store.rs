@@ -1,5 +1,6 @@
 //! Versioned independent store for projects, sessions, settings, and secrets.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -190,6 +191,9 @@ pub struct AppSettings {
     /// `grok_acp` keeps the legacy `grok agent stdio` ACP adapter.
     #[serde(default = "default_runtime_backend")]
     pub runtime_backend: String,
+    /// Register a login / interval OS job that starts Sunsetz with `--background`.
+    #[serde(default)]
+    pub run_scheduled_tasks_in_background: bool,
 }
 
 fn default_composer_prefs_scope() -> String {
@@ -244,6 +248,7 @@ impl Default for AppSettings {
             sandbox_profile: default_sandbox_profile(),
             store_api_keys_in_keychain: false,
             runtime_backend: default_runtime_backend(),
+            run_scheduled_tasks_in_background: false,
         }
     }
 }
@@ -490,6 +495,7 @@ const SETTINGS_PATCH_KEYS_V1: &[&str] = &[
     "sandboxProfile",
     "storeApiKeysInKeychain",
     "runtimeBackend",
+    "runScheduledTasksInBackground",
 ];
 
 fn keychain_preference_transaction_target() -> PathBuf {
@@ -1175,6 +1181,8 @@ pub fn fork_session(
 
     // Remap ids so the fork is independent of the source journal ids.
     let prefix = format!("fork-{}", &meta.id[..meta.id.len().min(8)]);
+    let original_ids: Vec<String> = msgs.iter().map(|message| message.id.clone()).collect();
+    let compact_src = crate::context_compact::load_v1(source_id).ok().flatten();
     let forked: Vec<ChatMessageStored> = msgs
         .into_iter()
         .enumerate()
@@ -1184,13 +1192,25 @@ pub fn fork_session(
         })
         .collect();
     save_messages(&meta.id, &forked)?;
+    if let Some(src) = compact_src {
+        let id_map: HashMap<String, String> = original_ids
+            .into_iter()
+            .enumerate()
+            .map(|(index, old)| (old, format!("{prefix}-{index}")))
+            .collect();
+        if let Some(remapped) = crate::context_compact::remap_artifact_ids(&src, &id_map) {
+            if let Err(error) = crate::context_compact::save_v1(&meta.id, &remapped) {
+                tracing::warn!("copy compact sidecar onto fork {}: {error}", meta.id);
+            }
+        }
+    }
     Ok(meta)
 }
 
 // ─── Automations (scheduled tasks shell) ───────────────────────────────────
 
-/// Host-side scheduled automation. Execution is driven by the UI when the app is open
-/// (or later by CLI headless); this store is the source of truth for the list.
+/// Host-side scheduled automation. The default kernel ignites due claims from
+/// Host; this store is the source of truth for the list.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Automation {
@@ -1222,6 +1242,19 @@ pub struct Automation {
     pub updated_at: DateTime<Utc>,
     pub last_run_at: Option<DateTime<Utc>>,
     pub next_run_at: Option<DateTime<Utc>>,
+    /// Minutes between runs when `frequency` is `interval`. Minimum 15.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval_minutes: Option<u32>,
+    /// Skills to load at fire time. Missing/stale hashes fail closed.
+    #[serde(default)]
+    pub skill_ids: Vec<AutomationSkillRefV1>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AutomationSkillRefV1 {
+    pub id: String,
+    pub tree_hash: String,
 }
 
 fn default_true() -> bool {
@@ -1238,6 +1271,15 @@ fn default_notify() -> String {
 }
 fn default_missed_run_policy() -> String {
     "run_once".into()
+}
+
+fn normalize_interval_minutes(value: Option<u32>) -> Result<Option<u32>, String> {
+    match value {
+        None => Ok(None),
+        Some(0) => Ok(None),
+        Some(minutes) if minutes < 15 => Err("intervalMinutes must be at least 15".into()),
+        Some(minutes) => Ok(Some(minutes)),
+    }
 }
 
 fn normalize_missed_run_policy(value: Option<&str>) -> Result<String, String> {
@@ -1268,6 +1310,8 @@ pub struct AutomationInput {
     pub notify: Option<String>,
     pub missed_run_policy: Option<String>,
     pub next_run_at: Option<DateTime<Utc>>,
+    pub interval_minutes: Option<u32>,
+    pub skill_ids: Option<Vec<AutomationSkillRefV1>>,
 }
 
 pub fn load_automations() -> Vec<Automation> {
@@ -1345,6 +1389,8 @@ pub fn create_automation(input: AutomationInput) -> Result<Automation, String> {
         updated_at: now,
         last_run_at: None,
         next_run_at: input.next_run_at,
+        interval_minutes: normalize_interval_minutes(input.interval_minutes)?,
+        skill_ids: input.skill_ids.unwrap_or_default(),
     };
     update_automations(|list| {
         list.insert(0, auto.clone());
@@ -1393,6 +1439,12 @@ pub fn update_automation(id: &str, input: AutomationInput) -> Result<Automation,
         }
         if input.next_run_at.is_some() {
             auto.next_run_at = input.next_run_at;
+        }
+        if input.interval_minutes.is_some() {
+            auto.interval_minutes = normalize_interval_minutes(input.interval_minutes)?;
+        }
+        if let Some(skills) = input.skill_ids {
+            auto.skill_ids = skills;
         }
         auto.updated_at = Utc::now();
         Ok(auto.clone())

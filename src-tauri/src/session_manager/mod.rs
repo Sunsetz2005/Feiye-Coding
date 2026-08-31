@@ -118,6 +118,10 @@ pub struct SessionSnapshot {
     pub title: String,
     pub context_usage: Option<store::SessionTokenUsage>,
     pub sandbox: crate::runtime_compat::SandboxApplicationV1,
+    /// Live plus background sessions that are connecting, streaming, or waiting
+    /// on permission. The focused `session_id` is still the live slot.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub busy_session_ids: Vec<String>,
 }
 
 /// Versioned send result for Host-owned, visible Memory injection.
@@ -434,6 +438,22 @@ struct LiveSession {
     /// tool payloads never enter this ledger.
     active_skill_uses: Vec<crate::skill_feedback::SkillUseRecordV1>,
     pending_skill_settlement: Option<crate::skill_feedback::SkillUseStatusV1>,
+    /// Successful parent PromptComplete may auto-start a wake turn.
+    /// Stop / Steer and a user `begin_stream` clear this so queued send wins.
+    allow_auto_wake: bool,
+}
+
+struct WakeInspect {
+    backend: String,
+    streaming: bool,
+    deferred_prompt_complete: bool,
+    awaiting_permission: bool,
+    allow_auto_wake: bool,
+    host_turn_id: Option<String>,
+    process_id: String,
+    model_id: Option<String>,
+    effort: Option<String>,
+    project_path: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -534,6 +554,7 @@ const HISTORY_BOOTSTRAP_MAX_CHARS: usize = 14_000;
 
 fn build_runtime_context_usage(
     meta: &store::SessionMeta,
+    backend: &str,
     turn_input_tokens: u64,
     turn_output_tokens: u64,
     turn_cached_read_tokens: u64,
@@ -541,25 +562,36 @@ fn build_runtime_context_usage(
     model_calls: u32,
     reported_model_id: Option<String>,
 ) -> Option<store::SessionTokenUsage> {
-    let settings = store::load_settings();
-    let agent_home = crate::paths::resolve_agent_grok_home(&settings.session_data_mode);
-    let exact = meta
-        .agent_session_id
-        .as_deref()
-        .and_then(|sid| crate::context_usage::latest_inference_usage(&agent_home, sid))
-        .or_else(|| {
-            // A single-call turn's aggregate is also the exact final inference.
-            if model_calls <= 1 {
-                Some(crate::context_usage::InferenceUsage {
-                    input_tokens: turn_input_tokens,
-                    output_tokens: turn_output_tokens,
-                    cached_read_tokens: turn_cached_read_tokens,
-                    reasoning_tokens: turn_reasoning_tokens,
-                })
-            } else {
-                None
-            }
-        })?;
+    let exact = if agent_loop::is_sunsetz_backend(backend) {
+        if turn_input_tokens == 0 && turn_output_tokens == 0 {
+            return None;
+        }
+        Some(crate::context_usage::InferenceUsage {
+            input_tokens: turn_input_tokens,
+            output_tokens: turn_output_tokens,
+            cached_read_tokens: turn_cached_read_tokens,
+            reasoning_tokens: turn_reasoning_tokens,
+        })
+    } else {
+        let settings = store::load_settings();
+        let agent_home = crate::paths::resolve_agent_grok_home(&settings.session_data_mode);
+        meta.agent_session_id
+            .as_deref()
+            .and_then(|sid| crate::context_usage::latest_inference_usage(&agent_home, sid))
+            .or_else(|| {
+                // A single-call turn's aggregate is also the exact final inference.
+                if model_calls <= 1 {
+                    Some(crate::context_usage::InferenceUsage {
+                        input_tokens: turn_input_tokens,
+                        output_tokens: turn_output_tokens,
+                        cached_read_tokens: turn_cached_read_tokens,
+                        reasoning_tokens: turn_reasoning_tokens,
+                    })
+                } else {
+                    None
+                }
+            })
+    }?;
 
     let model_id = reported_model_id
         .filter(|id| !id.trim().is_empty())
@@ -579,6 +611,164 @@ fn build_runtime_context_usage(
         updated_at: chrono::Utc::now(),
         source: "runtime".into(),
     })
+}
+
+enum CompactGate {
+    Continue,
+    Finished,
+    Failed,
+}
+
+/// Compact the built-in kernel window before the parent `run_turn`.
+async fn apply_sunsetz_compact(
+    cfg: &mut agent_loop::AgentTurnConfig,
+    session_id: &str,
+    last_usage: Option<store::SessionTokenUsage>,
+    tx: &tokio::sync::mpsc::UnboundedSender<AcpEvent>,
+) -> CompactGate {
+    use crate::context_compact::{self, CompactError};
+
+    let journal = store::load_messages(session_id);
+    let mut artifact = match context_compact::load_v1(session_id) {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::warn!("load context compact sidecar session={session_id}: {error}");
+            None
+        }
+    };
+    if artifact
+        .as_ref()
+        .is_some_and(|existing| !context_compact::artifact_applies(&journal, existing))
+    {
+        if let Err(error) = context_compact::delete_v1(session_id) {
+            tracing::warn!("drop stale compact sidecar session={session_id}: {error}");
+        }
+        artifact = None;
+    }
+    let last_user = journal
+        .iter()
+        .rev()
+        .find(|message| message.role == "user")
+        .map(|message| message.content.clone());
+    let compact_cmd = last_user
+        .as_deref()
+        .and_then(context_compact::parse_manual_command);
+    let auto = compact_cmd.is_none()
+        && context_compact::should_auto_compact(&journal, artifact.as_ref(), last_usage.as_ref());
+    if compact_cmd.is_none() && !auto {
+        cfg.history = context_compact::history_for_model(&journal, artifact.as_ref());
+        return CompactGate::Continue;
+    }
+
+    let trigger = if compact_cmd.is_some() {
+        "manual"
+    } else {
+        "auto"
+    };
+    let note = compact_cmd
+        .as_ref()
+        .and_then(|command| command.note.clone());
+    let stop = Arc::clone(&cfg.stop);
+    let client = cfg.client.clone();
+    let endpoint = cfg.endpoint.clone();
+    let model_id = cfg.endpoint.model.clone();
+    let result = context_compact::run_compact(
+        &journal,
+        artifact.as_ref(),
+        note.as_deref(),
+        trigger,
+        last_usage.as_ref(),
+        Some(model_id.as_str()),
+        |messages| {
+            let stop = Arc::clone(&stop);
+            let client = client.clone();
+            let endpoint = endpoint.clone();
+            async move {
+                if stop.load(Ordering::SeqCst) {
+                    return Err(CompactError::Cancelled);
+                }
+                match agent_loop::complete_text(&client, &endpoint, &messages, &stop).await {
+                    Ok(text) => Ok(text),
+                    Err(error) => {
+                        if stop.load(Ordering::SeqCst)
+                            || error.message.contains("compact cancelled")
+                        {
+                            Err(CompactError::Cancelled)
+                        } else {
+                            Err(CompactError::Provider(error.message))
+                        }
+                    }
+                }
+            }
+        },
+    )
+    .await;
+
+    match result {
+        Ok(new_artifact) => {
+            if let Err(error) = context_compact::save_v1(session_id, &new_artifact) {
+                tracing::warn!("persist context compact session={session_id}: {error}");
+                if compact_cmd.is_some() {
+                    let _ = tx.send(AcpEvent::Error {
+                        error: AgentError::new(
+                            AgentErrorCode::AgentCrashed,
+                            format!("persist compact: {error}"),
+                        ),
+                    });
+                    return CompactGate::Failed;
+                }
+            }
+            let _ = tx.send(AcpEvent::ContextCompact {
+                trigger: new_artifact.trigger.clone(),
+                tokens_before: new_artifact.tokens_before,
+                tokens_after: new_artifact.tokens_after,
+                summary_preview: context_compact::summary_preview(&new_artifact.summary),
+                note: new_artifact.note.clone(),
+            });
+            if compact_cmd.is_some() {
+                let _ = tx.send(AcpEvent::PromptComplete {
+                    stop_reason: "end_turn".into(),
+                });
+                return CompactGate::Finished;
+            }
+            cfg.history = context_compact::history_for_model(&journal, Some(&new_artifact));
+            CompactGate::Continue
+        }
+        Err(CompactError::NothingToCompact) => {
+            if compact_cmd.is_some() {
+                let _ = tx.send(AcpEvent::ContextCompact {
+                    trigger: "manual".into(),
+                    tokens_before: last_usage.as_ref().map(|usage| usage.used_tokens),
+                    tokens_after: None,
+                    summary_preview: None,
+                    note,
+                });
+                let _ = tx.send(AcpEvent::PromptComplete {
+                    stop_reason: "end_turn".into(),
+                });
+                return CompactGate::Finished;
+            }
+            cfg.history = context_compact::history_for_model(&journal, artifact.as_ref());
+            CompactGate::Continue
+        }
+        Err(CompactError::Cancelled) => CompactGate::Finished,
+        Err(error) if compact_cmd.is_some() => {
+            let message = match error {
+                CompactError::EmptySummary => "compact produced an empty summary".into(),
+                CompactError::Provider(message) => message,
+                CompactError::NothingToCompact | CompactError::Cancelled => "compact failed".into(),
+            };
+            let _ = tx.send(AcpEvent::Error {
+                error: AgentError::new(AgentErrorCode::NetworkProvider, message),
+            });
+            CompactGate::Failed
+        }
+        Err(_) => {
+            tracing::warn!("auto compact failed session={session_id}; using truncated history");
+            cfg.history = agent_loop::chat_history_from_journal(&journal);
+            CompactGate::Continue
+        }
+    }
 }
 
 /// Build a continuity preamble from App journal when agent session is new.
@@ -1467,6 +1657,8 @@ pub struct SessionManager {
     connect_lock: tokio::sync::Mutex<()>,
     /// In-process child agents for the Sunsetz kernel.
     subagents: Arc<tokio::sync::Mutex<subagents::SubagentRegistry>>,
+    /// Session ids with a Host wake turn starting or running.
+    wake_inflight: Mutex<HashSet<String>>,
 }
 
 enum AskUserReplyChannel {
@@ -1522,6 +1714,7 @@ impl SessionManager {
             subagents: Arc::new(tokio::sync::Mutex::new(
                 subagents::SubagentRegistry::default(),
             )),
+            wake_inflight: Mutex::new(HashSet::new()),
         }
     }
 
@@ -2219,6 +2412,7 @@ impl SessionManager {
             tools_this_turn: 0,
             active_skill_uses: Vec::new(),
             pending_skill_settlement: None,
+            allow_auto_wake: false,
         })
     }
 
@@ -2309,9 +2503,34 @@ impl SessionManager {
         agent_loop::current_backend()
     }
 
+    fn session_is_busy(session: &LiveSession) -> bool {
+        matches!(
+            session.fsm.state(),
+            SessionState::Connecting | SessionState::Streaming | SessionState::AwaitingPermission
+        )
+    }
+
+    fn busy_session_ids(&self) -> Vec<String> {
+        let mut ids = Vec::new();
+        let mut seen = HashSet::new();
+        let push = |ids: &mut Vec<String>, seen: &mut HashSet<String>, session: &LiveSession| {
+            if Self::session_is_busy(session) && seen.insert(session.app_session_id.clone()) {
+                ids.push(session.app_session_id.clone());
+            }
+        };
+        if let Some(live) = self.inner.lock().as_ref() {
+            push(&mut ids, &mut seen, live);
+        }
+        for session in self.background.lock().values() {
+            push(&mut ids, &mut seen, session);
+        }
+        ids
+    }
+
     pub fn snapshot(&self) -> SessionSnapshot {
         let settings = store::load_settings();
         let requested = crate::runtime_compat::SandboxProfileV1::parse(&settings.sandbox_profile);
+        let busy_session_ids = self.busy_session_ids();
         let guard = self.inner.lock();
         match guard.as_ref() {
             None => SessionSnapshot {
@@ -2326,6 +2545,7 @@ impl SessionManager {
                 title: String::new(),
                 context_usage: None,
                 sandbox: crate::runtime_compat::sandbox_support(requested),
+                busy_session_ids,
             },
             Some(s) => {
                 let mut sandbox = s
@@ -2351,6 +2571,7 @@ impl SessionManager {
                     title: s.meta.title.clone(),
                     context_usage: s.meta.context_usage.clone(),
                     sandbox,
+                    busy_session_ids,
                 }
             }
         }
@@ -2583,6 +2804,216 @@ impl SessionManager {
         let _connect_guard = self.connect_lock.lock().await;
         self.connect_inner(app, project_path, app_session_id, mock_mode)
             .await
+    }
+
+    fn kernel_live_session(
+        meta: SessionMeta,
+        process_id: String,
+        project_path: Option<String>,
+        prefs: &store::ComposerPrefs,
+        policy: PermissionPolicy,
+        backend: String,
+    ) -> Result<LiveSession, String> {
+        let mut fsm = SessionFsm::new();
+        fsm.start_connect().map_err(|e| e.to_string())?;
+        fsm.handshake_ok().map_err(|e| e.to_string())?;
+        let now = Instant::now();
+        let journal_has_history = store::load_messages(&meta.id).iter().any(|m| {
+            (m.role == "user" || m.role == "assistant")
+                && !m.content.trim().is_empty()
+                && !m.is_error
+        });
+        Ok(LiveSession {
+            app_session_id: meta.id.clone(),
+            process_id,
+            meta,
+            fsm,
+            backend,
+            acp: None,
+            mock_stream: None,
+            agent_cancel: None,
+            host_turn_id: None,
+            streaming_message_id: None,
+            stream_buf: String::new(),
+            stream_thought: String::new(),
+            stream_last_was_assistant: false,
+            stream_phase_id_locked: false,
+            stream_attachments: Vec::new(),
+            model_id: Some(prefs.model_id.clone()),
+            effort: Some(prefs.effort.clone()),
+            product_mode: Some(prefs.mode.clone()),
+            project_path,
+            allow_cache: SessionAllowCache::default(),
+            policy,
+            provider_retry_attempt: 0,
+            provider_retry_aborted: false,
+            needs_history_bootstrap: journal_has_history,
+            pending_plan: None,
+            pending_permission: None,
+            host_rpc_seq: 0,
+            pending_ask_user: None,
+            last_activity: now,
+            last_stream_progress: now,
+            last_stall_emit: None,
+            journal_throttle: JournalWriteThrottle::with_default_interval(),
+            open_tool_ids: HashSet::new(),
+            seen_tool_ids: HashSet::new(),
+            deferred_prompt_complete: None,
+            tools_this_turn: 0,
+            active_skill_uses: Vec::new(),
+            pending_skill_settlement: None,
+            allow_auto_wake: false,
+        })
+    }
+
+    fn install_background_kernel_session(
+        &self,
+        session_id: &str,
+        project_path: Option<String>,
+    ) -> Result<(), String> {
+        {
+            if self
+                .inner
+                .lock()
+                .as_ref()
+                .is_some_and(|session| session.app_session_id == session_id)
+            {
+                return Ok(());
+            }
+            if self.background.lock().contains_key(session_id) {
+                return Ok(());
+            }
+        }
+        let backend = Self::backend_name();
+        if !agent_loop::is_sunsetz_backend(&backend) && backend != agent_loop::BACKEND_MOCK {
+            return Err("host ignition requires the Sunsetz kernel".into());
+        }
+        let mut meta = store::load_sessions_index()
+            .into_iter()
+            .find(|session| session.id == session_id)
+            .ok_or_else(|| "session not found".to_string())?;
+        let prefs =
+            store::resolve_composer_prefs(meta.project_id.as_deref(), Some(meta.id.as_str()));
+        let policy = PermissionPolicy::parse(&prefs.permission_policy);
+        meta.model_id = Some(prefs.model_id.clone());
+        meta.effort = Some(prefs.effort.clone());
+        meta.mode = Some(prefs.mode.clone());
+        meta.permission_policy = Some(prefs.permission_policy.clone());
+        meta.agent_session_id = Some(Uuid::new_v4().to_string());
+        let _ = store::update_session_meta(&meta);
+        let session = Self::kernel_live_session(
+            meta,
+            Uuid::new_v4().to_string(),
+            project_path,
+            &prefs,
+            policy,
+            backend,
+        )?;
+        self.background
+            .lock()
+            .insert(session.app_session_id.clone(), session);
+        Ok(())
+    }
+
+    pub async fn connect_background_kernel(
+        self: &Arc<Self>,
+        app: AppHandle,
+        session_id: String,
+        project_path: Option<String>,
+    ) -> Result<(), String> {
+        let _connect_guard = self.connect_lock.lock().await;
+        self.install_background_kernel_session(&session_id, project_path)?;
+        Self::emit_state(&app, &self.snapshot());
+        Ok(())
+    }
+
+    /// Create, bind, and start a scheduled turn in the background without
+    /// stealing the live workbench session. `bound` is true after claim bind.
+    pub async fn ignite_automation_claim(
+        self: &Arc<Self>,
+        app: AppHandle,
+        mut claim: crate::automation_scheduler::AutomationClaimV1,
+    ) -> Result<crate::automation_scheduler::AutomationClaimV1, crate::automation_scheduler::IgniteFailure>
+    {
+        use crate::automation_scheduler::IgniteFailure;
+        let fail = |bound: bool, error: String| Err(IgniteFailure { bound, error });
+        let backend = Self::backend_name();
+        if !agent_loop::is_sunsetz_backend(&backend) && backend != agent_loop::BACKEND_MOCK {
+            return fail(false, "host ignition requires the Sunsetz kernel".into());
+        }
+        let project = claim
+            .automation
+            .project_id
+            .as_deref()
+            .and_then(|id| store::load_projects().into_iter().find(|project| project.id == id));
+        if let Some(project) = project.as_ref() {
+            if !project.trusted {
+                let error = format!("project `{}` is not trusted", project.name);
+                let _ = crate::automation_scheduler::complete(
+                    &claim.claim_id,
+                    false,
+                    Some(&error),
+                );
+                return fail(false, error);
+            }
+        }
+        let project_path = project.as_ref().map(|project| project.path.clone());
+        let title = if claim.automation.title.trim().is_empty() {
+            "Scheduled".to_string()
+        } else {
+            claim.automation.title.clone()
+        };
+        let mut meta = match store::create_session(
+            claim.automation.project_id.clone(),
+            Some(title),
+            true,
+        ) {
+            Ok(meta) => meta,
+            Err(error) => return fail(false, error),
+        };
+        if claim.automation.model_id.is_some() || claim.automation.effort.is_some() {
+            if let Some(model_id) = claim.automation.model_id.clone() {
+                meta.model_id = Some(model_id);
+            }
+            if let Some(effort) = claim.automation.effort.clone() {
+                meta.effort = Some(effort);
+            }
+            let _ = store::update_session_meta(&meta);
+        }
+        if let Err(error) =
+            crate::automation_scheduler::bind_session(&claim.claim_id, &meta.id)
+        {
+            let _ = store::delete_session(&meta.id);
+            return fail(false, error);
+        }
+        claim.session_id = Some(meta.id.clone());
+        if let Err(error) = self
+            .connect_background_kernel(app.clone(), meta.id.clone(), project_path)
+            .await
+        {
+            let _ = crate::automation_scheduler::complete(
+                &claim.claim_id,
+                false,
+                Some(&error),
+            );
+            return fail(true, error);
+        }
+        let prompt = format!(
+            "[Scheduled: {}]\n\n{}",
+            claim.automation.title, claim.automation.prompt
+        );
+        if let Err(error) = self
+            .send_message_for_session(app, meta.id, prompt, None, None)
+            .await
+        {
+            let _ = crate::automation_scheduler::complete(
+                &claim.claim_id,
+                false,
+                Some(&error),
+            );
+            return fail(true, error);
+        }
+        Ok(claim)
     }
 
     async fn connect_inner(
@@ -2852,6 +3283,7 @@ impl SessionManager {
                 tools_this_turn: 0,
                 active_skill_uses: Vec::new(),
                 pending_skill_settlement: None,
+                allow_auto_wake: false,
             });
         }
         Self::emit_state(&app, &self.snapshot());
@@ -3287,11 +3719,14 @@ impl SessionManager {
                 let _ = app.emit("session://stream", payload);
             }
             AcpEvent::PromptComplete { stop_reason } => {
-                let empty_run = {
+                let (app_sid, finished, empty_run) = {
                     let mut guard = self.inner.lock();
                     if let Some(s) = guard.as_mut() {
                         Self::touch_stream_progress_locked(s);
                         s.deferred_prompt_complete = Some(stop_reason.clone());
+                        if is_successful_prompt_complete(&stop_reason) {
+                            s.allow_auto_wake = true;
+                        }
                         // #52: do not Ready the UI while tools / permission / ask_user / plan
                         // are still open — agent often fires prompt_complete early.
                         match Self::try_finish_deferred_prompt_complete(s) {
@@ -3303,16 +3738,23 @@ impl SessionManager {
                                     s.pending_plan.is_some(),
                                     s.pending_ask_user.is_some(),
                                 );
-                                None
+                                (s.app_session_id.clone(), false, None)
                             }
-                            Some(empty) => empty,
+                            Some(empty) => (s.app_session_id.clone(), true, empty),
                         }
                     } else {
-                        None
+                        (String::new(), false, None)
                     }
                 };
-                Self::emit_state(app, &self.snapshot());
                 Self::emit_empty_run_if_any(app, empty_run);
+                let woke = if finished && !app_sid.is_empty() {
+                    self.maybe_start_wake_turn(app, &app_sid).await
+                } else {
+                    false
+                };
+                if !woke {
+                    Self::emit_state(app, &self.snapshot());
+                }
             }
             AcpEvent::PermissionRequest {
                 rpc_id,
@@ -3574,7 +4016,10 @@ impl SessionManager {
                     path_out.as_deref(),
                 );
                 if finished {
-                    Self::emit_state(app, &self.snapshot());
+                    let woke = self.maybe_start_wake_turn(app, &app_sid).await;
+                    if !woke {
+                        Self::emit_state(app, &self.snapshot());
+                    }
                 }
             }
             AcpEvent::Plan {
@@ -3992,6 +4437,7 @@ impl SessionManager {
                     };
                     let Some(usage) = build_runtime_context_usage(
                         &s.meta,
+                        &s.backend,
                         input_tokens,
                         output_tokens,
                         cached_read_tokens,
@@ -4104,6 +4550,9 @@ impl SessionManager {
                     if let Some(s) = bg.get_mut(app_session_id) {
                         Self::touch_stream_progress_locked(s);
                         s.deferred_prompt_complete = Some(stop_reason.clone());
+                        if is_successful_prompt_complete(&stop_reason) {
+                            s.allow_auto_wake = true;
+                        }
                         match Self::try_finish_deferred_prompt_complete(s) {
                             Some(empty) => (true, empty),
                             None => {
@@ -4124,11 +4573,18 @@ impl SessionManager {
                     }
                 };
                 Self::emit_empty_run_if_any(app, empty_run);
-                if finished {
+                let woke = if finished {
+                    self.maybe_start_wake_turn(app, app_session_id).await
+                } else {
+                    false
+                };
+                if finished && !woke {
                     self.promote_background_ready_to_parked(app_session_id);
                 }
-                // Snapshot is focused live — still emit so sidebar busy flags can refresh.
-                Self::emit_state(app, &self.snapshot());
+                if !woke {
+                    // Snapshot is focused live — still emit so sidebar busy flags can refresh.
+                    Self::emit_state(app, &self.snapshot());
+                }
             }
             AcpEvent::PermissionRequest {
                 rpc_id,
@@ -4383,8 +4839,11 @@ impl SessionManager {
                     path_out.as_deref(),
                 );
                 if finished {
-                    self.promote_background_ready_to_parked(app_session_id);
-                    Self::emit_state(app, &self.snapshot());
+                    let woke = self.maybe_start_wake_turn(app, app_session_id).await;
+                    if !woke {
+                        self.promote_background_ready_to_parked(app_session_id);
+                        Self::emit_state(app, &self.snapshot());
+                    }
                 }
             }
             AcpEvent::Plan {
@@ -4664,6 +5123,7 @@ impl SessionManager {
                     };
                     let Some(usage) = build_runtime_context_usage(
                         &s.meta,
+                        &s.backend,
                         input_tokens,
                         output_tokens,
                         cached_read_tokens,
@@ -4953,6 +5413,181 @@ impl SessionManager {
         })
     }
 
+    fn prepare_user_send_on(
+        session: &mut LiveSession,
+        turn_id: &str,
+        text: &str,
+        journal_content: &str,
+        attachments: Option<Vec<MessageAttachmentStored>>,
+        memory: Option<&crate::memory_injection::MemoryInjectionPreparedV1>,
+        skill_uses: &[crate::skill_feedback::SkillUseRecordV1],
+    ) -> Result<
+        (
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<Arc<AcpClient>>,
+            String,
+            Option<String>,
+        ),
+        String,
+    > {
+        if let Some(pending_status) = session.pending_skill_settlement {
+            settle_active_skill_uses(session, pending_status);
+            if session.pending_skill_settlement.is_some() {
+                return Err(
+                    "SKILL_USE_SETTLEMENT_PENDING: retry durable Skill settlement first".into(),
+                );
+            }
+        }
+        if !session.active_skill_uses.is_empty() {
+            return Err("SKILL_USE_DELIVERY_UNKNOWN: prior Skill use is not terminal".into());
+        }
+        if memory
+            .as_ref()
+            .is_some_and(|prepared| prepared.record.session_id != session.app_session_id)
+        {
+            return Err("MEMORY_INJECTION_SESSION_MISMATCH".into());
+        }
+        let mut skill_ids = HashSet::with_capacity(skill_uses.len());
+        if skill_uses.iter().any(|record| {
+            record.session_id != session.app_session_id
+                || record.turn_id != turn_id
+                || record.status != crate::skill_feedback::SkillUseStatusV1::Prepared
+                || !skill_ids.insert(record.id.as_str())
+        }) {
+            return Err("SKILL_USE_STALE: prepared Skill evidence does not match this turn".into());
+        }
+        session.fsm.begin_stream().map_err(|e| e.to_string())?;
+        session.allow_auto_wake = false;
+        Self::touch_stream_progress_locked(session);
+        let mid = Uuid::new_v4().to_string();
+        session.streaming_message_id = Some(mid);
+        session.stream_buf.clear();
+        session.stream_thought.clear();
+        session.stream_last_was_assistant = false;
+        session.stream_phase_id_locked = false;
+        session.stream_attachments.clear();
+        session.journal_throttle.reset();
+        session.last_stall_emit = None;
+        session.open_tool_ids.clear();
+        session.seen_tool_ids.clear();
+        session.deferred_prompt_complete = None;
+        session.provider_retry_attempt = 0;
+        session.provider_retry_aborted = false;
+        session.tools_this_turn = 0;
+
+        let mut agent_prompt = text.to_string();
+        let consumed_history_bootstrap = session.needs_history_bootstrap;
+        if consumed_history_bootstrap {
+            if let Some(ctx) = build_history_bootstrap(&session.app_session_id) {
+                agent_prompt = prepend_host_context_preserving_directives(&agent_prompt, &ctx);
+                tracing::info!(
+                    "history bootstrap attached ({} chars) for session {}",
+                    ctx.len(),
+                    session.app_session_id
+                );
+            }
+            session.needs_history_bootstrap = false;
+        }
+        if let Some(hint) = session_lookup_host_hint(text) {
+            agent_prompt = prepend_host_context_preserving_directives(&agent_prompt, &hint);
+        }
+        if let Some(prepared) = memory {
+            agent_prompt = prepend_host_context_preserving_directives(
+                &agent_prompt,
+                &prepared.prompt_fragment,
+            );
+        }
+        if let Err(error) = store::append_message(
+            &session.app_session_id,
+            user_journal_message(
+                turn_id.to_string(),
+                journal_content.to_string(),
+                text,
+                attachments,
+            ),
+        ) {
+            session.needs_history_bootstrap = consumed_history_bootstrap;
+            reset_rejected_turn(session);
+            return Err(format!("persist user turn before Runtime send: {error}"));
+        }
+        session.active_skill_uses = skill_uses.to_vec();
+        Ok((
+            session.backend.clone(),
+            session.app_session_id.clone(),
+            session.process_id.clone(),
+            session.model_id.clone(),
+            session.project_path.clone(),
+            session.acp.clone(),
+            agent_prompt,
+            session.effort.clone(),
+        ))
+    }
+
+    fn prepare_user_send(
+        &self,
+        expected_session_id: Option<&str>,
+        turn_id: &str,
+        text: &str,
+        journal_content: &str,
+        attachments: Option<Vec<MessageAttachmentStored>>,
+        memory: Option<&crate::memory_injection::MemoryInjectionPreparedV1>,
+        skill_uses: &[crate::skill_feedback::SkillUseRecordV1],
+    ) -> Result<
+        (
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<Arc<AcpClient>>,
+            String,
+            Option<String>,
+        ),
+        String,
+    > {
+        {
+            let mut live = self.inner.lock();
+            if let Some(session) = live.as_mut() {
+                let live_matches = expected_session_id
+                    .map(|expected| expected == session.app_session_id)
+                    .unwrap_or(true);
+                if live_matches {
+                    return Self::prepare_user_send_on(
+                        session,
+                        turn_id,
+                        text,
+                        journal_content,
+                        attachments,
+                        memory,
+                        skill_uses,
+                    );
+                }
+            } else if expected_session_id.is_none() {
+                return Err("no active session".into());
+            }
+        }
+        let Some(expected) = expected_session_id else {
+            return Err("no active session".into());
+        };
+        let mut background = self.background.lock();
+        if let Some(session) = background.get_mut(expected) {
+            return Self::prepare_user_send_on(
+                session,
+                turn_id,
+                text,
+                journal_content,
+                attachments,
+                memory,
+                skill_uses,
+            );
+        }
+        Err("SESSION_SEND_STALE: active session changed".into())
+    }
+
     pub async fn send_message_for_session(
         self: &Arc<Self>,
         app: AppHandle,
@@ -5069,107 +5704,16 @@ impl SessionManager {
         let turn_id = turn_id.unwrap_or_else(|| Uuid::new_v4().to_string());
 
         // If agent is a fresh session/new, wrap recent journal into the prompt once.
-        let (backend, app_sid, process_id, model_id, project_path, acp, agent_prompt, effort) = {
-            let mut guard = self.inner.lock();
-            let s = guard.as_mut().ok_or("no active session")?;
-            if let Some(pending_status) = s.pending_skill_settlement {
-                settle_active_skill_uses(s, pending_status);
-                if s.pending_skill_settlement.is_some() {
-                    return Err(
-                        "SKILL_USE_SETTLEMENT_PENDING: retry durable Skill settlement first".into(),
-                    );
-                }
-            }
-            if !s.active_skill_uses.is_empty() {
-                return Err("SKILL_USE_DELIVERY_UNKNOWN: prior Skill use is not terminal".into());
-            }
-            if expected_session_id
-                .as_deref()
-                .is_some_and(|expected| expected != s.app_session_id)
-            {
-                return Err("SESSION_SEND_STALE: active session changed".into());
-            }
-            if memory
-                .as_ref()
-                .is_some_and(|prepared| prepared.record.session_id != s.app_session_id)
-            {
-                return Err("MEMORY_INJECTION_SESSION_MISMATCH".into());
-            }
-            let mut skill_ids = HashSet::with_capacity(skill_uses.len());
-            if skill_uses.iter().any(|record| {
-                record.session_id != s.app_session_id
-                    || record.turn_id != turn_id
-                    || record.status != crate::skill_feedback::SkillUseStatusV1::Prepared
-                    || !skill_ids.insert(record.id.as_str())
-            }) {
-                return Err(
-                    "SKILL_USE_STALE: prepared Skill evidence does not match this turn".into(),
-                );
-            }
-            s.fsm.begin_stream().map_err(|e| e.to_string())?;
-            Self::touch_stream_progress_locked(s);
-            let mid = Uuid::new_v4().to_string();
-            s.streaming_message_id = Some(mid.clone());
-            s.stream_buf.clear();
-            s.stream_thought.clear();
-            s.stream_last_was_assistant = false;
-            s.stream_phase_id_locked = false;
-            s.stream_attachments.clear();
-            s.journal_throttle.reset();
-            s.last_stall_emit = None;
-            s.open_tool_ids.clear();
-            s.seen_tool_ids.clear();
-            s.deferred_prompt_complete = None;
-            s.provider_retry_attempt = 0;
-            s.provider_retry_aborted = false;
-            s.tools_this_turn = 0;
-
-            let mut agent_prompt = text.clone();
-            let consumed_history_bootstrap = s.needs_history_bootstrap;
-            if consumed_history_bootstrap {
-                if let Some(ctx) = build_history_bootstrap(&s.app_session_id) {
-                    agent_prompt = prepend_host_context_preserving_directives(&agent_prompt, &ctx);
-                    tracing::info!(
-                        "history bootstrap attached ({} chars) for session {}",
-                        ctx.len(),
-                        s.app_session_id
-                    );
-                }
-                s.needs_history_bootstrap = false;
-            }
-            // P2: steer session-by-UUID lookups to App/agent-home roots (avoid home-wide find).
-            if let Some(hint) = session_lookup_host_hint(&text) {
-                agent_prompt = prepend_host_context_preserving_directives(&agent_prompt, &hint);
-            }
-            if let Some(prepared) = memory.as_ref() {
-                agent_prompt = prepend_host_context_preserving_directives(
-                    &agent_prompt,
-                    &prepared.prompt_fragment,
-                );
-            }
-
-            // persist user message (display form for skill chips on reload)
-            // Journal stores the user-facing turn only — not the bootstrap wrapper.
-            if let Err(error) = store::append_message(
-                &s.app_session_id,
-                user_journal_message(turn_id.clone(), journal_content.clone(), &text, attachments),
-            ) {
-                s.needs_history_bootstrap = consumed_history_bootstrap;
-                reset_rejected_turn(s);
-                return Err(format!("persist user turn before Runtime send: {error}"));
-            }
-            s.active_skill_uses = skill_uses.clone();
-            (
-                s.backend.clone(),
-                s.app_session_id.clone(),
-                s.process_id.clone(),
-                s.model_id.clone(),
-                s.project_path.clone(),
-                s.acp.clone(),
-                agent_prompt,
-                s.effort.clone(),
-            )
-        };
+        let (backend, app_sid, process_id, model_id, project_path, acp, agent_prompt, effort) =
+            self.prepare_user_send(
+                expected_session_id.as_deref(),
+                &turn_id,
+                &text,
+                &journal_content,
+                attachments,
+                memory.as_ref(),
+                &skill_uses,
+            )?;
         Self::emit_state(&app, &self.snapshot());
 
         let skill_uses = if skill_uses.is_empty() {
@@ -5685,6 +6229,7 @@ impl SessionManager {
         String,
     > {
         let mut agent_prompt = agent_prompt;
+        let mut skill_chars = 0_usize;
         if !skill_uses.is_empty() {
             let selections = skill_uses
                 .iter()
@@ -5710,8 +6255,35 @@ impl SessionManager {
                 }
             };
             if !fragments.is_empty() {
+                skill_chars = fragments.chars().count();
                 agent_prompt =
                     prepend_host_context_preserving_directives(&agent_prompt, &fragments);
+            }
+        }
+        if let Some(automation) =
+            crate::automation_scheduler::bound_automation_for_session(&app_sid)
+        {
+            if !automation.skill_ids.is_empty() {
+                let selections = automation
+                    .skill_ids
+                    .iter()
+                    .map(|skill| (skill.id.clone(), skill.tree_hash.clone()))
+                    .collect::<Vec<_>>();
+                let project = project_path.clone();
+                if let Ok(Ok(fragments)) = tauri::async_runtime::spawn_blocking(move || {
+                    crate::skill_inventory::load_host_skill_fragments_v1(
+                        &selections,
+                        project.as_deref(),
+                    )
+                })
+                .await
+                {
+                    if !fragments.is_empty() {
+                        skill_chars = skill_chars.saturating_add(fragments.chars().count());
+                        agent_prompt =
+                            prepend_host_context_preserving_directives(&agent_prompt, &fragments);
+                    }
+                }
             }
         }
         let applied_skill_uses = if skill_uses.is_empty() {
@@ -5748,7 +6320,6 @@ impl SessionManager {
             None
         };
 
-        let history = agent_loop::chat_history_from_journal(&store::load_messages(&app_sid));
         let (root, trusted) = agent_loop::resolve_trusted_root(project_path.as_deref());
         let endpoint =
             match agent_loop::resolve_inference_credentials(model_id.as_deref().unwrap_or("")) {
@@ -5771,8 +6342,16 @@ impl SessionManager {
                 return Ok((self.snapshot(), memory_record, applied_skill_uses));
             }
         };
+        let wakes = self.subagents.lock().await.take_pending_wakes(&app_sid);
+        if !wakes.is_empty() {
+            agent_prompt = prepend_host_context_preserving_directives(
+                &agent_prompt,
+                &subagents::wake_prompt(&wakes),
+            );
+        }
         let stop = Arc::new(AtomicBool::new(false));
         let host_turn_id = Uuid::new_v4().to_string();
+        let mut last_usage = None;
         {
             let mut live = self.inner.lock();
             if let Some(session) = live
@@ -5781,9 +6360,11 @@ impl SessionManager {
             {
                 session.agent_cancel = Some(Arc::clone(&stop));
                 session.host_turn_id = Some(host_turn_id.clone());
+                last_usage = session.meta.context_usage.clone();
             } else if let Some(session) = self.background.lock().get_mut(&app_sid) {
                 session.agent_cancel = Some(Arc::clone(&stop));
                 session.host_turn_id = Some(host_turn_id.clone());
+                last_usage = session.meta.context_usage.clone();
             }
         }
 
@@ -5814,7 +6395,7 @@ impl SessionManager {
             endpoint,
             project_root: root,
             trusted,
-            history,
+            history: Vec::new(),
             user_prompt: agent_prompt,
             stop: Arc::clone(&stop),
             client,
@@ -5835,10 +6416,19 @@ impl SessionManager {
             kind: agent_loop::AgentKind::Parent,
             spawn_depth: 0,
             subagents: agent_loop::SubagentHooks::default(),
+            sandbox_profile: crate::runtime_compat::SandboxProfileV1::parse(
+                &crate::store::load_settings().sandbox_profile,
+            ),
+            skill_prompt_chars: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(
+                skill_chars,
+            )),
+            allow_schedule_task: !crate::automation_scheduler::session_has_active_claim(&app_sid),
+            allow_skill_save: !crate::automation_scheduler::session_has_active_claim(&app_sid),
         };
         let child_template = agent_loop::AgentTurnConfig {
             subagents: agent_loop::SubagentHooks::default(),
             permission_gate: Some(permission_gate_for_child),
+            skill_prompt_chars: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             ..cfg.clone()
         };
         let registry = Arc::clone(&self.subagents);
@@ -5859,6 +6449,22 @@ impl SessionManager {
                 path.as_deref(),
             );
         });
+        let on_finished: Option<subagents::SubagentFinishedFn> = {
+            let mgr = Arc::clone(self);
+            let app_fin = app.clone();
+            Some(Arc::new(
+                move |session, tool_id, status, title, kind, agent_id| {
+                    let mgr = Arc::clone(&mgr);
+                    let app_fin = app_fin.clone();
+                    Box::pin(async move {
+                        mgr.on_subagent_finished(
+                            app_fin, session, tool_id, status, title, kind, agent_id,
+                        )
+                        .await;
+                    })
+                },
+            ))
+        };
         cfg.subagents = agent_loop::SubagentHooks {
             spawn: Some(Arc::new(move |request| {
                 let registry = Arc::clone(&registry);
@@ -5866,9 +6472,16 @@ impl SessionManager {
                 let session = session_for_spawn.clone();
                 let turn = turn_for_spawn.clone();
                 let on_life = Arc::clone(&on_life);
+                let on_finished = on_finished.clone();
                 Box::pin(async move {
                     subagents::spawn_with_registry(
-                        registry, template, session, turn, request, on_life,
+                        registry,
+                        template,
+                        session,
+                        turn,
+                        request,
+                        on_life,
+                        on_finished,
                     )
                     .await
                 })
@@ -5900,13 +6513,22 @@ impl SessionManager {
             };
             let turn_failed = Arc::new(AtomicBool::new(false));
             let failed = Arc::clone(&turn_failed);
-            agent_loop::run_turn(cfg, move |event| {
-                if matches!(event, AcpEvent::Error { .. }) {
-                    failed.store(true, Ordering::SeqCst);
+            match apply_sunsetz_compact(&mut cfg, &automation_session_id, last_usage, &tx).await {
+                CompactGate::Continue => {
+                    agent_loop::run_turn(cfg, move |event| {
+                        if matches!(event, AcpEvent::Error { .. }) {
+                            failed.store(true, Ordering::SeqCst);
+                        }
+                        let _ = tx.send(event);
+                    })
+                    .await;
                 }
-                let _ = tx.send(event);
-            })
-            .await;
+                CompactGate::Failed => {
+                    turn_failed.store(true, Ordering::SeqCst);
+                    drop(tx);
+                }
+                CompactGate::Finished => drop(tx),
+            }
             let _ = pump.await;
             let ok = !stop.load(Ordering::SeqCst) && !turn_failed.load(Ordering::SeqCst);
             if let Err(error) = crate::automation_scheduler::complete_for_session(
@@ -5916,21 +6538,286 @@ impl SessionManager {
             ) {
                 tracing::warn!("complete Sunsetz automation claim: {error}");
             }
-            {
+            let still_ours = {
                 let mut live = mgr.inner.lock();
                 if let Some(session) = live
                     .as_mut()
                     .filter(|session| session.app_session_id == automation_session_id)
                 {
-                    session.agent_cancel = None;
-                } else if let Some(session) = mgr.background.lock().get_mut(&automation_session_id)
-                {
-                    session.agent_cancel = None;
+                    if session
+                        .agent_cancel
+                        .as_ref()
+                        .is_some_and(|flag| Arc::ptr_eq(flag, &stop))
+                    {
+                        session.agent_cancel = None;
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    drop(live);
+                    if let Some(session) = mgr.background.lock().get_mut(&automation_session_id) {
+                        if session
+                            .agent_cancel
+                            .as_ref()
+                            .is_some_and(|flag| Arc::ptr_eq(flag, &stop))
+                        {
+                            session.agent_cancel = None;
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        true
+                    }
+                }
+            };
+            if still_ours {
+                mgr.wake_inflight.lock().remove(&automation_session_id);
+                let woke = mgr
+                    .maybe_start_wake_turn(&app_ev, &automation_session_id)
+                    .await;
+                if !woke {
+                    SessionManager::emit_state(&app_ev, &mgr.snapshot());
                 }
             }
-            SessionManager::emit_state(&app_ev, &mgr.snapshot());
         });
         Ok((self.snapshot(), memory_record, applied_skill_uses))
+    }
+
+    async fn on_subagent_finished(
+        self: &Arc<Self>,
+        app: AppHandle,
+        session_id: String,
+        tool_call_id: String,
+        status: String,
+        title: String,
+        kind: String,
+        agent_id: String,
+    ) {
+        let tool_status = if status == "cancelled" {
+            "cancelled"
+        } else if status == "failed" {
+            "failed"
+        } else {
+            "completed"
+        };
+        let card_title = if title.to_ascii_lowercase().starts_with("subagent ") {
+            title.clone()
+        } else {
+            format!("Subagent {title}")
+        };
+        persist_tool_step(
+            &session_id,
+            &tool_call_id,
+            tool_status,
+            "agent",
+            &card_title,
+            Some(kind.as_str()),
+            Some(agent_id.as_str()),
+        );
+        let parent_turn_id = self.subagents.lock().await.parent_turn_id(&agent_id);
+        let live_turn = self
+            .inspect_session_for_wake(&session_id)
+            .and_then(|inspect| inspect.host_turn_id);
+        let same_turn = match (parent_turn_id.as_deref(), live_turn.as_deref()) {
+            (Some(parent), Some(live)) => parent == live,
+            _ => false,
+        };
+        if same_turn {
+            if let Some(process_id) = self.process_id_for_session(&session_id) {
+                self.handle_acp_event(
+                    &app,
+                    &process_id,
+                    AcpEvent::ToolCall {
+                        tool_call_id,
+                        title: card_title,
+                        kind: "agent".into(),
+                        status: tool_status.into(),
+                        raw: serde_json::json!({
+                            "rawInput": {
+                                "id": agent_id,
+                                "description": title,
+                                "agentType": kind,
+                                "background": true,
+                            }
+                        }),
+                    },
+                )
+                .await;
+            }
+        }
+        let _ = self.maybe_start_wake_turn(&app, &session_id).await;
+    }
+
+    fn process_id_for_session(&self, session_id: &str) -> Option<String> {
+        if let Some(session) = self
+            .inner
+            .lock()
+            .as_ref()
+            .filter(|session| session.app_session_id == session_id)
+        {
+            return Some(session.process_id.clone());
+        }
+        self.background
+            .lock()
+            .get(session_id)
+            .map(|session| session.process_id.clone())
+    }
+
+    fn inspect_session_for_wake(&self, session_id: &str) -> Option<WakeInspect> {
+        let from_live = |session: &LiveSession| WakeInspect {
+            backend: session.backend.clone(),
+            streaming: session.fsm.state() == SessionState::Streaming,
+            deferred_prompt_complete: session.deferred_prompt_complete.is_some(),
+            awaiting_permission: session.fsm.state() == SessionState::AwaitingPermission,
+            allow_auto_wake: session.allow_auto_wake,
+            host_turn_id: session.host_turn_id.clone(),
+            process_id: session.process_id.clone(),
+            model_id: session.model_id.clone(),
+            effort: session.effort.clone(),
+            project_path: session.project_path.clone(),
+        };
+        if let Some(session) = self
+            .inner
+            .lock()
+            .as_ref()
+            .filter(|session| session.app_session_id == session_id)
+        {
+            return Some(from_live(session));
+        }
+        self.background.lock().get(session_id).map(from_live)
+    }
+
+    fn prepare_session_for_wake(&self, session_id: &str) -> bool {
+        let apply = |session: &mut LiveSession| -> bool {
+            if !agent_loop::is_sunsetz_backend(&session.backend) {
+                return false;
+            }
+            match session.fsm.state() {
+                SessionState::Ready => {
+                    if session.fsm.begin_stream().is_err() {
+                        return false;
+                    }
+                }
+                SessionState::Streaming => {
+                    if session.deferred_prompt_complete.is_none() {
+                        return false;
+                    }
+                    let _ = Self::try_finish_deferred_prompt_complete(session);
+                    if session.fsm.begin_stream().is_err() {
+                        return false;
+                    }
+                }
+                _ => return false,
+            }
+            session.allow_auto_wake = false;
+            session.streaming_message_id = Some(Uuid::new_v4().to_string());
+            session.stream_buf.clear();
+            session.stream_thought.clear();
+            session.stream_last_was_assistant = false;
+            session.stream_phase_id_locked = false;
+            session.stream_attachments.clear();
+            session.journal_throttle.reset();
+            session.open_tool_ids.clear();
+            session.seen_tool_ids.clear();
+            session.tools_this_turn = 0;
+            session.deferred_prompt_complete = None;
+            session.last_stall_emit = None;
+            true
+        };
+        {
+            let mut live = self.inner.lock();
+            if let Some(session) = live
+                .as_mut()
+                .filter(|session| session.app_session_id == session_id)
+            {
+                return apply(session);
+            }
+        }
+        let mut background = self.background.lock();
+        background
+            .get_mut(session_id)
+            .map(|session| apply(session))
+            .unwrap_or(false)
+    }
+
+    async fn maybe_start_wake_turn(self: &Arc<Self>, app: &AppHandle, session_id: &str) -> bool {
+        if session_id.is_empty() {
+            return false;
+        }
+        {
+            let mut inflight = self.wake_inflight.lock();
+            if !inflight.insert(session_id.to_string()) {
+                return false;
+            }
+        }
+        let started = self.start_wake_turn_inner(app, session_id).await;
+        if !started {
+            self.wake_inflight.lock().remove(session_id);
+        }
+        started
+    }
+
+    async fn start_wake_turn_inner(self: &Arc<Self>, app: &AppHandle, session_id: &str) -> bool {
+        let Some(inspect) = self.inspect_session_for_wake(session_id) else {
+            return false;
+        };
+        if !agent_loop::is_sunsetz_backend(&inspect.backend) {
+            return false;
+        }
+        let (pending, this_turn_running) = {
+            let registry = self.subagents.lock().await;
+            let pending = registry.pending_wake_count(session_id);
+            let this_turn_running = inspect
+                .host_turn_id
+                .as_deref()
+                .map(|turn| registry.running_for_turn(session_id, turn).len())
+                .unwrap_or(0);
+            (pending, this_turn_running)
+        };
+        match subagents::decide_auto_wake(
+            pending,
+            this_turn_running,
+            inspect.streaming,
+            inspect.deferred_prompt_complete,
+            inspect.awaiting_permission,
+            inspect.allow_auto_wake,
+        ) {
+            subagents::AutoWakeDecision::Start => {}
+            _ => return false,
+        }
+        if !self.prepare_session_for_wake(session_id) {
+            return false;
+        }
+        Self::emit_state(app, &self.snapshot());
+        let mgr = Arc::clone(self);
+        let app = app.clone();
+        let session_id = session_id.to_string();
+        let process_id = inspect.process_id;
+        let model_id = inspect.model_id;
+        let effort = inspect.effort;
+        let project_path = inspect.project_path;
+        let handle = tokio::runtime::Handle::current();
+        tauri::async_runtime::spawn_blocking(move || {
+            let result = handle.block_on(mgr.send_sunsetz_turn(
+                app,
+                session_id.clone(),
+                process_id,
+                model_id,
+                effort,
+                project_path,
+                "Continue the parent task using the background subagent results.".into(),
+                None,
+                Vec::new(),
+                Vec::new(),
+            ));
+            if let Err(error) = result {
+                tracing::warn!("sunsetz wake turn failed session={session_id}: {error}");
+                mgr.wake_inflight.lock().remove(&session_id);
+            }
+        });
+        true
     }
 
     pub async fn subagent_get(&self, id: &str) -> Result<SubagentView, String> {
@@ -5997,6 +6884,7 @@ impl SessionManager {
                 let _ = s.fsm.end_stream();
                 settle_active_skill_uses(s, crate::skill_feedback::SkillUseStatusV1::Interrupted);
             }
+            s.allow_auto_wake = false;
             s.streaming_message_id = None;
             s.stream_buf.clear();
             s.stream_thought.clear();
@@ -7558,7 +8446,112 @@ mod tests {
             tools_this_turn: 0,
             active_skill_uses: Vec::new(),
             pending_skill_settlement: None,
+            allow_auto_wake: false,
         }
+    }
+
+    struct IsolatedHome {
+        home: std::path::PathBuf,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl IsolatedHome {
+        fn new(label: &str) -> Self {
+            let lock = crate::runtime_compat::lock_test_process_env();
+            let home = std::env::temp_dir().join(format!(
+                "sunsetz-session-mgr-{label}-{}-{}",
+                std::process::id(),
+                Uuid::new_v4()
+            ));
+            std::fs::create_dir_all(&home).unwrap();
+            std::env::set_var("SUNSETZ_HOME", &home);
+            Self { home, _lock: lock }
+        }
+    }
+
+    impl Drop for IsolatedHome {
+        fn drop(&mut self) {
+            std::env::remove_var("SUNSETZ_HOME");
+            let _ = std::fs::remove_dir_all(&self.home);
+        }
+    }
+
+    fn ready_kernel_session(session_id: &str) -> LiveSession {
+        let mut live = test_live_session(session_id);
+        live.fsm.end_stream().unwrap();
+        live.streaming_message_id = None;
+        live.backend = agent_loop::BACKEND_SUNSETZ.into();
+        live
+    }
+
+    #[test]
+    fn install_background_kernel_does_not_steal_live() {
+        let _home = IsolatedHome::new("bg-install");
+        let mgr = SessionManager::new();
+        *mgr.inner.lock() = Some(ready_kernel_session("live"));
+        let meta = store::create_session(None, Some("Scheduled".into()), true).unwrap();
+        mgr.install_background_kernel_session(&meta.id, None)
+            .unwrap();
+        assert_eq!(
+            mgr.inner
+                .lock()
+                .as_ref()
+                .map(|session| session.app_session_id.as_str()),
+            Some("live")
+        );
+        assert!(mgr.background.lock().contains_key(&meta.id));
+        assert_eq!(mgr.snapshot().session_id.as_deref(), Some("live"));
+        assert!(mgr.snapshot().busy_session_ids.is_empty());
+    }
+
+    #[test]
+    fn snapshot_lists_background_busy_ids_without_changing_live() {
+        let mgr = SessionManager::new();
+        *mgr.inner.lock() = Some(ready_kernel_session("live"));
+        let mut background = test_live_session("sched");
+        background.backend = agent_loop::BACKEND_SUNSETZ.into();
+        mgr.background.lock().insert("sched".into(), background);
+        let snap = mgr.snapshot();
+        assert_eq!(snap.session_id.as_deref(), Some("live"));
+        assert_eq!(snap.busy_session_ids, vec!["sched".to_string()]);
+    }
+
+    #[test]
+    fn prepare_user_send_targets_background_session() {
+        let _home = IsolatedHome::new("bg-send");
+        let meta = store::create_session(None, Some("Scheduled".into()), true).unwrap();
+        let mgr = SessionManager::new();
+        *mgr.inner.lock() = Some(ready_kernel_session("live"));
+        let mut background = ready_kernel_session(&meta.id);
+        background.meta.id = meta.id.clone();
+        mgr.background.lock().insert(meta.id.clone(), background);
+        let prepared = mgr
+            .prepare_user_send(
+                Some(&meta.id),
+                "turn-1",
+                "hello scheduled",
+                "hello scheduled",
+                None,
+                None,
+                &[],
+            )
+            .unwrap();
+        assert_eq!(prepared.1, meta.id);
+        assert_eq!(
+            mgr.inner
+                .lock()
+                .as_ref()
+                .map(|session| session.app_session_id.as_str()),
+            Some("live")
+        );
+        assert_eq!(
+            mgr.background
+                .lock()
+                .get(&meta.id)
+                .map(|session| session.fsm.state()),
+            Some(SessionState::Streaming)
+        );
+        assert_eq!(mgr.snapshot().busy_session_ids, vec![meta.id.clone()]);
     }
 
     #[test]
@@ -7593,6 +8586,80 @@ mod tests {
                 .as_ref()
                 .map(|session| session.app_session_id.as_str()),
             Some("sid-ready")
+        );
+    }
+
+    #[test]
+    fn prepare_session_for_wake_begins_stream_from_ready() {
+        let mgr = SessionManager::new();
+        let mut live = test_live_session("sid-wake");
+        live.fsm.end_stream().unwrap();
+        live.streaming_message_id = None;
+        live.backend = agent_loop::BACKEND_SUNSETZ.into();
+        live.allow_auto_wake = true;
+        *mgr.inner.lock() = Some(live);
+        assert!(mgr.prepare_session_for_wake("sid-wake"));
+        let session = mgr.inner.lock();
+        let session = session.as_ref().unwrap();
+        assert_eq!(session.fsm.state(), SessionState::Streaming);
+        assert!(session.streaming_message_id.is_some());
+        assert!(!session.allow_auto_wake);
+    }
+
+    #[test]
+    fn steer_ready_session_holds_wake_for_user_send() {
+        let mgr = SessionManager::new();
+        let mut live = test_live_session("sid-steer");
+        live.fsm.end_stream().unwrap();
+        live.streaming_message_id = None;
+        live.backend = agent_loop::BACKEND_SUNSETZ.into();
+        live.allow_auto_wake = false;
+        *mgr.inner.lock() = Some(live);
+        let inspect = mgr.inspect_session_for_wake("sid-steer").unwrap();
+        assert_eq!(
+            subagents::decide_auto_wake(
+                1,
+                0,
+                inspect.streaming,
+                inspect.deferred_prompt_complete,
+                inspect.awaiting_permission,
+                inspect.allow_auto_wake,
+            ),
+            subagents::AutoWakeDecision::HoldForUserSend
+        );
+    }
+
+    #[test]
+    fn deferred_prompt_complete_starts_wake_when_this_turn_children_are_done() {
+        let mgr = SessionManager::new();
+        let mut live = test_live_session("sid-join");
+        live.backend = agent_loop::BACKEND_SUNSETZ.into();
+        live.deferred_prompt_complete = Some("end_turn".into());
+        live.allow_auto_wake = true;
+        live.host_turn_id = Some("t1".into());
+        *mgr.inner.lock() = Some(live);
+        let inspect = mgr.inspect_session_for_wake("sid-join").unwrap();
+        assert_eq!(
+            subagents::decide_auto_wake(
+                2,
+                0,
+                inspect.streaming,
+                inspect.deferred_prompt_complete,
+                inspect.awaiting_permission,
+                inspect.allow_auto_wake,
+            ),
+            subagents::AutoWakeDecision::Start
+        );
+        assert_eq!(
+            subagents::decide_auto_wake(
+                2,
+                1,
+                inspect.streaming,
+                inspect.deferred_prompt_complete,
+                inspect.awaiting_permission,
+                inspect.allow_auto_wake,
+            ),
+            subagents::AutoWakeDecision::WaitForThisTurn
         );
     }
 

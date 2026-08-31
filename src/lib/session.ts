@@ -37,6 +37,7 @@ export interface SessionSnapshot {
   title?: string;
   contextUsage?: SessionTokenUsage | null;
   sandbox?: import("./api").SandboxApplicationV1;
+  busySessionIds?: string[];
 }
 
 export interface SessionTokenUsage {
@@ -740,6 +741,7 @@ export const IDLE_SNAPSHOT: SessionSnapshot = {
   modelId: null,
   projectPath: null,
   title: "",
+  busySessionIds: [],
   sandbox: {
     requested: "off",
     applied: "off",

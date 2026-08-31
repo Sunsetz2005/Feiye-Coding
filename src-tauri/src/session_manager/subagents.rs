@@ -4,12 +4,14 @@
 //! not spawn grok, do not nest, and do not create worktrees.
 
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::json;
 use tokio::sync::Notify;
 use uuid::Uuid;
 
@@ -76,6 +78,88 @@ pub struct SubagentRecord {
     pub wake_pending: bool,
 }
 
+/// Host callback after a **background** child reaches a terminal status.
+pub type SubagentFinishedFn = Arc<
+    dyn Fn(
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+        ) -> Pin<Box<dyn Future<Output = ()> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// Cap for the model-facing wake prompt (not UI copy).
+pub const WAKE_PROMPT_CHARS: usize = 16_384;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutoWakeDecision {
+    /// No finished background child is waiting for the parent.
+    None,
+    /// Parent model is still in `run_turn`; do not interrupt it.
+    DeferWhileParentRuns,
+    /// This-turn background children (or a permission gate) still block join.
+    WaitForThisTurn,
+    /// Stop/Steer already ended the UI turn; the next user send consumes summaries.
+    HoldForUserSend,
+    /// Host should start a parent wake turn now.
+    Start,
+}
+
+/// Join/wake only this-turn children. Leftover background agents from earlier
+/// turns never delay PromptComplete and never ride along with Steer.
+pub fn decide_auto_wake(
+    pending_wakes: usize,
+    this_turn_running: usize,
+    parent_streaming: bool,
+    deferred_prompt_complete: bool,
+    awaiting_permission: bool,
+    allow_auto_wake: bool,
+) -> AutoWakeDecision {
+    if pending_wakes == 0 {
+        return AutoWakeDecision::None;
+    }
+    if this_turn_running > 0 || awaiting_permission {
+        return AutoWakeDecision::WaitForThisTurn;
+    }
+    if parent_streaming && !deferred_prompt_complete {
+        return AutoWakeDecision::DeferWhileParentRuns;
+    }
+    if !allow_auto_wake {
+        return AutoWakeDecision::HoldForUserSend;
+    }
+    AutoWakeDecision::Start
+}
+
+pub fn wake_prompt(views: &[SubagentView]) -> String {
+    let mut body = String::from("Background subagent results:\n");
+    let reserve = 160usize;
+    let budget = WAKE_PROMPT_CHARS.saturating_sub(reserve);
+    for view in views {
+        let summary = view.summary.trim();
+        let line = format!(
+            "- [{}] {} ({}, id={}): {}\n",
+            view.status.as_str(),
+            view.description,
+            view.agent_type,
+            view.id,
+            summary
+        );
+        if body.chars().count() + line.chars().count() > budget {
+            body.push_str("- … additional subagent results truncated\n");
+            break;
+        }
+        body.push_str(&line);
+    }
+    body.push_str(
+        "Continue the parent task using these results. Do not claim you are still waiting for them.",
+    );
+    body
+}
+
 impl SubagentRecord {
     fn view(&self) -> SubagentView {
         SubagentView {
@@ -100,6 +184,12 @@ pub struct SubagentRegistry {
 impl SubagentRegistry {
     pub fn get(&self, id: &str) -> Option<SubagentView> {
         self.agents.get(id).map(SubagentRecord::view)
+    }
+
+    pub fn parent_turn_id(&self, id: &str) -> Option<String> {
+        self.agents
+            .get(id)
+            .map(|agent| agent.parent_turn_id.clone())
     }
 
     pub fn running_count(&self) -> usize {
@@ -191,6 +281,13 @@ impl SubagentRegistry {
         .to_string()
     }
 
+    pub fn pending_wake_count(&self, session_id: &str) -> usize {
+        self.agents
+            .values()
+            .filter(|agent| agent.parent_session_id == session_id && agent.wake_pending)
+            .count()
+    }
+
     pub fn take_pending_wakes(&mut self, session_id: &str) -> Vec<SubagentView> {
         let mut out = Vec::new();
         for agent in self.agents.values_mut() {
@@ -200,6 +297,19 @@ impl SubagentRegistry {
             }
         }
         out
+    }
+
+    pub fn restore_pending_wakes(&mut self, views: &[SubagentView]) {
+        for view in views {
+            if let Some(agent) = self.agents.get_mut(&view.id) {
+                if matches!(
+                    agent.status,
+                    SubagentStatus::Completed | SubagentStatus::Failed
+                ) {
+                    agent.wake_pending = true;
+                }
+            }
+        }
     }
 }
 
@@ -354,6 +464,10 @@ pub fn child_config(
         kind,
         spawn_depth: 1,
         subagents: agent_loop::SubagentHooks::default(),
+        sandbox_profile: parent.sandbox_profile,
+        skill_prompt_chars: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        allow_schedule_task: false,
+        allow_skill_save: false,
     }
 }
 
@@ -387,6 +501,7 @@ pub async fn spawn_with_registry(
     on_lifecycle: Arc<
         dyn Fn(String, String, String, String, Option<String>, Option<String>) + Send + Sync,
     >,
+    on_finished: Option<SubagentFinishedFn>,
 ) -> String {
     let kind = match AgentKind::parse_spawn_type(&request.agent_type) {
         Ok(kind) => kind,
@@ -469,23 +584,35 @@ pub async fn spawn_with_registry(
         let desc = request.description.clone();
         let session = parent_session_id.clone();
         let agent_id = id.clone();
+        let finished = on_finished.clone();
         tokio::spawn(async move {
             let result = run.await;
             let status = if result.cancelled {
-                "failed"
+                "cancelled"
             } else if result.failed {
                 "failed"
             } else {
                 "completed"
             };
             on_life(
-                session,
-                life_id,
+                session.clone(),
+                life_id.clone(),
                 status.into(),
-                desc,
+                desc.clone(),
                 Some(kind.as_str().into()),
-                Some(agent_id),
+                Some(agent_id.clone()),
             );
+            if let Some(finished) = finished {
+                finished(
+                    session,
+                    life_id,
+                    status.into(),
+                    desc,
+                    kind.as_str().into(),
+                    agent_id,
+                )
+                .await;
+            }
         });
         return spawn_result_json(&id, SubagentStatus::Running, kind, &request.description, "");
     }
@@ -513,6 +640,7 @@ pub async fn spawn_with_registry(
 mod tests {
     use super::*;
     use crate::agent_loop::LlmEndpoint;
+    use serde_json::Value;
     use std::collections::VecDeque;
     use std::sync::Mutex;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -599,6 +727,10 @@ mod tests {
             kind,
             spawn_depth: 1,
             subagents: agent_loop::SubagentHooks::default(),
+            sandbox_profile: crate::runtime_compat::SandboxProfileV1::Off,
+            skill_prompt_chars: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            allow_schedule_task: false,
+            allow_skill_save: false,
         }
     }
 
@@ -677,6 +809,7 @@ mod tests {
                 tool_call_id: "call-bg".into(),
             },
             Arc::new(|_a, _b, _c, _d, _e, _f| {}),
+            None,
         )
         .await;
         let parsed: Value = serde_json::from_str(&output).unwrap();
@@ -694,6 +827,127 @@ mod tests {
         let agent = registry.lock().await.get(&id).unwrap();
         assert_eq!(agent.status, SubagentStatus::Completed);
         assert!(agent.summary.contains("done in bg"), "{}", agent.summary);
+        assert_eq!(registry.lock().await.pending_wake_count("sess"), 1);
+        let wakes = registry.lock().await.take_pending_wakes("sess");
+        assert_eq!(wakes.len(), 1);
+        assert_eq!(registry.lock().await.pending_wake_count("sess"), 0);
+        registry.lock().await.restore_pending_wakes(&wakes);
+        assert_eq!(registry.lock().await.pending_wake_count("sess"), 1);
+    }
+
+    #[test]
+    fn decide_auto_wake_joins_this_turn_only() {
+        assert_eq!(
+            decide_auto_wake(0, 0, false, false, false, true),
+            AutoWakeDecision::None
+        );
+        assert_eq!(
+            decide_auto_wake(1, 1, true, true, false, true),
+            AutoWakeDecision::WaitForThisTurn
+        );
+        assert_eq!(
+            decide_auto_wake(1, 0, true, false, false, true),
+            AutoWakeDecision::DeferWhileParentRuns
+        );
+        assert_eq!(
+            decide_auto_wake(1, 0, false, false, false, false),
+            AutoWakeDecision::HoldForUserSend
+        );
+        assert_eq!(
+            decide_auto_wake(2, 0, true, true, false, true),
+            AutoWakeDecision::Start
+        );
+        assert_eq!(
+            decide_auto_wake(1, 0, false, false, false, true),
+            AutoWakeDecision::Start
+        );
+    }
+
+    #[test]
+    fn wake_prompt_is_model_facing_and_bounded() {
+        let prompt = wake_prompt(&[SubagentView {
+            id: "child-1".into(),
+            parent_session_id: "s1".into(),
+            description: "search repo".into(),
+            agent_type: "explore".into(),
+            status: SubagentStatus::Completed,
+            background: true,
+            summary: "found the gate".into(),
+            transcript: Vec::new(),
+        }]);
+        assert!(prompt.contains("Background subagent results"));
+        assert!(prompt.contains("found the gate"));
+        assert!(prompt.contains("child-1"));
+        assert!(prompt.contains("Continue the parent task"));
+        let huge = "x".repeat(WAKE_PROMPT_CHARS);
+        let truncated = wake_prompt(&[SubagentView {
+            id: "child-2".into(),
+            parent_session_id: "s1".into(),
+            description: "huge".into(),
+            agent_type: "general".into(),
+            status: SubagentStatus::Failed,
+            background: true,
+            summary: huge,
+            transcript: Vec::new(),
+        }]);
+        assert!(truncated.contains("truncated"));
+        assert!(truncated.chars().count() <= WAKE_PROMPT_CHARS);
+    }
+
+    #[test]
+    fn restore_pending_wakes_skips_cancelled() {
+        let mut registry = SubagentRegistry::default();
+        registry.insert(SubagentRecord {
+            id: "done".into(),
+            parent_session_id: "s1".into(),
+            parent_turn_id: "t0".into(),
+            description: "old".into(),
+            kind: AgentKind::Explore,
+            background: true,
+            status: SubagentStatus::Completed,
+            stop: Arc::new(AtomicBool::new(false)),
+            transcript: Vec::new(),
+            summary: "ok".into(),
+            wake_pending: false,
+        });
+        registry.insert(SubagentRecord {
+            id: "stopped".into(),
+            parent_session_id: "s1".into(),
+            parent_turn_id: "t1".into(),
+            description: "now".into(),
+            kind: AgentKind::Explore,
+            background: true,
+            status: SubagentStatus::Cancelled,
+            stop: Arc::new(AtomicBool::new(true)),
+            transcript: Vec::new(),
+            summary: "subagent cancelled".into(),
+            wake_pending: false,
+        });
+        registry.restore_pending_wakes(&[
+            SubagentView {
+                id: "done".into(),
+                parent_session_id: "s1".into(),
+                description: "old".into(),
+                agent_type: "explore".into(),
+                status: SubagentStatus::Completed,
+                background: true,
+                summary: "ok".into(),
+                transcript: Vec::new(),
+            },
+            SubagentView {
+                id: "stopped".into(),
+                parent_session_id: "s1".into(),
+                description: "now".into(),
+                agent_type: "explore".into(),
+                status: SubagentStatus::Cancelled,
+                background: true,
+                summary: "subagent cancelled".into(),
+                transcript: Vec::new(),
+            },
+        ]);
+        assert_eq!(registry.pending_wake_count("s1"), 1);
+        assert!(registry.agents.get("done").unwrap().wake_pending);
+        assert!(!registry.agents.get("stopped").unwrap().wake_pending);
     }
 
     #[test]

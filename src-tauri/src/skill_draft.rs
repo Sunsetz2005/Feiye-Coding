@@ -727,6 +727,173 @@ pub fn save(request: SkillDraftSaveRequest) -> Result<SkillDraftSaveResult, Stri
         .map(|(result, ())| result)
 }
 
+#[derive(Debug, Clone)]
+pub struct SkillSavePermissionPreview {
+    pub title: String,
+    pub preview: String,
+    pub path_target: String,
+}
+
+fn tool_string(arguments: &serde_json::Value, keys: &[&str]) -> String {
+    for key in keys {
+        if let Some(value) = arguments.get(*key).and_then(|item| item.as_str()) {
+            if !value.trim().is_empty() {
+                return value.trim().to_string();
+            }
+        }
+    }
+    String::new()
+}
+
+fn tool_references(arguments: &serde_json::Value) -> Result<Vec<SkillDraftReference>, String> {
+    let Some(items) = arguments.get("references").and_then(|value| value.as_array()) else {
+        return Ok(Vec::new());
+    };
+    let mut references = Vec::with_capacity(items.len());
+    for item in items {
+        let path = item
+            .get("path")
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+            .trim();
+        let content = item
+            .get("content")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        if path.is_empty() {
+            return Err("skill_save references require path".into());
+        }
+        references.push(SkillDraftReference {
+            path: path.to_string(),
+            content: content.to_string(),
+        });
+    }
+    Ok(references)
+}
+
+fn parse_scope(raw: &str) -> Result<SkillDraftScope, String> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "" | "user" => Ok(SkillDraftScope::User),
+        "project" => Ok(SkillDraftScope::Project),
+        other => Err(format!("unsupported skill_save scope `{other}`")),
+    }
+}
+
+fn project_root_string(project_root: Option<&Path>) -> Option<String> {
+    project_root.and_then(|path| path.to_str()).map(str::to_string)
+}
+
+pub fn permission_preview_from_tool(
+    arguments: &serde_json::Value,
+    project_root: Option<&Path>,
+) -> Result<SkillSavePermissionPreview, String> {
+    let request = request_from_tool(arguments, project_root)?;
+    let base = resolve_base(&request)?;
+    let slug = slugify(&request.name)?;
+    let target = base.join(&slug);
+    let action = tool_string(arguments, &["action"]).to_ascii_lowercase();
+    let scope = match request.scope {
+        SkillDraftScope::User => "user",
+        SkillDraftScope::Project => "project",
+    };
+    Ok(SkillSavePermissionPreview {
+        title: if action == "update" {
+            format!("Update Skill {slug}")
+        } else {
+            format!("Save Skill {slug}")
+        },
+        preview: format!("{action} {scope} skill `{slug}` · {} bytes", request.skill_md.len()),
+        path_target: target.to_string_lossy().into_owned(),
+    })
+}
+
+fn request_from_tool(
+    arguments: &serde_json::Value,
+    project_root: Option<&Path>,
+) -> Result<SkillDraftSaveRequest, String> {
+    let action = tool_string(arguments, &["action"]).to_ascii_lowercase();
+    match action.as_str() {
+        "create" => {
+            let name = tool_string(arguments, &["name"]);
+            let description = tool_string(arguments, &["description"]);
+            let skill_md = tool_string(arguments, &["skill_md", "skillMd"]);
+            let scope = parse_scope(&tool_string(arguments, &["scope"]))?;
+            if scope == SkillDraftScope::Project && project_root.is_none() {
+                return Err("project skill_save requires a trusted project".into());
+            }
+            Ok(SkillDraftSaveRequest {
+                name,
+                description,
+                skill_md,
+                references: tool_references(arguments)?,
+                scope,
+                project_path: project_root_string(project_root),
+                overwrite: false,
+            })
+        }
+        "update" => {
+            let skill_id = tool_string(arguments, &["skill_id", "skillId", "id"]);
+            let expected = tool_string(arguments, &["expected_tree_hash", "expectedTreeHash", "tree_hash"]);
+            if skill_id.is_empty() || expected.is_empty() {
+                return Err("update requires skill_id and expected_tree_hash".into());
+            }
+            let project = project_root_string(project_root);
+            let inventory = crate::skill_inventory::build_host_trusted_inventory_v1(project.clone())?;
+            let item = inventory
+                .items
+                .into_iter()
+                .find(|item| item.id == skill_id)
+                .ok_or_else(|| format!("unknown skill `{skill_id}`"))?;
+            if item.source == crate::skill_inventory::SkillInventorySourceV1::Plugin {
+                return Err("plugin Skills cannot be overwritten by skill_save".into());
+            }
+            if item.tree_hash != expected {
+                return Err(format!(
+                    "STALE_SKILL: expected tree hash {expected}, current {}",
+                    item.tree_hash
+                ));
+            }
+            crate::skill_inventory::load_skill_md_v1(&skill_id, &expected, project.as_deref())?;
+            let scope = match item.source {
+                crate::skill_inventory::SkillInventorySourceV1::Project => SkillDraftScope::Project,
+                _ => SkillDraftScope::User,
+            };
+            if scope == SkillDraftScope::Project && project_root.is_none() {
+                return Err("project skill_save requires a trusted project".into());
+            }
+            let name = tool_string(arguments, &["name"]);
+            let description = tool_string(arguments, &["description"]);
+            Ok(SkillDraftSaveRequest {
+                name: if name.is_empty() { item.name } else { name },
+                description: if description.is_empty() {
+                    item.description
+                } else {
+                    description
+                },
+                skill_md: tool_string(arguments, &["skill_md", "skillMd"]),
+                references: tool_references(arguments)?,
+                scope,
+                project_path: project,
+                overwrite: true,
+            })
+        }
+        other => Err(format!(
+            "skill_save action must be create or update, not `{other}`"
+        )),
+    }
+}
+
+pub fn save_from_agent_tool(
+    arguments: &serde_json::Value,
+    project_root: Option<&Path>,
+) -> Result<String, String> {
+    let result = save(request_from_tool(arguments, project_root)?)?;
+    Ok(format!(
+        "saved slug={} scope={} overwritten={}",
+        result.slug, result.scope, result.overwritten
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -967,5 +1134,86 @@ mod tests {
         fs::remove_file(project.join(".grok")).unwrap();
         fs::remove_dir_all(project).unwrap();
         fs::remove_dir_all(outside).unwrap();
+    }
+
+    struct IsolatedHome {
+        home: PathBuf,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl IsolatedHome {
+        fn new(label: &str) -> Self {
+            let lock = crate::runtime_compat::lock_test_process_env();
+            let home = std::env::temp_dir().join(format!(
+                "sunsetz-skill-save-{label}-{}-{}",
+                std::process::id(),
+                uuid::Uuid::new_v4()
+            ));
+            fs::create_dir_all(&home).unwrap();
+            std::env::set_var("SUNSETZ_HOME", &home);
+            Self { home, _lock: lock }
+        }
+    }
+
+    impl Drop for IsolatedHome {
+        fn drop(&mut self) {
+            std::env::remove_var("SUNSETZ_HOME");
+            let _ = fs::remove_dir_all(&self.home);
+        }
+    }
+
+    fn sample_skill_md() -> String {
+        request().skill_md
+    }
+
+    #[test]
+    fn agent_tool_creates_user_skill_without_returning_a_filesystem_path() {
+        let isolated = IsolatedHome::new("create");
+        let output = save_from_agent_tool(
+            &serde_json::json!({
+                "action": "create",
+                "name": "Review Helper",
+                "description": "Review a local change safely.",
+                "skill_md": sample_skill_md(),
+                "scope": "user"
+            }),
+            None,
+        )
+        .unwrap();
+        assert!(output.contains("review-helper-skill"));
+        assert!(!output.contains(isolated.home.to_string_lossy().as_ref()));
+        assert!(crate::paths::agent_home_dir()
+            .join("skills/review-helper-skill/SKILL.md")
+            .is_file());
+    }
+
+    #[test]
+    fn agent_tool_update_rejects_stale_tree_hash() {
+        let _isolated = IsolatedHome::new("update-stale");
+        save_from_agent_tool(
+            &serde_json::json!({
+                "action": "create",
+                "name": "Review Helper",
+                "description": "Review a local change safely.",
+                "skill_md": sample_skill_md(),
+                "scope": "user"
+            }),
+            None,
+        )
+        .unwrap();
+        let error = save_from_agent_tool(
+            &serde_json::json!({
+                "action": "update",
+                "skill_id": "missing",
+                "expected_tree_hash": "abc",
+                "skill_md": sample_skill_md()
+            }),
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("unknown skill") || error.contains("STALE_SKILL"),
+            "{error}"
+        );
     }
 }

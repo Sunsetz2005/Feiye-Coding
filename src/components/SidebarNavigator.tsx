@@ -159,7 +159,7 @@ interface SidebarTreeModel {
   historyOpen: boolean;
   activeProjectId: string | null;
   activeSessionId: string | null;
-  busySessionId: string | null;
+  busySessionIds: ReadonlySet<string>;
   pendingAskSessionIds: ReadonlySet<string>;
   projects: readonly SidebarProjectItem[];
   orphanSessions: readonly SidebarSessionItem[];
@@ -405,7 +405,7 @@ function previewPosition(anchor: PreviewAnchor): React.CSSProperties {
 function sortSessions(
   sessions: readonly SidebarSessionItem[],
   sort: SidebarSessionSort,
-  busySessionId: string | null,
+  busySessionIds: ReadonlySet<string>,
   pendingAskSessionIds: ReadonlySet<string>,
 ): SidebarSessionItem[] {
   const copy = [...sessions];
@@ -413,7 +413,7 @@ function sortSessions(
     if (sort === "priority") {
       const rank = (item: SidebarSessionItem) => {
         if (pendingAskSessionIds.has(item.id)) return 2;
-        if (busySessionId === item.id) return 1;
+        if (busySessionIds.has(item.id)) return 1;
         return 0;
       };
       const delta = rank(b) - rank(a);
@@ -791,7 +791,7 @@ export function SidebarNavigator({
       const show = () => {
         const activeCount = project.sessions.filter(
           (session) =>
-            session.id === tree.busySessionId ||
+            tree.busySessionIds.has(session.id) ||
             tree.pendingAskSessionIds.has(session.id),
         ).length;
         const lastActivity =
@@ -814,7 +814,7 @@ export function SidebarNavigator({
       if (immediate) show();
       else previewTimerRef.current = window.setTimeout(show, PREVIEW_DELAY_MS);
     },
-    [closePreview, holdPreview, tree.busySessionId, tree.pendingAskSessionIds],
+    [closePreview, holdPreview, tree.busySessionIds, tree.pendingAskSessionIds],
   );
   const scheduleSessionPreview = useCallback(
     (
@@ -1088,7 +1088,7 @@ export function SidebarNavigator({
                   ...tree.orphanSessions,
                 ],
                 tree.sessionSort,
-                tree.busySessionId,
+                tree.busySessionIds,
                 tree.pendingAskSessionIds,
               )}
               getKey={(item) => item.id}
@@ -1104,7 +1104,7 @@ export function SidebarNavigator({
                     item={item}
                     projectId={owner?.id ?? null}
                     active={tree.activeSessionId === item.id}
-                    working={tree.busySessionId === item.id}
+                    working={tree.busySessionIds.has(item.id)}
                     needsAnswer={tree.pendingAskSessionIds.has(item.id)}
                     labels={labels.tree}
                     onOpen={tree.onOpenSession}
@@ -1117,7 +1117,7 @@ export function SidebarNavigator({
                       scheduleSessionPreview(
                         item,
                         owner?.name ?? null,
-                        tree.busySessionId === item.id,
+                        tree.busySessionIds.has(item.id),
                         tree.pendingAskSessionIds.has(item.id),
                         anchor,
                         immediate,
@@ -1135,12 +1135,12 @@ export function SidebarNavigator({
             const sessionsOpen = project.open;
             const sessionListId = `${idPrefix}-project-${index}`;
             const projectWorking = project.sessions.some(
-              (item) => item.id === tree.busySessionId,
+              (item) => tree.busySessionIds.has(item.id),
             );
             const projectSessions = sortSessions(
               project.sessions,
               tree.sessionSort,
-              tree.busySessionId,
+              tree.busySessionIds,
               tree.pendingAskSessionIds,
             );
 
@@ -1294,7 +1294,7 @@ export function SidebarNavigator({
                             item={item}
                             projectId={project.id}
                             active={tree.activeSessionId === item.id}
-                            working={tree.busySessionId === item.id}
+                            working={tree.busySessionIds.has(item.id)}
                             needsAnswer={tree.pendingAskSessionIds.has(item.id)}
                             labels={labels.tree}
                             onOpen={tree.onOpenSession}
@@ -1307,7 +1307,7 @@ export function SidebarNavigator({
                               scheduleSessionPreview(
                                 item,
                                 project.name,
-                                tree.busySessionId === item.id,
+                                tree.busySessionIds.has(item.id),
                                 tree.pendingAskSessionIds.has(item.id),
                                 anchor,
                                 immediate,
@@ -1379,7 +1379,7 @@ export function SidebarNavigator({
                   item={item}
                   projectId={null}
                   active={tree.activeSessionId === item.id}
-                  working={tree.busySessionId === item.id}
+                  working={tree.busySessionIds.has(item.id)}
                   needsAnswer={tree.pendingAskSessionIds.has(item.id)}
                   labels={labels.tree}
                   onOpen={tree.onOpenSession}
@@ -1392,7 +1392,7 @@ export function SidebarNavigator({
                     scheduleSessionPreview(
                       item,
                       null,
-                      tree.busySessionId === item.id,
+                      tree.busySessionIds.has(item.id),
                       tree.pendingAskSessionIds.has(item.id),
                       anchor,
                       immediate,

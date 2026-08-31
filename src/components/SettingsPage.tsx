@@ -123,6 +123,8 @@ export interface SettingsPageProps {
   onStreamStallSeconds?: (v: number) => void;
   sandboxProfile?: api.SandboxProfileV1;
   onSandboxProfile?: (v: api.SandboxProfileV1) => void;
+  runScheduledTasksInBackground?: boolean;
+  onRunScheduledTasksInBackground?: (v: boolean) => void;
   /** Store App API keys in OS keychain (default off → secrets.json). */
   storeApiKeysInKeychain?: boolean;
   onStoreApiKeysInKeychain?: (v: boolean) => void;
@@ -408,6 +410,8 @@ export function SettingsPage({
   onStreamStallSeconds,
   sandboxProfile = "off",
   onSandboxProfile,
+  runScheduledTasksInBackground = false,
+  onRunScheduledTasksInBackground,
   storeApiKeysInKeychain = false,
   onStoreApiKeysInKeychain,
   cliInfo,
@@ -1455,6 +1459,27 @@ export function SettingsPage({
                 </div>
               ) : null}
             </div>
+            {onRunScheduledTasksInBackground ? (
+              <div className="settings-row">
+                <div className="settings-row__text">
+                  <div className="settings-row__label">
+                    {t("settings.runScheduledTasksInBackground")}
+                  </div>
+                  <div className="settings-row__desc">
+                    {t("settings.runScheduledTasksInBackgroundDesc")}
+                  </div>
+                </div>
+                <UiCheck
+                  checked={runScheduledTasksInBackground}
+                  onChange={() =>
+                    onRunScheduledTasksInBackground(
+                      !runScheduledTasksInBackground,
+                    )
+                  }
+                  ariaLabel={t("settings.runScheduledTasksInBackground")}
+                />
+              </div>
+            ) : null}
             <div className="settings-row settings-row--stack">
               <div className="settings-row__text">
                 <div className="settings-row__label">

@@ -94,4 +94,17 @@ describe("SettingsPage runtime kernel", () => {
     await user.click(screen.getByRole("button", { name: "Use built-in kernel" }));
     expect(onKernelBackend).toHaveBeenCalledWith("sunsetz");
   });
+
+  it("toggles running scheduled tasks after quit", async () => {
+    const onRunScheduledTasksInBackground = vi.fn();
+    const user = userEvent.setup();
+    renderRuntime({
+      runScheduledTasksInBackground: false,
+      onRunScheduledTasksInBackground,
+    });
+    await user.click(
+      screen.getByRole("checkbox", { name: "Run scheduled tasks after quit" }),
+    );
+    expect(onRunScheduledTasksInBackground).toHaveBeenCalledWith(true);
+  });
 });

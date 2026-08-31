@@ -15,6 +15,7 @@ import {
   isDeveloperMockBackend,
   isLegacyGrokBackend,
   isSessionBusy,
+  IDLE_SNAPSHOT,
   parseCompactContent,
   parseToolStepContent,
   pickLatestTurnTool,
@@ -37,6 +38,10 @@ import {
 } from "./session";
 
 describe("session projection", () => {
+  it("idle snapshot lists no busy background sessions", () => {
+    expect(IDLE_SNAPSHOT.busySessionIds).toEqual([]);
+  });
+
   it("input matrix Ready / Streaming / Stop (draft ok while stream; send blocked)", () => {
     expect(canType("ready")).toBe(true);
     expect(canType("idle")).toBe(true);

@@ -400,7 +400,7 @@ const en = {
   "plugin.oauthClientMissing":
     "Couldn't start Google sign-in. Try Connect again.",
   "plugin.authFailed":
-    "Sign-in was rejected. For GitHub, classic PATs need repo; fine-grained tokens need Issues and Pull requests.",
+    "The credential was rejected. Check the token, its scopes, or the Google account, then try again.",
   "plugin.unreachable":
     "Could not reach the service. Check the network or HTTPS proxy, then try again.",
   "plugin.probeFailed": "Could not reach the connector runtime.",
@@ -784,6 +784,15 @@ const en = {
   "settings.storeApiKeysInKeychainDesc":
     "Off by default: keys stay in the app data folder (mode 0600). Turn on to use the OS keychain — the system may ask once. Official login still uses Sunsetz Runtime auth.",
   "settings.memory.title": "Reviewed memory",
+  "settings.memory.auto.title": "Auto memory",
+  "settings.memory.auto.desc":
+    "The built-in kernel can save bounded notes and a user profile and inject them into later turns. This is separate from reviewed candidates and is never filled from search hits. Secrets are rejected.",
+  "settings.memory.auto.enabled": "Enable auto memory",
+  "settings.memory.auto.notes": "Notes",
+  "settings.memory.auto.profile": "User profile",
+  "settings.memory.auto.empty": "No entries yet.",
+  "settings.memory.auto.clear": "Clear auto memory",
+  "settings.memory.auto.confirmClear": "Clear notes and profile",
   "settings.memory.reviewOnly": "Review-only memory candidates",
   "settings.memory.desc":
     "Candidates are stored separately from chat search and are never injected into the Runtime automatically.",
@@ -911,7 +920,10 @@ const en = {
     "If a turn has no stream chunks or tool activity for this long, show a Cancel / Keep waiting prompt (default 120). Long-running tools that still emit events do not count as stalled.",
   "settings.sandboxProfile": "Runtime sandbox",
   "settings.sandboxProfileDesc":
-    "Spawn-critical isolation profile. Changing it restarts the Runtime. Linux uses bubblewrap; unsupported platforms fail closed when a sandbox is requested.",
+    "Isolates built-in kernel commands. Linux uses bubblewrap; macOS uses sandbox-exec; Windows uses an AppContainer. A missing helper fails closed instead of silently dropping isolation. The default kernel applies the next command; the legacy ACP adapter still restarts on change and remains Linux-only.",
+  "settings.runScheduledTasksInBackground": "Run scheduled tasks after quit",
+  "settings.runScheduledTasksInBackgroundDesc":
+    "Starts Sunsetz in the background at login and about every five minutes so due tasks can run without opening the window. Quit from the tray still stops the app until the next wake. Off by default.",
   "settings.sandbox.off": "Off (default)",
   "settings.sandbox.workspaceWrite": "Workspace write",
   "settings.sandbox.readOnly": "Workspace read-only",
@@ -921,10 +933,10 @@ const en = {
   "settings.sandboxUnverified": "not verified",
   "settings.sandboxState": "{state} · platform: {platform}",
   "settings.sandboxState.off": "disabled",
-  "settings.sandboxState.available": "available on next Runtime start",
-  "settings.sandboxState.needsInstall": "bubblewrap is not installed",
+  "settings.sandboxState.available": "will apply to the next command",
+  "settings.sandboxState.needsInstall": "the sandbox helper is not installed",
   "settings.sandboxState.unsupportedPlatform": "unsupported on this platform",
-  "settings.sandboxState.applied": "applied to the Runtime process",
+  "settings.sandboxState.applied": "applied to Host commands",
   "settings.sandboxState.unknown": "unknown state",
   "agent.idleRecycledToast":
     "Agent process recycled after idle — session kept; next message will reconnect.",
@@ -2114,7 +2126,7 @@ const zh: Record<MessageKey, string> = {
   "plugin.credentialMissing": "连接前需要凭据。",
   "plugin.oauthClientMissing": "无法开始 Google 登录。请再试一次连接。",
   "plugin.authFailed":
-    "登录被拒绝。GitHub 经典令牌需要 repo；细粒度令牌需要 Issues 和 Pull requests。",
+    "凭据被拒绝。请检查令牌、权限范围或 Google 账号后重试。",
   "plugin.unreachable": "连不上该服务。请检查网络或 HTTPS 代理后重试。",
   "plugin.probeFailed": "无法连接插件运行时。",
   "plugin.runtimeRejected": "Open Connector 地址必须是本机回环（127.0.0.1 或 localhost）。",
@@ -2479,6 +2491,15 @@ const zh: Record<MessageKey, string> = {
   "settings.storeApiKeysInKeychainDesc":
     "默认关闭：密钥写在应用数据目录（0600）。开启后写入系统钥匙串，系统可能要求一次授权。官方登录仍走 Sunsetz Runtime 鉴权，不受此项影响。",
   "settings.memory.title": "已审阅记忆",
+  "settings.memory.auto.title": "自动记忆",
+  "settings.memory.auto.desc":
+    "内建内核可以把有界笔记和用户画像写入后续回合。这与已审阅候选分开，也不会用检索命中填充。含密钥的内容会被拒绝。",
+  "settings.memory.auto.enabled": "启用自动记忆",
+  "settings.memory.auto.notes": "笔记",
+  "settings.memory.auto.profile": "用户画像",
+  "settings.memory.auto.empty": "还没有条目。",
+  "settings.memory.auto.clear": "清空自动记忆",
+  "settings.memory.auto.confirmClear": "清空笔记和画像",
   "settings.memory.reviewOnly": "仅经审阅的记忆候选",
   "settings.memory.desc":
     "候选与会话搜索分开存储，绝不会自动注入 Runtime。",
@@ -2603,7 +2624,10 @@ const zh: Record<MessageKey, string> = {
     "若一轮对话在该时间内无任何流式片段或工具活动，将提示「取消本轮 / 继续等待」（默认 120）。仍有工具事件的长任务不会误判为卡顿。",
   "settings.sandboxProfile": "Runtime 沙箱",
   "settings.sandboxProfileDesc":
-    "该隔离配置会参与进程复用键，修改后强制重启 Runtime。Linux 使用 bubblewrap；不支持的平台在请求沙箱时会拒绝启动，不会静默降级。",
+    "隔离内建内核的命令。Linux 使用 bubblewrap，macOS 使用 sandbox-exec，Windows 使用 AppContainer。缺少辅助程序时会直接拒绝，不会静默降级。默认内核对下一条命令生效；旧版 ACP 适配器仍会在修改后重启，且仅 Linux 可隔离进程。",
+  "settings.runScheduledTasksInBackground": "退出后继续跑已安排任务",
+  "settings.runScheduledTasksInBackgroundDesc":
+    "登录时以及大约每五分钟在后台启动 Sunsetz，到期任务不必打开窗口。从托盘退出后仍会等到下一次唤醒。默认关闭。",
   "settings.sandbox.off": "关闭（默认）",
   "settings.sandbox.workspaceWrite": "工作区可写",
   "settings.sandbox.readOnly": "工作区只读",
@@ -2613,10 +2637,10 @@ const zh: Record<MessageKey, string> = {
   "settings.sandboxUnverified": "未验证",
   "settings.sandboxState": "{state} · 平台：{platform}",
   "settings.sandboxState.off": "已关闭",
-  "settings.sandboxState.available": "将在下次 Runtime 启动时应用",
-  "settings.sandboxState.needsInstall": "尚未安装 bubblewrap",
+  "settings.sandboxState.available": "将应用到下一条命令",
+  "settings.sandboxState.needsInstall": "尚未安装沙箱辅助程序",
   "settings.sandboxState.unsupportedPlatform": "当前平台不支持",
-  "settings.sandboxState.applied": "已应用到 Runtime 进程",
+  "settings.sandboxState.applied": "已应用到 Host 命令",
   "settings.sandboxState.unknown": "状态未知",
   "agent.idleRecycledToast":
     "Agent 进程因闲置已回收 — 会话仍在；下次发送将重新连接。",

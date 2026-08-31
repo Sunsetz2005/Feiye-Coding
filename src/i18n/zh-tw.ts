@@ -389,7 +389,7 @@ export const zhTW: Record<MessageKey, string> = {
   "plugin.credentialMissing": "連接前需要憑證。",
   "plugin.oauthClientMissing": "無法開始 Google 登入。請再試一次連接。",
   "plugin.authFailed":
-    "登入被拒絕。GitHub 經典權杖需要 repo；細粒度權杖需要 Issues 和 Pull requests。",
+    "憑證被拒絕。請檢查權杖、權限範圍或 Google 帳號後重試。",
   "plugin.unreachable": "連不上該服務。請檢查網路或 HTTPS 代理後重試。",
   "plugin.probeFailed": "無法連接外掛執行環境。",
   "plugin.runtimeRejected": "Open Connector 位址必須是本機回環（127.0.0.1 或 localhost）。",
@@ -744,6 +744,15 @@ export const zhTW: Record<MessageKey, string> = {
   "settings.storeApiKeysInKeychainDesc":
     "預設關閉：金鑰寫在應用資料目錄（0600）。開啟後寫入系統鑰匙圈，系統可能要求一次授權。官方登入仍走 Sunsetz Runtime 驗證，不受此項影響。",
   "settings.memory.title": "已審閱記憶",
+  "settings.memory.auto.title": "自動記憶",
+  "settings.memory.auto.desc":
+    "內建核心可以把有界筆記和使用者畫像寫入後續回合。這與已審閱候選分開，也不會用檢索命中填入。含金鑰的內容會被拒絕。",
+  "settings.memory.auto.enabled": "啟用自動記憶",
+  "settings.memory.auto.notes": "筆記",
+  "settings.memory.auto.profile": "使用者畫像",
+  "settings.memory.auto.empty": "還沒有條目。",
+  "settings.memory.auto.clear": "清空自動記憶",
+  "settings.memory.auto.confirmClear": "清空筆記和畫像",
   "settings.memory.reviewOnly": "僅經審閱的記憶候選",
   "settings.memory.desc":
     "候選與對話搜尋分開儲存，絕不會自動注入 Runtime。",
@@ -868,7 +877,10 @@ export const zhTW: Record<MessageKey, string> = {
     "若一輪對話在該時間內無任何串流片段或工具活動，將提示「取消本輪 / 繼續等待」（預設 120）。仍有工具事件的長任務不會誤判為停滯。",
   "settings.sandboxProfile": "Runtime 沙箱",
   "settings.sandboxProfileDesc":
-    "此隔離設定會納入行程重用鍵，修改後強制重新啟動 Runtime。Linux 使用 bubblewrap；不支援的平台在要求沙箱時會拒絕啟動，不會靜默降級。",
+    "隔離內建核心的命令。Linux 使用 bubblewrap，macOS 使用 sandbox-exec，Windows 使用 AppContainer。缺少輔助程式時會直接拒絕，不會靜默降級。預設核心對下一條命令生效；舊版 ACP 轉接器仍會在修改後重新啟動，且僅 Linux 可隔離行程。",
+  "settings.runScheduledTasksInBackground": "結束後繼續跑已排程任務",
+  "settings.runScheduledTasksInBackgroundDesc":
+    "登入時以及大約每五分鐘在背景啟動 Sunsetz，到期任務不必打開視窗。從選單列結束後仍會等到下一次喚醒。預設關閉。",
   "settings.sandbox.off": "關閉（預設）",
   "settings.sandbox.workspaceWrite": "工作區可寫",
   "settings.sandbox.readOnly": "工作區唯讀",
@@ -878,10 +890,10 @@ export const zhTW: Record<MessageKey, string> = {
   "settings.sandboxUnverified": "未驗證",
   "settings.sandboxState": "{state} · 平台：{platform}",
   "settings.sandboxState.off": "已關閉",
-  "settings.sandboxState.available": "將在下次 Runtime 啟動時套用",
-  "settings.sandboxState.needsInstall": "尚未安裝 bubblewrap",
+  "settings.sandboxState.available": "將套用到下一條命令",
+  "settings.sandboxState.needsInstall": "尚未安裝沙箱輔助程式",
   "settings.sandboxState.unsupportedPlatform": "目前平台不支援",
-  "settings.sandboxState.applied": "已套用到 Runtime 行程",
+  "settings.sandboxState.applied": "已套用到 Host 命令",
   "settings.sandboxState.unknown": "狀態未知",
   "agent.idleRecycledToast":
     "Agent 行程因閒置已回收 — 工作階段仍在；下次傳送將重新連線。",

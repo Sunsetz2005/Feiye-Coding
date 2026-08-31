@@ -38,7 +38,7 @@
 
 | Codex | Sunsetz | 状态 |
 |-------|---------|------|
-| 顶部：Threads / Skills / Automations 一类模块入口 | 新建、搜索、已安排、插件市场（精选连接器 + 详情三条提示词） | GitHub（PAT）与 Gmail / Drive / Calendar（Google 登录）在 App 内连接并注入默认内核；其余项显示即将在 App 内连接，不要求本机 Open Connector |
+| 顶部：Threads / Skills / Automations 一类模块入口 | 新建、搜索、已安排、插件市场（精选连接器 + 详情三条提示词） | GitHub / Notion / Slack（粘贴令牌）与 Gmail / Drive / Calendar（Google 登录）在 App 内连接并注入默认内核；其余项显示即将在 App 内连接，不要求本机 Open Connector |
 | 项目列表，悬停三点：Remove，⌘O 再添加 | 项目行无披露箭头；栏标题悬停折叠；悬停三点/新对话；编辑名与源文件夹；磁盘不删 | 已对齐密度；不创建 worktree、不做远程项目 |
 | 项目下线程列表；过滤器（含 Chronological） | 项目下任务虚拟列表；后台待回答标记 | 可做：缺线程状态过滤（进行中 / 待审阅 / 时间序）。数据已有 session 状态，不必等新后端 |
 | 线程搜索，文档中曾为 ⌘G；较新文档改为可自定义、默认未指定 | ⌘K 搜会话/项目；FTS5 可搜可见正文 | 已对齐能力；快捷键不要改成 Codex 的 ⌘G（Sunsetz ⌘K 已是命令搜索） |
@@ -46,7 +46,7 @@
 | 侧栏 Skills：浏览团队/项目 skill | 加号/`/` 可调用已信任 skill；设置扩展里有 skill 列表；无独立 Skills 浏览页 | 可做浏览页，但清单不得带正文或本地路径；安装/市场 **缺后端** |
 | 侧栏 Automations：收件箱 + 创建流 | 「已安排」页 + 应用内调度账本 | 已对齐入口；Codex 式「唤醒同一线程」**缺后端**（现策略过期 claim 不自动 replacement） |
 | 无品牌色左边框的中性选中 | 项目/任务中性整行背景，coral 不用于选中 | 已对齐 |
-| 任务/线程悬停预览 | 450ms 停留预览；键盘立即等价；项目 Git 摘要仍惰性未完成 | 可做：项目 Git 摘要（阶段 5 已列） |
+| 任务/线程悬停预览 | 450ms 停留预览；键盘立即等价；项目 Git 摘要惰性读取；会话菜单可移动到已有项目 | 已对齐能力；原生窗口验收仍缺 |
 
 ### 1.3 中栏与局内交互
 
@@ -198,7 +198,7 @@ Sunsetz Changes 已有 Session vs Workspace 两堆，但没有 Codex 那三个 s
 只在 Host 已能证明的前提下搬界面。前三项不破坏 AskUserDock 唯一计划入口。
 
 1. **右栏只读结果舱**：Plan tab 接 `PlanArtifactV1` 的 approved / executing / done；Changes 增加 last-turn / workspace scope 文案，仍禁止 discard 全部。
-2. **左栏密度**：线程状态过滤（运行中、待回答、最近）；项目 Git 摘要惰性读取（阶段 5）。
+2. **左栏密度**：线程状态过滤（运行中、待回答、最近）。项目 Git 摘要与移动到项目级联已有代码，差原生验收。
 3. **快捷键补齐已有动作**：⌘B 侧栏、⌘⌥B 资源面板、⌘O 添加项目、⌘⇧[ / ] 切任务。不改 ⌘K。
 4. **会话内查找 ⌘F**：只搜当前 journal 可见文本。
 5. **Skills 只读浏览页**：复用库存，不开放安装。
