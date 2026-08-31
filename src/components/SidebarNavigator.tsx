@@ -937,7 +937,6 @@ export function SidebarNavigator({
 
       <div
         className="sidebar-chrome"
-        data-tauri-drag-region
         onDoubleClick={() => {
           if (chrome.useCustomWindowChrome) chrome.onToggleMaximize();
         }}

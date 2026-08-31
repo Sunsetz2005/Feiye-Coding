@@ -438,6 +438,16 @@ describe("SidebarNavigator", () => {
     expect(screen.getByText("Drop a folder")).toBeTruthy();
     fireEvent.doubleClick(container.querySelector(".sidebar-chrome")!);
     expect(props.chrome.onToggleMaximize).toHaveBeenCalledTimes(1);
+    expect(
+      container
+        .querySelector(".sidebar-chrome")
+        ?.hasAttribute("data-tauri-drag-region"),
+    ).toBe(false);
+    expect(
+      container
+        .querySelector(".sidebar-chrome__drag")
+        ?.hasAttribute("data-tauri-drag-region"),
+    ).toBe(true);
 
     await user.click(screen.getByRole("button", { name: "Hide sidebar" }));
     await user.click(screen.getByRole("button", { name: "New task" }));

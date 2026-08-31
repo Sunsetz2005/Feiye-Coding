@@ -34,4 +34,4 @@ Codex 截图用于校准信息层级、空间来源与交互密度，不复制�
 
 Playwright 覆盖空工作台和资源面板的 900×600、1200×800、1600×1000 × 深色、浅色、高对比度矩阵，并在每个 viewport 执行 200% 基本几何检查。Linux CI 会断言主题属性和布局行为；Darwin 本地像素基线仍是视觉差异的权威。
 
-当前提交重新构建的 macOS 调试 `.app` 已在 `backingScaleFactor=2.0` 的 Retina 屏幕人工确认侧栏与资源面板关闭后的焦点恢复、资源内容卸载、侧栏 Space 重开和中性项目选中态。Windows CI 原生窗口诊断已通过，但仍必须按[阶段一 Windows 实机验收](../验收/windows-stage1-manual.md)完成物理设备证据。
+当前提交重新构建的 macOS 调试 `.app` 已在 `backingScaleFactor=2.0` 的 Retina 屏幕人工确认侧栏与资源面板关闭后的焦点恢复、资源内容卸载、侧栏 Space 重开和中性项目选中态。Windows CI 原生窗口诊断已通过。2026-08-31 物理 Windows 11 / 200% / `3f96d3a` 实机为 1 PASS / 6 FAIL，阶段一不得标记完成；见[阶段一 Windows 实机验收](../验收/windows-stage1-manual.md)。

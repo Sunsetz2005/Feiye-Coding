@@ -76,6 +76,20 @@ describe("WorkbenchTopbar", () => {
     expect(asideButton.getAttribute("aria-pressed")).toBe("true");
     await user.click(asideButton);
     expect(onToggleAside).toHaveBeenCalledTimes(1);
+
+    expect(
+      document.querySelector(".main__top")?.hasAttribute("data-tauri-drag-region"),
+    ).toBe(false);
+    expect(
+      document
+        .querySelector(".main__title-row")
+        ?.hasAttribute("data-tauri-drag-region"),
+    ).toBe(false);
+    expect(
+      document
+        .querySelector(".main__title-drag")
+        ?.hasAttribute("data-tauri-drag-region"),
+    ).toBe(true);
   });
 
   it("shows exceptional connection and retry state without inventing actions", () => {

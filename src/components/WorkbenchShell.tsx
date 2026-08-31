@@ -4,6 +4,7 @@ import {
   type ReactNode,
   type RefObject,
 } from "react";
+import { scheduleFocusRestore } from "@/lib/a11yFocus";
 
 export interface WorkbenchShellProps {
   children: ReactNode;
@@ -11,16 +12,6 @@ export interface WorkbenchShellProps {
   asideCollapsed?: boolean;
   sidebarToggleRef?: RefObject<HTMLElement | null>;
   asideToggleRef?: RefObject<HTMLElement | null>;
-}
-
-function scheduleFocus(target: RefObject<HTMLElement | null>) {
-  const run = () => target.current?.focus({ preventScroll: true });
-  if (typeof window.requestAnimationFrame === "function") {
-    const frame = window.requestAnimationFrame(run);
-    return () => window.cancelAnimationFrame(frame);
-  }
-  const timer = window.setTimeout(run, 0);
-  return () => window.clearTimeout(timer);
 }
 
 /**
@@ -40,21 +31,37 @@ export function WorkbenchShell({
 }: WorkbenchShellProps) {
   const previousSidebarCollapsed = useRef(sidebarCollapsed);
   const previousAsideCollapsed = useRef(asideCollapsed);
+  const restoreSidebar = useRef(false);
+  const restoreAside = useRef(false);
+
+  if (previousSidebarCollapsed.current === false && sidebarCollapsed === true) {
+    restoreSidebar.current = true;
+  }
+  if (sidebarCollapsed === false) restoreSidebar.current = false;
+  previousSidebarCollapsed.current = sidebarCollapsed;
+
+  if (previousAsideCollapsed.current === false && asideCollapsed === true) {
+    restoreAside.current = true;
+  }
+  if (asideCollapsed === false) restoreAside.current = false;
+  previousAsideCollapsed.current = asideCollapsed;
 
   useEffect(() => {
-    const justClosed =
-      previousSidebarCollapsed.current === false && sidebarCollapsed === true;
-    previousSidebarCollapsed.current = sidebarCollapsed;
-    if (!justClosed || !sidebarToggleRef) return;
-    return scheduleFocus(sidebarToggleRef);
+    if (!restoreSidebar.current || !sidebarToggleRef) return;
+    return scheduleFocusRestore(() => {
+      const el = sidebarToggleRef.current;
+      if (el) restoreSidebar.current = false;
+      return el;
+    });
   }, [sidebarCollapsed, sidebarToggleRef]);
 
   useEffect(() => {
-    const justClosed =
-      previousAsideCollapsed.current === false && asideCollapsed === true;
-    previousAsideCollapsed.current = asideCollapsed;
-    if (!justClosed || !asideToggleRef) return;
-    return scheduleFocus(asideToggleRef);
+    if (!restoreAside.current || !asideToggleRef) return;
+    return scheduleFocusRestore(() => {
+      const el = asideToggleRef.current;
+      if (el) restoreAside.current = false;
+      return el;
+    });
   }, [asideCollapsed, asideToggleRef]);
 
   return (

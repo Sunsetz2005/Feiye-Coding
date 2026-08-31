@@ -42,6 +42,50 @@
   background: var(--wb-stage);
 }
 
+/*
+ * WebView2 Tab often does not set :focus-visible. Keyboard mode on <html>
+ * keeps chrome rings visible after Tab and after pane-close focus restore.
+ * Composer text fields stay quiet; the shell uses :focus-within instead.
+ */
+:where(
+  button,
+  a,
+  [role="button"],
+  [role="menuitem"],
+  [role="option"],
+  [role="tab"],
+  [tabindex]:not([tabindex="-1"])
+):focus-visible,
+html[data-kb-focus="true"]
+  :where(
+    button,
+    a,
+    [role="button"],
+    [role="menuitem"],
+    [role="option"],
+    [role="tab"],
+    [tabindex]:not([tabindex="-1"])
+  ):focus {
+  outline: 2px solid var(--text-secondary) !important;
+  outline-offset: 2px;
+}
+
+html[data-kb-focus="true"] .composer:focus-within,
+html[data-kb-focus="true"] .composer-wrap--float .composer:focus-within {
+  border-color: var(--text-secondary);
+  box-shadow:
+    var(--wb-shadow-composer, 0 14px 38px rgba(0, 0, 0, 0.26)),
+    0 0 0 2px color-mix(in srgb, var(--text-secondary) 45%, transparent);
+}
+
+html[data-kb-focus="true"] textarea:focus,
+html[data-kb-focus="true"] textarea:focus-visible,
+html[data-kb-focus="true"] .composer__input:focus,
+html[data-kb-focus="true"] .composer__input:focus-visible {
+  outline: none !important;
+  box-shadow: none !important;
+}
+
 .main {
   min-width: 380px;
   background: var(--wb-stage);

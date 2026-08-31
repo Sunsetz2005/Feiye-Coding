@@ -263,6 +263,7 @@ import {
   useTranscriptMeta,
 } from "@/entities/session";
 import {
+  installKeyboardFocusMode,
   preferPermissionFocus,
   trapTabKey,
 } from "@/lib/a11yFocus";
@@ -391,6 +392,7 @@ function emptyPlanState(title: string): PlanState & { visible: boolean } {
 export default function App() {
   const [theme, setTheme] = useState<Theme>(() => loadTheme(localStorage));
   const [layout, setLayout] = useState(() => loadLayout(localStorage));
+  useEffect(() => installKeyboardFocusMode(), []);
   const [session, setSession] = useState<SessionSnapshot>(IDLE_SNAPSHOT);
   /** Host live agent (may differ from the session currently viewed in the UI). */
   const [liveHost, setLiveHost] = useState<SessionSnapshot>(IDLE_SNAPSHOT);

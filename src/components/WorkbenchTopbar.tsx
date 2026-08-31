@@ -67,12 +67,8 @@ export function WorkbenchTopbar({
   const asideLabel = asideCollapsed ? showAsideLabel : hideAsideLabel;
 
   return (
-    <div
-      className="main__top"
-      data-tauri-drag-region
-      onDoubleClick={onTitlebarDoubleClick}
-    >
-      <div className="main__title-row" data-tauri-drag-region>
+    <div className="main__top" onDoubleClick={onTitlebarDoubleClick}>
+      <div className="main__title-row">
         {sidebarCollapsed ? (
           <Tip label={showSidebarLabel}>
             <button
@@ -105,17 +101,15 @@ export function WorkbenchTopbar({
           </span>
         ) : null}
 
-        {automationTitle ? (
-          <h1 className="main__title" data-tauri-drag-region>
-            {title}
-          </h1>
-        ) : (
-          <Tip label={title}>
-            <h1 className="main__title" data-tauri-drag-region>
-              {title}
-            </h1>
-          </Tip>
-        )}
+        <div className="main__title-drag" data-tauri-drag-region>
+          {automationTitle ? (
+            <h1 className="main__title">{title}</h1>
+          ) : (
+            <Tip label={title}>
+              <h1 className="main__title">{title}</h1>
+            </Tip>
+          )}
+        </div>
 
         {onOpenSessionMenu ? (
           <Tip label={sessionMenuLabel}>

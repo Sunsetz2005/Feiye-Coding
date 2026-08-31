@@ -102,3 +102,129 @@ export function preferPermissionFocus(
   }
   return focusFirst(root);
 }
+
+const KEYBOARD_FOCUS_ATTR = "data-kb-focus";
+const KEYBOARD_FOCUS_KEYS = new Set([
+  "Tab",
+  "ArrowUp",
+  "ArrowDown",
+  "ArrowLeft",
+  "ArrowRight",
+  "Home",
+  "End",
+  "Escape",
+  "Enter",
+  " ",
+]);
+
+type ChromeFocusOptions = FocusOptions & { focusVisible?: boolean };
+
+function documentRoot(): HTMLElement | null {
+  return typeof document === "undefined" ? null : document.documentElement;
+}
+
+/** Mark the document as keyboard-operated so chrome can show a focus ring. */
+export function markKeyboardFocus(): void {
+  documentRoot()?.setAttribute(KEYBOARD_FOCUS_ATTR, "true");
+}
+
+/** Clear keyboard-focus mode after pointer input. */
+export function clearKeyboardFocus(): void {
+  documentRoot()?.removeAttribute(KEYBOARD_FOCUS_ATTR);
+}
+
+/**
+ * WebView2 does not always set `:focus-visible` for Tab. Pair that selector
+ * with `html[data-kb-focus]` so restored pane triggers stay visible.
+ */
+export function installKeyboardFocusMode(
+  doc: Document | null | undefined = typeof document === "undefined"
+    ? null
+    : document,
+): () => void {
+  if (!doc?.documentElement || typeof doc.addEventListener !== "function") {
+    return () => {};
+  }
+  const root = doc.documentElement;
+  const onKeyDown = (event: Event) => {
+    const key = (event as KeyboardEvent).key;
+    if (typeof key !== "string" || !KEYBOARD_FOCUS_KEYS.has(key)) return;
+    const typed = event as KeyboardEvent;
+    if (typed.metaKey || typed.ctrlKey || typed.altKey) return;
+    root.setAttribute(KEYBOARD_FOCUS_ATTR, "true");
+  };
+  const onPointer = () => {
+    root.removeAttribute(KEYBOARD_FOCUS_ATTR);
+  };
+  doc.addEventListener("keydown", onKeyDown, true);
+  doc.addEventListener("mousedown", onPointer, true);
+  doc.addEventListener("pointerdown", onPointer, true);
+  return () => {
+    doc.removeEventListener("keydown", onKeyDown, true);
+    doc.removeEventListener("mousedown", onPointer, true);
+    doc.removeEventListener("pointerdown", onPointer, true);
+    root.removeAttribute(KEYBOARD_FOCUS_ATTR);
+  };
+}
+
+/** Focus a control and request a visible keyboard ring when the engine allows it. */
+export function focusElement(
+  el: HTMLElement | null | undefined,
+): HTMLElement | null {
+  if (!el || typeof el.focus !== "function") return null;
+  markKeyboardFocus();
+  const options: ChromeFocusOptions = {
+    preventScroll: true,
+    focusVisible: true,
+  };
+  try {
+    el.focus(options);
+  } catch {
+    el.focus();
+  }
+  return el;
+}
+
+/**
+ * Restore focus after a pane unmounts. Retry a few frames so a newly mounted
+ * trigger (Show sidebar) is attached before we give up.
+ */
+export function scheduleFocusRestore(
+  getTarget: () => HTMLElement | null | undefined,
+  attempts = 4,
+): () => void {
+  let cancelled = false;
+  let remaining = Math.max(1, attempts);
+  let frame = 0;
+  let timer = 0;
+
+  const queue = (cb: () => void) => {
+    if (typeof requestAnimationFrame === "function") {
+      frame = requestAnimationFrame(cb);
+      return;
+    }
+    timer = setTimeout(cb, 0) as unknown as number;
+  };
+
+  const run = () => {
+    if (cancelled) return;
+    const el = getTarget();
+    if (el) {
+      focusElement(el);
+      return;
+    }
+    remaining -= 1;
+    if (remaining <= 0) return;
+    queue(run);
+  };
+
+  queue(run);
+
+  return () => {
+    cancelled = true;
+    if (frame && typeof cancelAnimationFrame === "function") {
+      cancelAnimationFrame(frame);
+    }
+    if (timer) clearTimeout(timer);
+  };
+}
