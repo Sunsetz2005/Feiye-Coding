@@ -1,4 +1,8 @@
 //! Windows AppContainer + Job Object isolation for `run_command`.
+//!
+//! Bindings follow `windows` 0.61: `BOOL` lives on `windows_core`, ACL pointers
+//! are `*mut ACL` (there is no `PACL`), and several security APIs return
+//! `WIN32_ERROR` instead of `Result`.
 
 use std::ffi::c_void;
 use std::os::windows::io::{FromRawHandle, RawHandle};
@@ -11,23 +15,24 @@ use std::time::Duration;
 
 use windows::core::{HRESULT, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{
-    CloseHandle, LocalFree, BOOL, HANDLE, HLOCAL, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    CloseHandle, LocalFree, ERROR_SUCCESS, HANDLE, HLOCAL, TRUE, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    WIN32_ERROR,
 };
 use windows::Win32::Security::Authorization::{
-    GetNamedSecurityInfoW, SetEntriesInAclW, SetNamedSecurityInfoW, EXPLICIT_ACCESS_W,
-    SE_FILE_OBJECT, SET_ACCESS, TRUSTEE_IS_SID, TRUSTEE_IS_WELL_KNOWN_GROUP, TRUSTEE_W,
+    GetNamedSecurityInfoW, SetEntriesInAclW, SetNamedSecurityInfoW, EXPLICIT_ACCESS_W, SET_ACCESS,
+    SE_FILE_OBJECT, TRUSTEE_IS_SID, TRUSTEE_IS_WELL_KNOWN_GROUP, TRUSTEE_W,
 };
 use windows::Win32::Security::Isolation::{
     CreateAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
 };
 use windows::Win32::Security::{
-    FreeSid, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, SUB_CONTAINERS_AND_OBJECTS_INHERIT, ACL,
-    DACL_SECURITY_INFORMATION, PACL, PSID,
+    FreeSid, ACL, DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES,
+    SUB_CONTAINERS_AND_OBJECTS_INHERIT,
 };
 use windows::Win32::Storage::FileSystem::{FILE_ALL_ACCESS, FILE_GENERIC_READ};
 use windows::Win32::System::JobObjects::{
-    AssignProcessToJobObject, CreateJobObjectW, SetInformationJobObject, TerminateJobObject,
-    JobObjectExtendedLimitInformation, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+    SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
     JOB_OBJECT_LIMIT_ACTIVE_PROCESS, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
 };
 use windows::Win32::System::Pipes::CreatePipe;
@@ -78,7 +83,7 @@ struct SidHandle(PSID);
 
 impl Drop for SidHandle {
     fn drop(&mut self) {
-        if !self.0.0.is_null() {
+        if !self.0 .0.is_null() {
             unsafe {
                 let _ = FreeSid(self.0);
             }
@@ -113,9 +118,25 @@ fn already_exists(code: HRESULT) -> bool {
     code.0 == 0x8007_00B7_u32 as i32 || code.0 == 183
 }
 
+fn win32_ok(error: WIN32_ERROR, what: &str) -> Result<(), String> {
+    if error == ERROR_SUCCESS {
+        Ok(())
+    } else {
+        Err(format!("SANDBOX_UNAVAILABLE: {what} failed ({error:?})"))
+    }
+}
+
+fn optional_acl(acl: *mut ACL) -> Option<*const ACL> {
+    if acl.is_null() {
+        None
+    } else {
+        Some(acl as *const ACL)
+    }
+}
+
 struct AclRestore {
     path: WideString,
-    old_dacl: PACL,
+    old_dacl: *mut ACL,
     descriptor: PSECURITY_DESCRIPTOR,
 }
 
@@ -128,7 +149,7 @@ impl Drop for AclRestore {
                 DACL_SECURITY_INFORMATION,
                 None,
                 None,
-                Some(self.old_dacl.0 as *const ACL),
+                optional_acl(self.old_dacl),
                 None,
             );
             if !self.descriptor.0.is_null() {
@@ -140,20 +161,22 @@ impl Drop for AclRestore {
 
 fn grant_path(sid: PSID, path: &Path, write: bool) -> Result<AclRestore, String> {
     let wide = WideString::from_path(path);
-    let mut old_dacl = PACL::default();
+    let mut old_dacl: *mut ACL = ptr::null_mut();
     let mut descriptor = PSECURITY_DESCRIPTOR::default();
     unsafe {
-        GetNamedSecurityInfoW(
-            wide.pcwstr(),
-            SE_FILE_OBJECT,
-            DACL_SECURITY_INFORMATION,
-            None,
-            None,
-            Some(&mut old_dacl),
-            None,
-            &mut descriptor,
-        )
-        .map_err(|error| format!("SANDBOX_UNAVAILABLE: GetNamedSecurityInfoW failed ({error})"))?;
+        win32_ok(
+            GetNamedSecurityInfoW(
+                wide.pcwstr(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                None,
+                None,
+                Some(&mut old_dacl),
+                None,
+                &mut descriptor,
+            ),
+            "GetNamedSecurityInfoW",
+        )?;
     }
     let access = if write {
         FILE_ALL_ACCESS.0
@@ -170,22 +193,27 @@ fn grant_path(sid: PSID, path: &Path, write: bool) -> Result<AclRestore, String>
         grfInheritance: SUB_CONTAINERS_AND_OBJECTS_INHERIT,
         Trustee: trustee,
     };
-    let mut new_dacl = PACL::default();
+    let mut new_dacl: *mut ACL = ptr::null_mut();
     unsafe {
-        SetEntriesInAclW(Some(&[entry]), Some(old_dacl), &mut new_dacl).map_err(|error| {
-            format!("SANDBOX_UNAVAILABLE: SetEntriesInAclW failed ({error})")
-        })?;
-        SetNamedSecurityInfoW(
-            wide.pcwstr(),
-            SE_FILE_OBJECT,
-            DACL_SECURITY_INFORMATION,
-            None,
-            None,
-            Some(new_dacl.0 as *const ACL),
-            None,
-        )
-        .map_err(|error| format!("SANDBOX_UNAVAILABLE: SetNamedSecurityInfoW failed ({error})"))?;
-        let _ = LocalFree(Some(HLOCAL(new_dacl.0 as *mut c_void)));
+        win32_ok(
+            SetEntriesInAclW(Some(&[entry]), optional_acl(old_dacl), &mut new_dacl),
+            "SetEntriesInAclW",
+        )?;
+        win32_ok(
+            SetNamedSecurityInfoW(
+                wide.pcwstr(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                None,
+                None,
+                optional_acl(new_dacl),
+                None,
+            ),
+            "SetNamedSecurityInfoW",
+        )?;
+        if !new_dacl.is_null() {
+            let _ = LocalFree(Some(HLOCAL(new_dacl as *mut c_void)));
+        }
     }
     Ok(AclRestore {
         path: wide,
@@ -200,11 +228,16 @@ fn create_inheritable_pipe() -> Result<(HANDLE, HANDLE), String> {
     let attrs = SECURITY_ATTRIBUTES {
         nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
         lpSecurityDescriptor: ptr::null_mut(),
-        bInheritHandle: BOOL(1),
+        bInheritHandle: TRUE,
     };
     unsafe {
-        CreatePipe(&mut read, &mut write, Some(&attrs), 0)
-            .map_err(|error| format!("SANDBOX_UNAVAILABLE: CreatePipe failed ({error})"))?;
+        CreatePipe(
+            &mut read,
+            &mut write,
+            Some(&attrs as *const SECURITY_ATTRIBUTES),
+            0,
+        )
+        .map_err(|error| format!("SANDBOX_UNAVAILABLE: CreatePipe failed ({error})"))?;
     }
     Ok((read, write))
 }
@@ -263,9 +296,8 @@ fn run_windows_isolated_inner(
     let _temp_acl = grant_path(sid.0, &temp, true)?;
 
     let job = unsafe {
-        CreateJobObjectW(None, PCWSTR::null()).map_err(|error| {
-            format!("SANDBOX_UNAVAILABLE: CreateJobObjectW failed ({error})")
-        })?
+        CreateJobObjectW(None, PCWSTR::null())
+            .map_err(|error| format!("SANDBOX_UNAVAILABLE: CreateJobObjectW failed ({error})"))?
     };
     let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
     limits.BasicLimitInformation.LimitFlags =
@@ -295,24 +327,25 @@ fn run_windows_isolated_inner(
 
     let mut attr_size = 0_usize;
     unsafe {
-        let _ = InitializeProcThreadAttributeList(
-            LPPROC_THREAD_ATTRIBUTE_LIST(ptr::null_mut()),
-            1,
-            0,
-            &mut attr_size,
-        );
+        let _ = InitializeProcThreadAttributeList(None, 1, Some(0), &mut attr_size);
     }
     let mut attr_buf = vec![0_u8; attr_size.max(1)];
     let attr_list = LPPROC_THREAD_ATTRIBUTE_LIST(attr_buf.as_mut_ptr() as *mut c_void);
     unsafe {
-        InitializeProcThreadAttributeList(attr_list, 1, 0, &mut attr_size).map_err(|error| {
-            format!("SANDBOX_UNAVAILABLE: InitializeProcThreadAttributeList failed ({error})")
-        })?;
+        InitializeProcThreadAttributeList(Some(attr_list), 1, Some(0), &mut attr_size).map_err(
+            |error| {
+                format!("SANDBOX_UNAVAILABLE: InitializeProcThreadAttributeList failed ({error})")
+            },
+        )?;
         UpdateProcThreadAttribute(
             attr_list,
             0,
             PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES as usize,
-            Some((&mut capabilities as *mut _).cast::<c_void>()),
+            Some(
+                (&mut capabilities as *mut windows::Win32::Security::SECURITY_CAPABILITIES)
+                    .cast::<c_void>()
+                    .cast_const(),
+            ),
             std::mem::size_of::<windows::Win32::Security::SECURITY_CAPABILITIES>(),
             None,
             None,
@@ -338,7 +371,7 @@ fn run_windows_isolated_inner(
     let created = unsafe {
         CreateProcessW(
             None,
-            PWSTR(cmd.0.as_mut_ptr()),
+            Some(PWSTR(cmd.0.as_mut_ptr())),
             None,
             None,
             true,
