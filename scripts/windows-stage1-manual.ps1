@@ -71,7 +71,9 @@ $checks = @(
     title = "Display configuration evidence"
     instructions = @(
       "Open Windows Settings > System > Display on the monitor used for Sunsetz.",
-      "Keep the Scale control and its 200% value visible for the evidence screenshot.",
+      "Keep the Scale control and its 200% value visible. Do not open Accounts.",
+      "If 200% expands the Settings account rail, crop to the Scale dropdown or shrink that window so no name, email, or avatar is visible. A screenshot with account information is invalid.",
+      "GetDpiForSystem in this script is only a helper. A value of 96 does not fail display when the Settings page shows 200% without account information.",
       "Confirm Sunsetz will be tested on this same monitor."
     )
   },
@@ -89,8 +91,9 @@ $checks = @(
     title = "Keyboard path and visible focus"
     instructions = @(
       "Use only Tab, Shift+Tab, Enter, Space, and Escape.",
-      "Traverse the composer, topbar, account entry, task rows, project rows, and main navigation.",
-      "Confirm every focused control has a visible focus indicator and no hidden control receives focus.",
+      "Traverse the composer, topbar, account entry, task rows, project rows, empty-session suggestion cards, and main navigation.",
+      "Confirm every focused control has a visible focus indicator, including cards after the first two. A control that has DOM focus but no visible ring is FAIL.",
+      "Confirm no hidden control receives focus.",
       "Confirm project disclosure responds to both Enter and Space."
     )
   },

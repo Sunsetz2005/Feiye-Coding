@@ -19,7 +19,7 @@
 | Sunsetz identity | `.sidebar-brand-row` |
 | 新建、搜索、已安排、插件 | `.sidebar-nav` 真实入口 |
 | 项目与任务 | 披露按钮使用 `aria-expanded` / `aria-controls`；项目与任务选择分离，当前项使用 `aria-current` |
-| 任务键盘行为 | 原生 `button` 响应 Enter / Space；可见 `:focus-visible` 焦点环 |
+| 任务键盘行为 | 原生 `button` 响应 Enter / Space；`html[data-kb-focus]` 与 `:focus-visible` 使用内侧焦点环 |
 | 虚拟任务行 | CSS 与 `VirtualList` 共用 34px 行高、2px 间距 token |
 | 待回答状态 | `.tree-l3__status--question` |
 | 账户入口 | `.sidebar__footer` |

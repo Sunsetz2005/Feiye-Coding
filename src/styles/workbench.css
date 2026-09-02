@@ -45,7 +45,8 @@
 /*
  * WebView2 Tab often does not set :focus-visible. Keyboard mode on <html>
  * keeps chrome rings visible after Tab and after pane-close focus restore.
- * Composer text fields stay quiet; the shell uses :focus-within instead.
+ * Inset the ring so overflow:hidden shells (stage, sidebar, composer) cannot
+ * clip it. Composer text fields stay quiet; the shell uses :focus-within.
  */
 :where(
   button,
@@ -67,7 +68,7 @@ html[data-kb-focus="true"]
     [tabindex]:not([tabindex="-1"])
   ):focus {
   outline: 2px solid var(--text-secondary) !important;
-  outline-offset: 2px;
+  outline-offset: -2px;
 }
 
 html[data-kb-focus="true"] .composer:focus-within,
@@ -424,6 +425,7 @@ html[data-kb-focus="true"] .composer__input:focus-visible {
 
 .composer-empty-hero__cards {
   pointer-events: auto;
+  isolation: isolate;
   width: 100%;
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -431,6 +433,7 @@ html[data-kb-focus="true"] .composer__input:focus-visible {
 }
 
 .composer-empty-hero__card {
+  position: relative;
   min-height: 108px;
   padding: 16px 14px;
   display: flex;
@@ -453,6 +456,11 @@ html[data-kb-focus="true"] .composer__input:focus-visible {
   background: var(--wb-surface-hover);
 }
 
+.composer-empty-hero__card:focus,
+.composer-empty-hero__card:focus-visible {
+  z-index: 2;
+}
+
 .composer-empty-hero__card-icon {
   color: var(--text-secondary);
 }
@@ -460,6 +468,27 @@ html[data-kb-focus="true"] .composer__input:focus-visible {
 @media (max-width: 860px) {
   .composer-empty-hero__cards {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-height: 760px) {
+  .composer-empty-hero {
+    padding: 0 16px 148px;
+    align-content: center;
+  }
+
+  .composer-empty-hero__cards {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .composer-empty-hero__card {
+    min-height: 72px;
+    padding: 12px;
+    gap: 10px;
+  }
+
+  .composer-empty-hero__title {
+    font-size: clamp(20px, 2.6vw, 28px);
   }
 }
 

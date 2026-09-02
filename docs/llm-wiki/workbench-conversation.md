@@ -31,7 +31,7 @@
 
 `SidebarNavigator` 拥有侧栏渲染、项目/任务选择、当前项语义、虚拟任务行、悬停预览和账户入口；数据加载、菜单动作与 Host 协调仍由 `App.tsx` 提供。单个项目不再使用独立披露箭头：点击项目行选中并切换其会话列表；整个「项目」栏的折叠箭头只在该栏悬停或聚焦时出现。任务预览停留 450ms 后调用 `session_preview`，以 30 秒短缓存合并同一 session 的并发请求，并丢弃移出、滚动、折叠、菜单打开或虚拟行卸载后的过期响应。键盘聚焦跳过停留延迟。会话预览仍只读、不夺取焦点。项目预览可移入并包含「编辑项目」；卡片贴在项目栏右缘外侧，不得挡住行内 ⋯ / 新对话。编辑对话框可改名称和源文件夹（`project_rename` / `project_set_path`）。从应用移除项目会删除该项目下的对话，磁盘文件夹保留。Host 只返回最近 `user` 与 `assistant` 的可见正文摘要；思考、附件、工具输出和完整 journal 不进入 DTO。项目预览使用已加载的项目与 session 元数据，并在悬停后惰性读取 Git 摘要。侧栏「整理」偏好（按项目 / 平铺列表，最近更新 / 优先级）写入 `sunsetz.layout`。
 
-`WorkbenchShell` 拥有三栏布局根节点，并在侧栏或资源面板关闭后把焦点恢复到对应顶部栏按钮。会话中栏在面板切换时保持挂载，因此原生滚动位置不被重建。窗口拖动区域只放在标题空白处和侧栏拖动手柄上，不包住「显示侧栏 / 显示文件」按钮。键盘 Tab 会给 `html` 加上 `data-kb-focus`，关闭面板后的焦点恢复也会请求可见环，避免 Windows WebView2 不设置 `:focus-visible` 时看不见焦点。
+`WorkbenchShell` 拥有三栏布局根节点，并在侧栏或资源面板关闭后把焦点恢复到对应顶部栏按钮。会话中栏在面板切换时保持挂载，因此原生滚动位置不被重建。窗口拖动区域只放在标题空白处和侧栏拖动手柄上，不包住「显示侧栏 / 显示文件」按钮。键盘 Tab 会给 `html` 加上 `data-kb-focus`，关闭面板后的焦点恢复也会请求可见环，避免 Windows WebView2 不设置 `:focus-visible` 时看不见焦点。工作台键盘环画在控件内侧（`outline-offset: -2px`），避免被 `.main__stage`、侧栏和输入器的 `overflow: hidden` 裁掉。空会话建议卡在矮窗口改成两列并缩小，避免后两张卡落到输入器下面。输入器文本框本身仍不画焦点框；键盘模式下由 `.composer:focus-within` 显示中性描边。
 
 `ComposerDock` 拥有底部浮层、三层输入器和运行中的 `TaskProgressRail`；草稿、附件、队列、模型/权限偏好、发送停止和 Host 调用仍由 `App.tsx` 提供。权限条与 `AskUserDock` 作为并列或接管槽位传入，提问和权限决策不搬进输入器。已连接的 GitHub / Gmail / Drive / Calendar / Notion / Slack 在输入器显示状态芯片；`@GitHub` 等插入本轮明确调用芯片，未连接插件不能插芯片。连接器协议见 [open-connector.md](./open-connector.md)。`ConversationSurface` 只订阅转录 store，不拥有 Host 协调。Host 在启动时若已有 live session，会立刻 `setViewing` 并把该 session 标为 busy，避免第一批 stream chunk 写进草稿缓存。
 

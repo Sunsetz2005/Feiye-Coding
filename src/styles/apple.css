@@ -24,7 +24,17 @@ body {
   [role="menuitem"],
   [role="option"],
   [tabindex]
-):focus-visible {
+):focus-visible,
+html[data-kb-focus="true"]
+  :where(
+    button,
+    a,
+    [role="button"],
+    [role="menuitem"],
+    [role="option"],
+    [role="tab"],
+    [tabindex]:not([tabindex="-1"])
+  ):focus {
   outline: 2px solid var(--text-secondary) !important;
   outline-offset: -2px;
 }
@@ -32,6 +42,22 @@ body {
 :where(input, textarea, select):focus,
 :where(input, textarea, select):focus-visible {
   outline: none !important;
+}
+
+html[data-kb-focus="true"] .composer:focus-within,
+html[data-kb-focus="true"] .composer-wrap--float .composer:focus-within {
+  border-color: var(--text-secondary);
+  box-shadow:
+    inset 0 0.5px 0 color-mix(in srgb, white 16%, transparent),
+    0 0 0 2px color-mix(in srgb, var(--text-secondary) 45%, transparent);
+}
+
+html[data-kb-focus="true"] textarea:focus,
+html[data-kb-focus="true"] textarea:focus-visible,
+html[data-kb-focus="true"] .composer__input:focus,
+html[data-kb-focus="true"] .composer__input:focus-visible {
+  outline: none !important;
+  box-shadow: none !important;
 }
 
 .composer__input:focus-visible,
