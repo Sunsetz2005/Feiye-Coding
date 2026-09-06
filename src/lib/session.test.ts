@@ -13,6 +13,7 @@ import {
   formatTurnErrorBody,
   splitThoughtPhases,
   isDeveloperMockBackend,
+  isKernelEnvOverride,
   isLegacyGrokBackend,
   isSessionBusy,
   IDLE_SNAPSHOT,
@@ -707,5 +708,12 @@ describe("runtime backend labels", () => {
     expect(isLegacyGrokBackend("grok_agent_stdio")).toBe(true);
     expect(isLegacyGrokBackend("sunsetz")).toBe(false);
     expect(isLegacyGrokBackend("mock_acp")).toBe(false);
+  });
+
+  it("treats mock and runtime-backend env sources as covering Settings", () => {
+    expect(isKernelEnvOverride("sunsetz_acp")).toBe(true);
+    expect(isKernelEnvOverride("sunsetz_runtime_backend")).toBe(true);
+    expect(isKernelEnvOverride("none")).toBe(false);
+    expect(isKernelEnvOverride("")).toBe(false);
   });
 });

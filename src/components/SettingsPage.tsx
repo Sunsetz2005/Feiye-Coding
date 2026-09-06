@@ -65,6 +65,7 @@ import {
 } from "@/lib/runtimeMigrationUi";
 import {
   isDeveloperMockBackend,
+  isKernelEnvOverride,
   isLegacyGrokBackend,
 } from "@/lib/session";
 
@@ -111,6 +112,10 @@ export interface SettingsPageProps {
   onAcpServerAddr: (v: string) => void;
   /** Live session kernel: `sunsetz`, `mock_acp`, or `grok_agent_stdio`. */
   kernelBackend?: string;
+  /** Saved `runtimeBackend`. May differ from the process kernel when env overrides. */
+  storedKernelBackend?: string;
+  /** Host override: `none` | `sunsetz_acp` | `sunsetz_runtime_backend`. */
+  kernelOverrideSource?: string;
   onKernelBackend?: (v: "sunsetz" | "grok_acp") => void;
   /** Max warm/live agent processes (I02). */
   maxConcurrentAgents?: number;
@@ -401,6 +406,8 @@ export function SettingsPage({
   acpServerAddr,
   onAcpServerAddr,
   kernelBackend = "sunsetz",
+  storedKernelBackend,
+  kernelOverrideSource = "none",
   onKernelBackend,
   maxConcurrentAgents = 3,
   onMaxConcurrentAgents,
@@ -469,8 +476,15 @@ export function SettingsPage({
     box: MarqueeBox;
     pointerId: number;
   } | null>(null);
-  const mockKernel = isDeveloperMockBackend(kernelBackend);
-  const legacyKernel = isLegacyGrokBackend(kernelBackend);
+  const capsKernel = runtimeCapabilities?.kernel;
+  const effectiveKernel = capsKernel?.effective ?? kernelBackend;
+  const storedKernel = capsKernel?.stored ?? storedKernelBackend ?? kernelBackend;
+  const overrideSource =
+    capsKernel?.overrideSource ?? kernelOverrideSource ?? "none";
+  const mockKernel = isDeveloperMockBackend(effectiveKernel);
+  const legacyKernel = isLegacyGrokBackend(effectiveKernel);
+  const envOverride = isKernelEnvOverride(overrideSource);
+  const kernelSwitchReady = runtimeCapabilities != null || !api.isTauri();
   // Full catalog via createT — do not depend on App's partial `labels` whitelist
   // (missing keys used to render raw "settings.acpServer" etc.).
   const tr = useMemo(() => createT(resolveLocale(locale)), [locale]);
@@ -478,6 +492,11 @@ export function SettingsPage({
     (k: string, vars?: Vars) => tr(k as MessageKey, vars),
     [tr],
   );
+  const storedKernelLabel = isDeveloperMockBackend(storedKernel)
+    ? t("settings.runtime.kernelMock")
+    : isLegacyGrokBackend(storedKernel)
+      ? t("settings.runtime.kernelLegacy")
+      : t("settings.runtime.kernel");
 
   useEffect(() => {
     if (!api.isTauri()) return;
@@ -498,7 +517,7 @@ export function SettingsPage({
     return () => {
       cancelled = true;
     };
-  }, [sandboxProfile, section]);
+  }, [sandboxProfile, section, kernelBackend, storedKernelBackend]);
 
   const nav = useMemo(() => {
     return filterSettingsRegistry(query, t);
@@ -1336,8 +1355,18 @@ export function SettingsPage({
                       ? t("settings.runtime.kernelLegacyDesc")
                       : t("settings.runtime.kernelDesc")}
                 </div>
+                {envOverride ? (
+                  <div className="settings-row__desc" role="status">
+                    {overrideSource === "sunsetz_acp"
+                      ? t("settings.runtime.kernelOverrideMock")
+                      : t("settings.runtime.kernelOverrideEnv")}
+                    {` ${t("settings.runtime.savedPreference", {
+                      kernel: storedKernelLabel,
+                    })}`}
+                  </div>
+                ) : null}
               </div>
-              {legacyKernel && !mockKernel ? (
+              {kernelSwitchReady && !envOverride && legacyKernel && !mockKernel ? (
                 <button
                   type="button"
                   className="btn btn--primary btn--sm"
@@ -1398,7 +1427,7 @@ export function SettingsPage({
               onChange={onAcpServerAddr}
               t={t}
             />
-            {!legacyKernel && !mockKernel ? (
+            {kernelSwitchReady && !envOverride && !legacyKernel && !mockKernel ? (
               <div className="settings-row">
                 <div className="settings-row__text">
                   <div className="settings-row__label">

@@ -2195,7 +2195,8 @@ pub async fn doctor_report() -> Result<serde_json::Value, String> {
     let log_dir_path = data_root_path.join("logs");
     let log_dir = log_dir_path.display().to_string();
     let log_dir_exists = log_dir_path.is_dir();
-    let backend_default = crate::agent_loop::current_backend();
+    let backend_report = crate::agent_loop::current_backend_report();
+    let backend_default = backend_report.effective.clone();
     let has_official_key = secrets.official_api_key.is_some();
     let has_relay = secrets.relay_base_url.is_some() && secrets.relay_api_key.is_some();
     // Never include secret values — only which backend holds them.
@@ -2232,6 +2233,8 @@ pub async fn doctor_report() -> Result<serde_json::Value, String> {
         "app": {
             "version": env!("CARGO_PKG_VERSION"),
             "backendDefault": backend_default,
+            "backendStored": backend_report.stored,
+            "backendOverride": backend_report.override_source,
             "nonOfficial": true,
             "license": "MIT",
         }
@@ -2385,6 +2388,8 @@ pub async fn doctor_report() -> Result<serde_json::Value, String> {
         backend_detail,
         serde_json::json!({
             "backendDefault": backend_default,
+            "backendStored": backend_report.stored,
+            "backendOverride": backend_report.override_source,
             "version": env!("CARGO_PKG_VERSION"),
         }),
     ));

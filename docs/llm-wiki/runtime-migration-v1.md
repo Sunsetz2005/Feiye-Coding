@@ -4,7 +4,7 @@
 
 `Tauri 工作台 → Host 会话层 → Sunsetz agent loop（默认）`
 
-默认不再 spawn `grok agent stdio`。Grok ACP 适配器保留在显式 legacy 开关后（`runtimeBackend=grok_acp` / `SUNSETZ_RUNTIME_BACKEND=grok_acp`），本切片不删除。Host 工具是可信项目根内的 `read_file`、`list_directory`、`grep`、`write_file`、`search_replace`、`run_command`，以及父会话的 `spawn_agent` / `agent_output` / `kill_agent`。`grep` 只读。子代理是同一进程内的 `run_turn`，深度上限 1，不 spawn grok、不创建 worktree。父回合只 join 本轮后台 child；后台结束后 Host 可开无用户气泡的 wake turn。explore / plan 只有读工具；general 的写和命令走父会话同一条权限条。写入、替换和命令必须经过现有权限条（或明确自动放行策略）才执行；`AcceptEdits` 只自动放行根内 `write_file` / `search_replace`，不能自动放行 `run_command`。权限预览只有相对路径加字节数或替换次数，或精确命令加相对 cwd，不得带文件正文。相同工具加相同参数连续 3 次会被打断并把错误交回模型。逃出根目录、拒绝和 Stop 不得有副作用。`run_command` 跟随 Host `sandboxProfile`：默认 `off`；Linux 用 bubblewrap，macOS 用 `sandbox-exec`，Windows 用 AppContainer + Job Object 包住该条命令；非支持平台在非 off 时 fail-closed，不会静默降级。权限闸仍然先于沙箱。第三方项目只作为设计与契约研究材料；本轮没有复制 OpenWork `/ee` 或其他受限源码。
+默认不再 spawn `grok agent stdio`。Grok ACP 适配器保留在显式 legacy 开关后（`runtimeBackend=grok_acp` / `SUNSETZ_RUNTIME_BACKEND=grok_acp`），本兼容周期不删除；评估结论见 [`runtime-backend.md`](./runtime-backend.md)。`SUNSETZ_ACP=mock` 与 `SUNSETZ_RUNTIME_BACKEND` 仍会盖过已保存偏好，Runtime 页必须显示有效内核而不是只显示设置值。Host 工具是可信项目根内的 `read_file`、`list_directory`、`grep`、`write_file`、`search_replace`、`run_command`，以及父会话的 `spawn_agent` / `agent_output` / `kill_agent` 和 `command_output` / `wait_commands` / `kill_command`。`grep` 只读。子代理是同一进程内的 `run_turn`，深度上限 1，不 spawn grok、不创建 worktree。父回合只 join 本轮后台 child；后台结束后 Host 可开无用户气泡的 wake turn。explore / plan 只有读工具；general 的写和命令走父会话同一条权限条。写入、替换和命令必须经过现有权限条（或明确自动放行策略）才执行；`AcceptEdits` 只自动放行根内 `write_file` / `search_replace`，不能自动放行 `run_command`。权限预览只有相对路径加字节数或替换次数，或精确命令加相对 cwd，不得带文件正文。相同工具加相同参数连续 3 次会被打断并把错误交回模型。逃出根目录、拒绝和 Stop 不得有副作用。`run_command` 跟随 Host `sandboxProfile`：默认 `off`；Linux 用 bubblewrap，macOS 用 `sandbox-exec`，Windows 用 AppContainer + Job Object 包住该条命令；非支持平台在非 off 时 fail-closed，不会静默降级。权限闸仍然先于沙箱。第三方项目只作为设计与契约研究材料；本轮没有复制 OpenWork `/ee` 或其他受限源码。
 
 ## 交互生命周期
 
@@ -61,7 +61,7 @@ Host 内核路径在用户显式选择 Skill 后，从库存已经信任的用�
 
 信任项目根内按顺序读取第一个普通文件（非符号链接）：`AGENTS.md`、`Sunsetz.md`、`.sunsetz/instructions.md`、`CLAUDE.md`。上限 16,000 字，写入该轮 system 提示，并标明不能覆盖权限或逃出根目录。输入器只显示相对路径和是否截断。读失败、空文件、非 UTF-8 或超限截断不得把会话打成 error。命令：`project_instruction_inspect_v1`。
 
-默认内核单轮最多 16 次工具调用。
+默认内核单轮最多 16 次工具调用。倒数第二轮的工具结果会提示还剩一轮；耗尽后以成功 `PromptComplete`（`max_tool_rounds`）结束并写出可见说明，而不是 `AgentCrashed`。用户可再发送继续。前台 `run_command` 墙钟 15 分钟。模型 SSE 没有总超时：连接约 30 秒，空闲窗口与 `streamStallSeconds` 相同。父会话 `run_command` 可设 `background`：权限条仍先过，`AcceptEdits` 不自动放行，立刻返回 id；`command_output` / `wait_commands` / `kill_command` 收口。完成后走与后台子代理相同的无用户气泡 wake。Stop 不杀掉已批准的后台命令。
 
 ### 进程内子代理 join 与 wake
 

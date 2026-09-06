@@ -731,6 +731,12 @@ export function isLegacyGrokBackend(backend?: string | null): boolean {
   return value === "grok_acp" || value === "grok_agent_stdio";
 }
 
+/** Process env is covering `settings.runtimeBackend`. */
+export function isKernelEnvOverride(source?: string | null): boolean {
+  const value = (source ?? "").trim().toLowerCase();
+  return value === "sunsetz_acp" || value === "sunsetz_runtime_backend";
+}
+
 export const IDLE_SNAPSHOT: SessionSnapshot = {
   sessionId: null,
   agentSessionId: null,

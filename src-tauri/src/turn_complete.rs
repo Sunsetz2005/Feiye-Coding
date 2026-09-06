@@ -22,7 +22,7 @@ pub fn is_terminal_tool_status(status: &str) -> bool {
 pub fn is_successful_prompt_complete(stop_reason: &str) -> bool {
     matches!(
         stop_reason.trim().to_ascii_lowercase().as_str(),
-        "end_turn" | "end" | "completed" | "complete" | ""
+        "end_turn" | "end" | "completed" | "complete" | "max_tool_rounds" | ""
     )
 }
 
@@ -63,6 +63,7 @@ mod tests {
     fn successful_prompt_complete_excludes_cancel_and_error() {
         assert!(is_successful_prompt_complete("end_turn"));
         assert!(is_successful_prompt_complete("END_TURN"));
+        assert!(is_successful_prompt_complete("max_tool_rounds"));
         assert!(!is_successful_prompt_complete("cancelled"));
         assert!(!is_successful_prompt_complete("stop"));
         assert!(!is_successful_prompt_complete("error"));

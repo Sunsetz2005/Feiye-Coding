@@ -218,6 +218,14 @@ pub struct RuntimeFeatureV1 {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RuntimeKernelV1 {
+    pub stored: String,
+    pub effective: String,
+    pub override_source: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RuntimeCapabilitiesV1 {
     pub version: u8,
     pub runtime_version: Option<String>,
@@ -229,34 +237,21 @@ pub struct RuntimeCapabilitiesV1 {
     pub plugin_catalog: RuntimeFeatureV1,
     pub hooks_inventory: RuntimeFeatureV1,
     pub mcp: RuntimeFeatureV1,
+    pub kernel: RuntimeKernelV1,
 }
 
-fn requested_kernel_uses_command_sandbox(runtime_backend: &str) -> bool {
-    if use_mock_runtime() {
-        return false;
-    }
-    if let Ok(env) = std::env::var(PRODUCT_RUNTIME_BACKEND_ENV) {
-        let parsed = env.trim().to_ascii_lowercase();
-        if parsed == "grok_acp" || parsed == "grok_agent_stdio" {
-            return false;
-        }
-        if parsed == "mock" || parsed == "mock_acp" {
-            return false;
-        }
-    }
-    !matches!(
-        runtime_backend.trim().to_ascii_lowercase().as_str(),
-        "grok_acp" | "grok_agent_stdio"
-    )
+fn requested_kernel_uses_command_sandbox() -> bool {
+    crate::agent_loop::use_sunsetz_kernel()
 }
 
 pub fn runtime_capabilities(active_sandbox: Option<SandboxApplicationV1>) -> RuntimeCapabilitiesV1 {
     let settings = crate::store::load_settings();
     let probe = crate::cli_probe::probe_cli(settings.manual_cli_path.as_deref());
     let requested = SandboxProfileV1::parse(&settings.sandbox_profile);
+    let kernel_report = crate::agent_loop::current_backend_report();
     let sandbox = match active_sandbox {
         Some(active) => active,
-        None if requested_kernel_uses_command_sandbox(&settings.runtime_backend) => {
+        None if requested_kernel_uses_command_sandbox() => {
             crate::command_sandbox::support(requested)
         }
         None => sandbox_support(requested),
@@ -302,6 +297,11 @@ pub fn runtime_capabilities(active_sandbox: Option<SandboxApplicationV1>) -> Run
             state: runtime_state.into(),
             source: "runtime_acp".into(),
             reason: runtime_reason,
+        },
+        kernel: RuntimeKernelV1 {
+            stored: kernel_report.stored,
+            effective: kernel_report.effective,
+            override_source: kernel_report.override_source,
         },
     }
 }
@@ -356,5 +356,15 @@ mod tests {
         assert_eq!(status.requested, "off");
         assert_eq!(status.applied, "off");
         assert!(status.verified);
+    }
+
+    #[test]
+    fn runtime_capabilities_report_kernel_resolution() {
+        let caps = runtime_capabilities(None);
+        let report = crate::agent_loop::current_backend_report();
+        assert_eq!(caps.kernel.stored, report.stored);
+        assert_eq!(caps.kernel.effective, report.effective);
+        assert_eq!(caps.kernel.override_source, report.override_source);
+        assert_eq!(caps.kernel.effective, crate::agent_loop::current_backend());
     }
 }

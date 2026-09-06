@@ -1,6 +1,6 @@
 # Runtime compatibility boundary
 
-Sunsetz presents a product-owned `Sunsetz Runtime` interface. The product kernel is the in-process agent loop in `src-tauri/src/agent_loop.rs`. The private adapter in `src-tauri/src/runtime_compat.rs` preserves compatibility with the upstream `grok` executable, `GROK_HOME`, ACP messages, model IDs, authentication, and quota responses when the explicit legacy flag `runtimeBackend=grok_acp` (or `SUNSETZ_RUNTIME_BACKEND=grok_acp`) is set.
+Sunsetz presents a product-owned `Sunsetz Runtime` interface. The product kernel is the in-process agent loop in `src-tauri/src/agent_loop.rs`. The private adapter in `src-tauri/src/runtime_compat.rs` preserves compatibility with the upstream `grok` executable, `GROK_HOME`, ACP messages, model IDs, authentication, and quota responses when the explicit legacy flag `runtimeBackend=grok_acp` (or `SUNSETZ_RUNTIME_BACKEND=grok_acp`) is set. This compatibility cycle does not delete `acp_client.rs`. The keep-or-remove decision and env-override rules are in [`llm-wiki/runtime-backend.md`](llm-wiki/runtime-backend.md).
 
 Product-owned settings use `SUNSETZ_HOME` and `SUNSETZ_ACP`. The adapter accepts `GROK_APP_HOME` and `GROK_APP_ACP` as legacy development aliases. Do not expose those upstream identifiers through ordinary UI copy.
 

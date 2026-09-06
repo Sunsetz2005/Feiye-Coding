@@ -58,6 +58,12 @@ export interface RuntimeFeatureV1 {
   reason?: string | null;
 }
 
+export interface RuntimeKernelV1 {
+  stored: string;
+  effective: string;
+  overrideSource: string;
+}
+
 export interface RuntimeCapabilitiesV1 {
   version: 1;
   runtimeVersion?: string | null;
@@ -69,6 +75,7 @@ export interface RuntimeCapabilitiesV1 {
   pluginCatalog: RuntimeFeatureV1;
   hooksInventory: RuntimeFeatureV1;
   mcp: RuntimeFeatureV1;
+  kernel: RuntimeKernelV1;
 }
 
 export interface CapabilityDescriptorV1 {
@@ -308,6 +315,11 @@ export async function runtimeCapabilitiesV1(): Promise<RuntimeCapabilitiesV1> {
       pluginCatalog: { state: "unavailable", source: "browser" },
       hooksInventory: { state: "unavailable", source: "browser" },
       mcp: { state: "unavailable", source: "browser" },
+      kernel: {
+        stored: "sunsetz",
+        effective: "sunsetz",
+        overrideSource: "none",
+      },
     };
   }
   return invoke<RuntimeCapabilitiesV1>("runtime_capabilities_v1");

@@ -753,6 +753,11 @@ const en = {
   "settings.runtime.legacy": "Legacy ACP / CLI",
   "settings.runtime.legacyDesc":
     "Only needed for the Grok ACP adapter. The default Sunsetz Runtime does not spawn a grok binary.",
+  "settings.runtime.kernelOverrideMock":
+    "SUNSETZ_ACP=mock is covering Settings. This process is the developer stub until you restart without that variable.",
+  "settings.runtime.kernelOverrideEnv":
+    "SUNSETZ_RUNTIME_BACKEND is covering Settings. Restart without that variable to use the saved Runtime preference.",
+  "settings.runtime.savedPreference": "Saved preference: {kernel}",
   "settings.archived.desc":
     "Chats you archived are listed by project. Select multiple to restore or delete.",
   "settings.archived.empty": "No archived chats.",
@@ -920,7 +925,7 @@ const en = {
     "After this many minutes without activity, the agent process is recycled. Chat history is kept; the next message reconnects.",
   "settings.streamStallSeconds": "Stream stall timeout (seconds)",
   "settings.streamStallSecondsDesc":
-    "If a turn has no stream chunks or tool activity for this long, show a Cancel / Keep waiting prompt (default 120). Long-running tools that still emit events do not count as stalled.",
+    "If a turn has no stream chunks or tool activity for this long, show a Cancel / Keep waiting prompt (default 120). The built-in kernel also fails a silent model stream after the same window. Long-running tools that still emit events do not count as stalled.",
   "settings.sandboxProfile": "Runtime sandbox",
   "settings.sandboxProfileDesc":
     "Isolates built-in kernel commands. Linux uses bubblewrap; macOS uses sandbox-exec; Windows uses an AppContainer. A missing helper fails closed instead of silently dropping isolation. The default kernel applies the next command; the legacy ACP adapter still restarts on change and remains Linux-only.",
@@ -2464,6 +2469,11 @@ const zh: Record<MessageKey, string> = {
   "settings.runtime.legacy": "旧版 ACP / CLI",
   "settings.runtime.legacyDesc":
     "仅在使用 Grok ACP 适配器时需要。默认 Sunsetz Runtime 不会启动 grok 二进制。",
+  "settings.runtime.kernelOverrideMock":
+    "SUNSETZ_ACP=mock 正在盖过设置。当前进程是开发桩，去掉该变量后重新启动才会使用已保存的内核偏好。",
+  "settings.runtime.kernelOverrideEnv":
+    "SUNSETZ_RUNTIME_BACKEND 正在盖过设置。去掉该变量后重新启动，才会使用已保存的 Runtime 偏好。",
+  "settings.runtime.savedPreference": "已保存偏好：{kernel}",
   "settings.archived.desc":
     "已归档的会话按项目分组。可多选后批量还原或删除。",
   "settings.archived.empty": "暂无已归档会话。",
@@ -2627,7 +2637,7 @@ const zh: Record<MessageKey, string> = {
     "超过该分钟数无活动后回收 Agent 进程。对话记录保留，下次发送会自动重连。",
   "settings.streamStallSeconds": "流式卡顿超时（秒）",
   "settings.streamStallSecondsDesc":
-    "若一轮对话在该时间内无任何流式片段或工具活动，将提示「取消本轮 / 继续等待」（默认 120）。仍有工具事件的长任务不会误判为卡顿。",
+    "若一轮对话在该时间内无任何流式片段或工具活动，将提示「取消本轮 / 继续等待」（默认 120）。内建内核的模型流式在同样空闲窗口后也会失败。仍有工具事件的长任务不会误判为卡顿。",
   "settings.sandboxProfile": "Runtime 沙箱",
   "settings.sandboxProfileDesc":
     "隔离内建内核的命令。Linux 使用 bubblewrap，macOS 使用 sandbox-exec，Windows 使用 AppContainer。缺少辅助程序时会直接拒绝，不会静默降级。默认内核对下一条命令生效；旧版 ACP 适配器仍会在修改后重启，且仅 Linux 可隔离进程。",

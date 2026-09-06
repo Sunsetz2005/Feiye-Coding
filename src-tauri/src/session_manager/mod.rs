@@ -11,6 +11,7 @@
 //! - Mid-stream journal upserts are throttled (≥500ms or paragraph / force).
 //! - Pure stream silence past `streamStallSeconds` emits `session://stream_stall`.
 
+mod command_jobs;
 mod subagents;
 
 pub use subagents::SubagentView;
@@ -1657,6 +1658,8 @@ pub struct SessionManager {
     connect_lock: tokio::sync::Mutex<()>,
     /// In-process child agents for the Sunsetz kernel.
     subagents: Arc<tokio::sync::Mutex<subagents::SubagentRegistry>>,
+    /// Parent-session background `run_command` jobs.
+    command_jobs: Arc<tokio::sync::Mutex<command_jobs::CommandJobRegistry>>,
     /// Session ids with a Host wake turn starting or running.
     wake_inflight: Mutex<HashSet<String>>,
 }
@@ -1713,6 +1716,9 @@ impl SessionManager {
             connect_lock: tokio::sync::Mutex::new(()),
             subagents: Arc::new(tokio::sync::Mutex::new(
                 subagents::SubagentRegistry::default(),
+            )),
+            command_jobs: Arc::new(tokio::sync::Mutex::new(
+                command_jobs::CommandJobRegistry::default(),
             )),
             wake_inflight: Mutex::new(HashSet::new()),
         }
@@ -6343,11 +6349,24 @@ impl SessionManager {
             }
         };
         let wakes = self.subagents.lock().await.take_pending_wakes(&app_sid);
+        let command_wakes = self
+            .command_jobs
+            .lock()
+            .await
+            .take_pending_wakes(&app_sid);
+        let mut wake_context = String::new();
         if !wakes.is_empty() {
-            agent_prompt = prepend_host_context_preserving_directives(
-                &agent_prompt,
-                &subagents::wake_prompt(&wakes),
-            );
+            wake_context.push_str(&subagents::wake_prompt(&wakes));
+        }
+        if !command_wakes.is_empty() {
+            if !wake_context.is_empty() {
+                wake_context.push('\n');
+            }
+            wake_context.push_str(&command_jobs::wake_prompt(&command_wakes));
+        }
+        if !wake_context.is_empty() {
+            agent_prompt =
+                prepend_host_context_preserving_directives(&agent_prompt, &wake_context);
         }
         let stop = Arc::new(AtomicBool::new(false));
         let host_turn_id = Uuid::new_v4().to_string();
@@ -6400,6 +6419,7 @@ impl SessionManager {
             stop: Arc::clone(&stop),
             client,
             max_tool_rounds: agent_loop::MAX_TOOL_ROUNDS,
+            stream_idle: crate::stream_stall::stall_duration(Self::stream_stall_seconds_from_settings()),
             permission_gate: Some(permission_gate),
             ask_user_gate: Some(ask_user_gate),
             reasoning_effort: effort,
@@ -6416,6 +6436,7 @@ impl SessionManager {
             kind: agent_loop::AgentKind::Parent,
             spawn_depth: 0,
             subagents: agent_loop::SubagentHooks::default(),
+            command_jobs: agent_loop::CommandJobHooks::default(),
             sandbox_profile: crate::runtime_compat::SandboxProfileV1::parse(
                 &crate::store::load_settings().sandbox_profile,
             ),
@@ -6427,6 +6448,7 @@ impl SessionManager {
         };
         let child_template = agent_loop::AgentTurnConfig {
             subagents: agent_loop::SubagentHooks::default(),
+            command_jobs: agent_loop::CommandJobHooks::default(),
             permission_gate: Some(permission_gate_for_child),
             skill_prompt_chars: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             ..cfg.clone()
@@ -6492,6 +6514,69 @@ impl SessionManager {
             })),
             kill: Some(Arc::new(move |id| {
                 let registry = Arc::clone(&registry_kill);
+                Box::pin(async move { registry.lock().await.kill(&id) })
+            })),
+        };
+        let commands = Arc::clone(&self.command_jobs);
+        let commands_out = Arc::clone(&self.command_jobs);
+        let commands_wait = Arc::clone(&self.command_jobs);
+        let commands_kill = Arc::clone(&self.command_jobs);
+        let command_session = app_sid.clone();
+        let command_turn = host_turn_id.clone();
+        let on_command_finished: Option<command_jobs::CommandFinishedFn> = {
+            let mgr = Arc::clone(self);
+            let app_fin = app.clone();
+            Some(Arc::new(move |session, tool_id, status, title, job_id| {
+                let mgr = Arc::clone(&mgr);
+                let app_fin = app_fin.clone();
+                Box::pin(async move {
+                    mgr.on_command_job_finished(app_fin, session, tool_id, status, title, job_id)
+                        .await;
+                })
+            }))
+        };
+        cfg.command_jobs = agent_loop::CommandJobHooks {
+            start: Some(Arc::new(move |request| {
+                let registry = Arc::clone(&commands);
+                let session = command_session.clone();
+                let turn = command_turn.clone();
+                let on_finished = on_command_finished.clone();
+                Box::pin(async move {
+                    command_jobs::start_with_registry(
+                        registry,
+                        session,
+                        turn,
+                        command_jobs::StartCommandJobRequest {
+                            command: request.command,
+                            cwd: request.cwd,
+                            project_root: request.project_root,
+                            sandbox: request.sandbox,
+                            tool_call_id: request.tool_call_id,
+                            title: request.title,
+                        },
+                        on_finished,
+                    )
+                    .await
+                })
+            })),
+            output: Some(Arc::new(move |id| {
+                let registry = Arc::clone(&commands_out);
+                Box::pin(async move { command_jobs::output_with_optional_wait(registry, id, None).await })
+            })),
+            wait: Some(Arc::new(move |ids, wait_any, timeout_ms| {
+                let registry = Arc::clone(&commands_wait);
+                Box::pin(async move {
+                    command_jobs::wait_for_jobs(
+                        registry,
+                        ids,
+                        wait_any,
+                        std::time::Duration::from_millis(timeout_ms.max(1)),
+                    )
+                    .await
+                })
+            })),
+            kill: Some(Arc::new(move |id| {
+                let registry = Arc::clone(&commands_kill);
                 Box::pin(async move { registry.lock().await.kill(&id) })
             })),
         };
@@ -6650,6 +6735,53 @@ impl SessionManager {
         let _ = self.maybe_start_wake_turn(&app, &session_id).await;
     }
 
+    async fn on_command_job_finished(
+        self: &Arc<Self>,
+        app: AppHandle,
+        session_id: String,
+        tool_call_id: String,
+        status: String,
+        title: String,
+        job_id: String,
+    ) {
+        let tool_status = if status == "cancelled" {
+            "cancelled"
+        } else if status == "failed" {
+            "failed"
+        } else {
+            "completed"
+        };
+        persist_tool_step(
+            &session_id,
+            &tool_call_id,
+            tool_status,
+            "execute",
+            &title,
+            Some(job_id.as_str()),
+            None,
+        );
+        if let Some(process_id) = self.process_id_for_session(&session_id) {
+            self.handle_acp_event(
+                &app,
+                &process_id,
+                AcpEvent::ToolCall {
+                    tool_call_id,
+                    title,
+                    kind: "execute".into(),
+                    status: tool_status.into(),
+                    raw: serde_json::json!({
+                        "rawInput": {
+                            "id": job_id,
+                            "background": true,
+                        }
+                    }),
+                },
+            )
+            .await;
+        }
+        let _ = self.maybe_start_wake_turn(&app, &session_id).await;
+    }
+
     fn process_id_for_session(&self, session_id: &str) -> Option<String> {
         if let Some(session) = self
             .inner
@@ -6768,7 +6900,9 @@ impl SessionManager {
         }
         let (pending, this_turn_running) = {
             let registry = self.subagents.lock().await;
-            let pending = registry.pending_wake_count(session_id);
+            let commands = self.command_jobs.lock().await;
+            let pending = registry.pending_wake_count(session_id)
+                + commands.pending_wake_count(session_id);
             let this_turn_running = inspect
                 .host_turn_id
                 .as_deref()

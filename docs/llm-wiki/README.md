@@ -15,6 +15,7 @@ Agent 与贡献者的**可执行知识库**。改产品行为或 UI 文案前，
 | [local-data-isolation.md](./local-data-isolation.md) | MCP / 模型 / 连接器数据按操作系统用户隔离，禁止提交到 GitHub |
 | [session-continuity.md](./session-continuity.md) | Agent 续会话（load/bootstrap）、自动压缩归属 |
 | [runtime-migration-v1.md](./runtime-migration-v1.md) | **成熟能力迁移权威边界**：统一交互、桌面安全、原子 Settings、Runtime 事件、检索、Memory/Skill 候选、显式上下文包与 Host 调度 |
+| [runtime-backend.md](./runtime-backend.md) | **内核选择**：内建 agent loop 是产品路径；Grok ACP 只在显式 legacy 开关后保留；mock/环境变量盖过设置时必须标明 |
 | [account.md](./account.md) | 官方登录 / 会员额度 / 热力图 / 调用日志 |
 | [providers.md](./providers.md) | 自定义中转、agent GROK_HOME、编辑器探测 |
 | [setup.md](./setup.md) | 首次初始化门禁：登录 Sunsetz 或跳过进入工作台 |

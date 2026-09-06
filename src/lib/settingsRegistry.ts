@@ -123,6 +123,7 @@ export const SETTINGS_REGISTRY: readonly SettingsSectionRegistration[] = [
     group: "system",
     keywordKeys: [
       "settings.runtime.kernel",
+      "settings.runtime.kernelMock",
       "settings.runtime.lead",
       "settings.cliPath",
       "settings.acpServer",

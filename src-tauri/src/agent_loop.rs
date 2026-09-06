@@ -38,6 +38,7 @@ use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 
 use crate::acp_client::{parse_ask_user_question_params, AcpEvent, StreamKind};
+use crate::stream_stall::{stall_duration, DEFAULT_STREAM_STALL_SECONDS};
 use crate::error::{AgentError, AgentErrorCode};
 use crate::fs_browser;
 use crate::process_util;
@@ -53,6 +54,7 @@ pub const OFFICIAL_OPENAI_BASE_URL: &str = "https://api.x.ai/v1";
 
 pub const MAX_TOOL_ROUNDS: u32 = 16;
 pub const IDENTICAL_TOOL_STREAK_LIMIT: u32 = 3;
+pub const TOOL_BUDGET_STOP_REASON: &str = "max_tool_rounds";
 pub const MAX_PROJECT_INSTRUCTION_CHARS: usize = 16_000;
 pub const PROJECT_INSTRUCTION_FILES: &[&str] = &[
     "AGENTS.md",
@@ -78,8 +80,8 @@ const GREP_SKIP_DIRS: &[&str] = &[
     "vendor",
 ];
 
-const HTTP_TIMEOUT_SECS: u64 = 120;
-const COMMAND_TIMEOUT_SECS: u64 = 60;
+const HTTP_CONNECT_TIMEOUT_SECS: u64 = 30;
+const COMMAND_TIMEOUT_SECS: u64 = 15 * 60;
 
 #[derive(Debug, Clone)]
 pub struct HostToolPermission {
@@ -213,6 +215,31 @@ pub struct SubagentHooks {
     pub kill: Option<AgentLookupFn>,
 }
 
+#[derive(Debug, Clone)]
+pub struct StartCommandJobRequest {
+    pub command: String,
+    pub cwd: PathBuf,
+    pub project_root: PathBuf,
+    pub sandbox: runtime_compat::SandboxProfileV1,
+    pub tool_call_id: String,
+    pub title: String,
+}
+
+pub type StartCommandJobFn = Arc<
+    dyn Fn(StartCommandJobRequest) -> Pin<Box<dyn Future<Output = String> + Send>> + Send + Sync,
+>;
+pub type WaitCommandsFn = Arc<
+    dyn Fn(Vec<String>, bool, u64) -> Pin<Box<dyn Future<Output = String> + Send>> + Send + Sync,
+>;
+
+#[derive(Clone, Default)]
+pub struct CommandJobHooks {
+    pub start: Option<StartCommandJobFn>,
+    pub output: Option<AgentLookupFn>,
+    pub wait: Option<WaitCommandsFn>,
+    pub kill: Option<AgentLookupFn>,
+}
+
 pub const SUBAGENT_SUMMARY_CHARS: usize = 8_192;
 pub const MAX_RUNNING_SUBAGENTS: usize = 4;
 
@@ -233,6 +260,9 @@ pub struct AgentTurnConfig {
     pub stop: Arc<AtomicBool>,
     pub client: reqwest::Client,
     pub max_tool_rounds: u32,
+    /// Silence between SSE chunks before the kernel fails the completion.
+    /// The Host stall prompt uses the same settings window.
+    pub stream_idle: Duration,
     pub permission_gate: Option<HostToolPermissionGate>,
     pub ask_user_gate: Option<HostAskUserGate>,
     pub connectors: ConnectorTurn,
@@ -240,6 +270,7 @@ pub struct AgentTurnConfig {
     pub kind: AgentKind,
     pub spawn_depth: u32,
     pub subagents: SubagentHooks,
+    pub command_jobs: CommandJobHooks,
     pub sandbox_profile: runtime_compat::SandboxProfileV1,
     pub skill_prompt_chars: Arc<AtomicUsize>,
     pub allow_schedule_task: bool,
@@ -269,39 +300,68 @@ pub fn is_legacy_grok_backend(name: &str) -> bool {
     )
 }
 
+pub const OVERRIDE_NONE: &str = "none";
+pub const OVERRIDE_ENV_MOCK: &str = "sunsetz_acp";
+pub const OVERRIDE_ENV_BACKEND: &str = "sunsetz_runtime_backend";
+
+/// Saved preference vs the kernel this process actually uses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackendResolution {
+    pub stored: String,
+    pub effective: String,
+    pub override_source: String,
+}
+
 /// Resolve the product kernel vs legacy ACP adapter vs in-process mock.
 pub fn resolve_backend(settings_backend: &str, env_backend: Option<&str>, mock: bool) -> String {
-    if mock {
-        return BACKEND_MOCK.into();
-    }
-    if let Some(env) = env_backend.map(str::trim).filter(|s| !s.is_empty()) {
+    resolve_backend_report(settings_backend, env_backend, mock).effective
+}
+
+pub fn resolve_backend_report(
+    settings_backend: &str,
+    env_backend: Option<&str>,
+    mock: bool,
+) -> BackendResolution {
+    let stored = parse_runtime_backend(settings_backend);
+    let env = env_backend.map(str::trim).filter(|value| !value.is_empty());
+    let (effective, override_source) = if mock {
+        (BACKEND_MOCK.into(), OVERRIDE_ENV_MOCK.into())
+    } else if let Some(env) = env {
         let parsed = parse_runtime_backend(env);
-        if parsed == SETTING_LEGACY_GROK_ACP {
-            return BACKEND_GROK_ACP.into();
-        }
-        if parsed == BACKEND_MOCK {
-            return BACKEND_MOCK.into();
-        }
-        return BACKEND_SUNSETZ.into();
-    }
-    let parsed = parse_runtime_backend(settings_backend);
-    if parsed == SETTING_LEGACY_GROK_ACP {
-        BACKEND_GROK_ACP.into()
-    } else if parsed == BACKEND_MOCK {
-        BACKEND_MOCK.into()
+        let effective = if parsed == SETTING_LEGACY_GROK_ACP {
+            BACKEND_GROK_ACP.into()
+        } else if parsed == BACKEND_MOCK {
+            BACKEND_MOCK.into()
+        } else {
+            BACKEND_SUNSETZ.into()
+        };
+        (effective, OVERRIDE_ENV_BACKEND.into())
+    } else if stored == SETTING_LEGACY_GROK_ACP {
+        (BACKEND_GROK_ACP.into(), OVERRIDE_NONE.into())
+    } else if stored == BACKEND_MOCK {
+        (BACKEND_MOCK.into(), OVERRIDE_NONE.into())
     } else {
-        BACKEND_SUNSETZ.into()
+        (BACKEND_SUNSETZ.into(), OVERRIDE_NONE.into())
+    };
+    BackendResolution {
+        stored,
+        effective,
+        override_source,
     }
 }
 
-pub fn current_backend() -> String {
-    resolve_backend(
+pub fn current_backend_report() -> BackendResolution {
+    resolve_backend_report(
         &store::load_settings().runtime_backend,
         std::env::var(runtime_compat::PRODUCT_RUNTIME_BACKEND_ENV)
             .ok()
             .as_deref(),
         crate::acp_client::AcpClient::use_mock(),
     )
+}
+
+pub fn current_backend() -> String {
+    current_backend_report().effective
 }
 
 pub fn use_sunsetz_kernel() -> bool {
@@ -314,7 +374,7 @@ pub fn use_legacy_grok_acp() -> bool {
 
 pub fn http_client() -> Result<reqwest::Client, AgentError> {
     reqwest::Client::builder()
-        .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
+        .connect_timeout(Duration::from_secs(HTTP_CONNECT_TIMEOUT_SECS))
         .no_proxy()
         .build()
         .map_err(|error| {
@@ -585,6 +645,8 @@ pub fn system_prompt(
              You may spawn explore, plan, or general subagents with spawn_agent for parallel \
              research or isolated work. Subagents cannot spawn further agents. Use agent_output \
              to check background work while you are still working, and kill_agent to stop one. \
+             For long shell work, run_command with background true, then command_output, \
+             wait_commands, or kill_command. Do not sleep-poll. \
              After your turn ends, the host resumes this conversation with finished background \
              summaries; do not claim you are still waiting for them. \
              When you need the user to pick among options, call ask_user_question and wait. \
@@ -625,7 +687,7 @@ pub fn system_prompt(
 fn run_command_sandbox_prompt(sandbox: runtime_compat::SandboxProfileV1) -> &'static str {
     match sandbox {
         runtime_compat::SandboxProfileV1::Off => {
-            "run_command is unsandboxed except for the trusted-root cwd pin, permission gate, and a 60s timeout."
+            "run_command is unsandboxed except for the trusted-root cwd pin, permission gate, and a 15-minute timeout."
         }
         runtime_compat::SandboxProfileV1::WorkspaceWrite => {
             "run_command runs in a workspace-write sandbox: it may write the trusted project and temp directories, not the rest of the filesystem."
@@ -777,12 +839,13 @@ pub fn tool_definitions_for(kind: AgentKind, spawn_depth: u32) -> Value {
             "type": "function",
             "function": {
                 "name": "run_command",
-                "description": "Run a shell command with cwd pinned to a directory inside the trusted project root. Isolation follows the Host sandbox profile (off, workspace_write, or read_only). Requires permission; AcceptEdits does not auto-allow this tool. 60s timeout.",
+                "description": "Run a shell command with cwd pinned to a directory inside the trusted project root. Isolation follows the Host sandbox profile (off, workspace_write, or read_only). Requires permission; AcceptEdits does not auto-allow this tool. 15-minute timeout.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "command": { "type": "string", "description": "Exact command string to run." },
-                        "cwd": { "type": "string", "description": "Optional relative directory under the trusted project root. Defaults to the root." }
+                        "cwd": { "type": "string", "description": "Optional relative directory under the trusted project root. Defaults to the root." },
+                        "background": { "type": "boolean", "description": "If true, start the command and return an id immediately. Parent session only." }
                     },
                     "required": ["command"]
                 }
@@ -872,6 +935,51 @@ pub fn tool_definitions_for(kind: AgentKind, spawn_depth: u32) -> Value {
                     "type": "object",
                     "properties": {
                         "id": { "type": "string", "description": "Child agent id." }
+                    },
+                    "required": ["id"]
+                }
+            }
+        }));
+        tools.push(json!({
+            "type": "function",
+            "function": {
+                "name": "command_output",
+                "description": "Get status and bounded output of a background command by id. Optional timeout_ms waits for completion.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string", "description": "Command id returned by run_command with background true." },
+                        "timeout_ms": { "type": "integer", "description": "Wait up to this many milliseconds for the command to finish." }
+                    },
+                    "required": ["id"]
+                }
+            }
+        }));
+        tools.push(json!({
+            "type": "function",
+            "function": {
+                "name": "wait_commands",
+                "description": "Wait for background commands. ids is required. mode is wait_all (default) or wait_any. Default timeout_ms is 30000. Do not sleep-poll.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "ids": { "type": "array", "items": { "type": "string" } },
+                        "mode": { "type": "string" },
+                        "timeout_ms": { "type": "integer" }
+                    },
+                    "required": ["ids"]
+                }
+            }
+        }));
+        tools.push(json!({
+            "type": "function",
+            "function": {
+                "name": "kill_command",
+                "description": "Stop a background command by id.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string", "description": "Command id." }
                     },
                     "required": ["id"]
                 }
@@ -968,6 +1076,9 @@ fn is_host_tool(name: &str) -> bool {
             | "spawn_agent"
             | "agent_output"
             | "kill_agent"
+            | "command_output"
+            | "wait_commands"
+            | "kill_command"
             | "ask_user_question"
             | "list_skills"
             | "view_skill"
@@ -979,6 +1090,39 @@ fn is_host_tool(name: &str) -> bool {
 
 fn is_spawn_tool(name: &str) -> bool {
     matches!(name, "spawn_agent" | "agent_output" | "kill_agent")
+}
+
+fn is_command_job_tool(name: &str) -> bool {
+    matches!(name, "command_output" | "wait_commands" | "kill_command")
+}
+
+fn tool_timeout_ms(arguments: &Value) -> Option<u64> {
+    arguments
+        .get("timeout_ms")
+        .or_else(|| arguments.get("timeoutMs"))
+        .and_then(|value| {
+            value
+                .as_u64()
+                .or_else(|| value.as_i64().and_then(|n| u64::try_from(n).ok()))
+        })
+        .filter(|ms| *ms > 0)
+}
+
+fn tool_id_list(arguments: &Value) -> Vec<String> {
+    if let Some(ids) = arguments.get("ids").and_then(Value::as_array) {
+        return ids
+            .iter()
+            .filter_map(|value| value.as_str())
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .collect();
+    }
+    let id = tool_agent_id_arg(arguments);
+    if id.is_empty() {
+        Vec::new()
+    } else {
+        vec![id]
+    }
 }
 
 fn tool_agent_id_arg(arguments: &Value) -> String {
@@ -1578,7 +1722,7 @@ fn kill_run_command_child(child: &mut tokio::process::Child) {
 }
 
 #[derive(Debug)]
-enum RunCommandOutcome {
+pub(crate) enum RunCommandOutcome {
     Output(String),
     Cancelled,
 }
@@ -1601,7 +1745,7 @@ async fn execute_run_command(
     .await
 }
 
-async fn execute_run_command_timed(
+pub(crate) async fn execute_run_command_timed(
     command: &str,
     cwd: &Path,
     stop: Arc<AtomicBool>,
@@ -1688,7 +1832,10 @@ async fn execute_run_command_timed(
         _ = tokio::time::sleep(timeout) => {
             kill_run_command_child(&mut child);
             let _ = child.wait().await;
-            Err(format!("command timed out after {COMMAND_TIMEOUT_SECS}s"))
+            Err(format!(
+                "command timed out after {}s",
+                timeout.as_secs().max(1)
+            ))
         }
         joined = async {
             let status = child.wait().await;
@@ -1760,6 +1907,20 @@ fn tool_fingerprint(name: &str, arguments: &Value) -> String {
 fn identical_tool_loop_message(name: &str, streak: u32) -> String {
     format!(
         "identical tool loop interrupted: `{name}` repeated {streak} times with the same arguments. Change the arguments or stop."
+    )
+}
+
+fn remaining_model_rounds(round: u32, max: u32) -> u32 {
+    max.saturating_sub(round.saturating_add(1))
+}
+
+fn last_tool_round_warning() -> &'static str {
+    "Sunsetz Runtime: 1 tool round remains. Finish or summarize remaining work; do not start a long new investigation."
+}
+
+fn tool_budget_exhausted_message(max: u32) -> String {
+    format!(
+        "Sunsetz Runtime paused this turn after {max} tool rounds. Send again to continue."
     )
 }
 
@@ -2097,6 +2258,56 @@ async fn dispatch_host_tool(
             _ => {}
         }
     }
+    if is_command_job_tool(name) {
+        if cfg.kind != AgentKind::Parent || cfg.spawn_depth != 0 {
+            return HostToolDispatch::Output(
+                "background command tools are only available on the parent agent".into(),
+            );
+        }
+        match name {
+            "command_output" => {
+                let id = tool_agent_id_arg(arguments);
+                if id.is_empty() {
+                    return HostToolDispatch::Output("command_output requires `id`".into());
+                }
+                let Some(output) = cfg.command_jobs.output.clone() else {
+                    return HostToolDispatch::Output("background commands are not available".into());
+                };
+                if let Some(ms) = tool_timeout_ms(arguments) {
+                    let Some(wait) = cfg.command_jobs.wait.clone() else {
+                        return HostToolDispatch::Output(output(id).await);
+                    };
+                    return HostToolDispatch::Output(wait(vec![id], true, ms).await);
+                }
+                return HostToolDispatch::Output(output(id).await);
+            }
+            "wait_commands" => {
+                let ids = tool_id_list(arguments);
+                if ids.is_empty() {
+                    return HostToolDispatch::Output("wait_commands requires `ids`".into());
+                }
+                let Some(wait) = cfg.command_jobs.wait.clone() else {
+                    return HostToolDispatch::Output("background commands are not available".into());
+                };
+                let wait_any = tool_string_field(arguments, &["mode"])
+                    .unwrap_or_default()
+                    .eq_ignore_ascii_case("wait_any");
+                let ms = tool_timeout_ms(arguments).unwrap_or(30_000);
+                return HostToolDispatch::Output(wait(ids, wait_any, ms).await);
+            }
+            "kill_command" => {
+                let id = tool_agent_id_arg(arguments);
+                if id.is_empty() {
+                    return HostToolDispatch::Output("kill_command requires `id`".into());
+                }
+                let Some(kill) = cfg.command_jobs.kill.clone() else {
+                    return HostToolDispatch::Output("background commands are not available".into());
+                };
+                return HostToolDispatch::Output(kill(id).await);
+            }
+            _ => {}
+        }
+    }
     if !is_host_tool(name) {
         return HostToolDispatch::Output(format!("unknown tool `{name}`"));
     }
@@ -2187,6 +2398,28 @@ async fn dispatch_host_tool(
                     return HostToolDispatch::Cancelled;
                 }
             }
+        }
+        let background = tool_bool_field(arguments, &["background", "run_in_background"]);
+        if background {
+            if cfg.kind != AgentKind::Parent || cfg.spawn_depth != 0 {
+                return HostToolDispatch::Output(
+                    "background run_command is only available on the parent agent".into(),
+                );
+            }
+            let Some(start) = cfg.command_jobs.start.clone() else {
+                return HostToolDispatch::Output("background commands are not available".into());
+            };
+            return HostToolDispatch::Output(
+                start(StartCommandJobRequest {
+                    command: prepared.command.clone(),
+                    cwd: prepared.cwd_canon.clone(),
+                    project_root: root.to_path_buf(),
+                    sandbox: cfg.sandbox_profile,
+                    tool_call_id: tool_call_id.to_string(),
+                    title: prepared.title.clone(),
+                })
+                .await,
+            );
         }
         return match execute_run_command(
             &prepared.command,
@@ -2358,6 +2591,7 @@ where
                 &cfg.stop,
                 &mut emit,
                 true,
+                cfg.stream_idle,
             ) => outcome,
         };
         match outcome {
@@ -2390,6 +2624,8 @@ where
                     });
                     return;
                 }
+                let last_call_index = calls.len().saturating_sub(1);
+                let remaining_after = remaining_model_rounds(round, cfg.max_tool_rounds.max(1));
                 let mut assistant_tool_calls = Vec::new();
                 for (index, call) in calls.into_iter().enumerate() {
                     if cfg.stop.load(Ordering::SeqCst) {
@@ -2492,6 +2728,9 @@ where
                         "memory" => "Memory".into(),
                         "schedule_task" => "Schedule".into(),
                         "skill_save" => "Save Skill".into(),
+                        "command_output" => "Command output".into(),
+                        "wait_commands" => "Wait commands".into(),
+                        "kill_command" => "Kill command".into(),
                         other if crate::permission::is_connector_tool(other) => {
                             format!("Connector {other}")
                         }
@@ -2504,7 +2743,9 @@ where
                         "spawn_agent" | "agent_output" | "kill_agent" => "agent",
                         "ask_user_question" => "ask",
                         "write_file" | "search_replace" => "edit",
-                        "run_command" => "execute",
+                        "run_command" | "command_output" | "wait_commands" | "kill_command" => {
+                            "execute"
+                        }
                         "list_skills" | "view_skill" | "memory" => "read",
                         "skill_save" => "edit",
                         other if crate::permission::is_connector_write_tool(other) => "execute",
@@ -2541,6 +2782,16 @@ where
                         "run_command" => json!({
                             "command": tool_command_arg(&args_value),
                             "cwd": display_rel(&tool_cwd_arg(&args_value)),
+                            "background": tool_bool_field(
+                                &args_value,
+                                &["background", "run_in_background"]
+                            ),
+                        }),
+                        "command_output" | "kill_command" => json!({
+                            "id": tool_agent_id_arg(&args_value),
+                        }),
+                        "wait_commands" => json!({
+                            "ids": tool_id_list(&args_value),
                         }),
                         _ => args_value.clone(),
                     };
@@ -2552,7 +2803,7 @@ where
                         status: "in_progress".into(),
                         raw: raw.clone(),
                     });
-                    let output = if loop_blocked {
+                    let mut output = if loop_blocked {
                         identical_tool_loop_message(&call.name, identical_tool_streak)
                     } else {
                         match dispatch_host_tool(
@@ -2569,12 +2820,19 @@ where
                             HostToolDispatch::Output(output) => output,
                         }
                     };
+                    if remaining_after == 1 && index == last_call_index {
+                        if !output.is_empty() && !output.ends_with('\n') {
+                            output.push('\n');
+                        }
+                        output.push('\n');
+                        output.push_str(last_tool_round_warning());
+                    }
                     if cfg.stop.load(Ordering::SeqCst) {
                         return;
                     }
                     let mut raw = raw;
                     let mut tool_status = "completed";
-                    if call.name == "spawn_agent" {
+                    if call.name == "spawn_agent" || call.name == "run_command" {
                         if let Ok(parsed) = serde_json::from_str::<Value>(&output) {
                             if let Some(agent_id) = parsed.get("id").and_then(Value::as_str) {
                                 raw["rawInput"]["id"] = json!(agent_id);
@@ -2628,11 +2886,30 @@ where
             }
         }
     }
-    emit(AcpEvent::Error {
-        error: AgentError::new(
-            AgentErrorCode::AgentCrashed,
-            "Sunsetz Runtime stopped after too many tool rounds",
-        ),
+    if cfg.stop.load(Ordering::SeqCst) {
+        return;
+    }
+    emit_last_usage(
+        &mut emit,
+        &cfg.endpoint.model,
+        model_calls,
+        last_usage.as_ref(),
+    );
+    let budget_text = tool_budget_exhausted_message(cfg.max_tool_rounds.max(1));
+    emit(AcpEvent::Stream {
+        kind: StreamKind::Assistant,
+        text: budget_text,
+        message_id: None,
+        done: false,
+    });
+    emit(AcpEvent::Stream {
+        kind: StreamKind::Assistant,
+        text: String::new(),
+        message_id: None,
+        done: true,
+    });
+    emit(AcpEvent::PromptComplete {
+        stop_reason: TOOL_BUDGET_STOP_REASON.into(),
     });
 }
 
@@ -2736,7 +3013,15 @@ pub async fn complete_text(
         }
     };
     let _ = stream_chat_completion(
-        client, endpoint, messages, None, None, stop, &mut emit, true,
+        client,
+        endpoint,
+        messages,
+        None,
+        None,
+        stop,
+        &mut emit,
+        true,
+        stall_duration(DEFAULT_STREAM_STALL_SECONDS),
     )
     .await?;
     if stop.load(Ordering::SeqCst) {
@@ -2757,19 +3042,21 @@ async fn stream_chat_completion<F>(
     stop: &AtomicBool,
     emit: &mut F,
     emit_text: bool,
+    stream_idle: Duration,
 ) -> Result<(ChatOutcome, Option<CompletionUsage>), AgentError>
 where
     F: FnMut(AcpEvent) + Send,
 {
     let url = chat_completions_url(&endpoint.base_url);
     let body = chat_completion_body(&endpoint.model, messages, tools, reasoning_effort);
-    let response = client
+    let send = client
         .post(&url)
         .header("Authorization", format!("Bearer {}", endpoint.api_key))
         .header("Accept", "text/event-stream")
         .json(&body)
-        .send()
-        .await
+        .send();
+    let response = await_with_idle(send, stream_idle, "chat request stalled")
+        .await?
         .map_err(|error| {
             AgentError::new(
                 AgentErrorCode::NetworkProvider,
@@ -2803,10 +3090,14 @@ where
     let mut tool_calls: BTreeMap<u32, PendingToolCall> = BTreeMap::new();
     let mut saw_text = false;
     let mut usage = None;
-    while let Some(chunk) = stream.next().await {
+    loop {
         if stop.load(Ordering::SeqCst) {
             return Ok((ChatOutcome::Text, usage));
         }
+        let next = await_with_idle(stream.next(), stream_idle, "chat stream stalled").await?;
+        let Some(chunk) = next else {
+            break;
+        };
         let chunk = chunk.map_err(|error| {
             AgentError::new(
                 AgentErrorCode::NetworkProvider,
@@ -2866,6 +3157,25 @@ where
         });
     }
     Ok((ChatOutcome::Text, usage))
+}
+
+async fn await_with_idle<F, T>(
+    future: F,
+    idle: Duration,
+    stalled: &str,
+) -> Result<T, AgentError>
+where
+    F: Future<Output = T>,
+{
+    if idle.is_zero() {
+        return Ok(future.await);
+    }
+    tokio::time::timeout(idle, future).await.map_err(|_| {
+        AgentError::new(
+            AgentErrorCode::NetworkProvider,
+            format!("{stalled} after {}s", idle.as_secs().max(1)),
+        )
+    })
 }
 
 #[cfg(test)]
@@ -3114,6 +3424,34 @@ mod tests {
         (format!("http://{addr}/v1"), handle)
     }
 
+    async fn spawn_stalling_llm(delay: Duration) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let mut buf = Vec::new();
+            let mut tmp = [0u8; 2048];
+            loop {
+                let n = match socket.read(&mut tmp).await {
+                    Ok(0) => break,
+                    Ok(n) => n,
+                    Err(_) => break,
+                };
+                buf.extend_from_slice(&tmp[..n]);
+                if buf.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let headers = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\nTransfer-Encoding: chunked\r\n\r\n";
+            let _ = socket.write_all(headers.as_bytes()).await;
+            let _ = socket.flush().await;
+            tokio::time::sleep(delay).await;
+        });
+        (format!("http://{addr}/v1"), handle)
+    }
+
     async fn collect_events(cfg: AgentTurnConfig) -> Vec<AcpEvent> {
         let (tx, mut rx) = mpsc::unbounded_channel();
         run_turn(cfg, move |event| {
@@ -3146,6 +3484,7 @@ mod tests {
             stop: Arc::new(AtomicBool::new(false)),
             client: http_client().unwrap(),
             max_tool_rounds: MAX_TOOL_ROUNDS,
+            stream_idle: stall_duration(DEFAULT_STREAM_STALL_SECONDS),
             permission_gate: None,
             ask_user_gate: None,
             connectors: ConnectorTurn::default(),
@@ -3153,6 +3492,7 @@ mod tests {
             kind: AgentKind::Parent,
             spawn_depth: 0,
             subagents: SubagentHooks::default(),
+            command_jobs: CommandJobHooks::default(),
             sandbox_profile: runtime_compat::SandboxProfileV1::Off,
             skill_prompt_chars: Arc::new(AtomicUsize::new(0)),
             allow_schedule_task: true,
@@ -3204,6 +3544,42 @@ mod tests {
         );
         assert_eq!(resolve_backend("sunsetz", None, true), BACKEND_MOCK);
         assert!(!use_legacy_grok_acp() || current_backend() == BACKEND_GROK_ACP);
+        assert_eq!(
+            resolve_backend_report("sunsetz", None, true),
+            BackendResolution {
+                stored: BACKEND_SUNSETZ.into(),
+                effective: BACKEND_MOCK.into(),
+                override_source: OVERRIDE_ENV_MOCK.into(),
+            }
+        );
+        assert_eq!(
+            resolve_backend_report("sunsetz", Some("grok_acp"), false),
+            BackendResolution {
+                stored: BACKEND_SUNSETZ.into(),
+                effective: BACKEND_GROK_ACP.into(),
+                override_source: OVERRIDE_ENV_BACKEND.into(),
+            }
+        );
+        assert_eq!(
+            resolve_backend_report("grok_acp", Some("sunsetz"), false),
+            BackendResolution {
+                stored: SETTING_LEGACY_GROK_ACP.into(),
+                effective: BACKEND_SUNSETZ.into(),
+                override_source: OVERRIDE_ENV_BACKEND.into(),
+            }
+        );
+        assert_eq!(
+            resolve_backend_report("sunsetz", Some("sunsetz"), false).override_source,
+            OVERRIDE_ENV_BACKEND
+        );
+        assert_eq!(
+            resolve_backend_report("grok_acp", None, false),
+            BackendResolution {
+                stored: SETTING_LEGACY_GROK_ACP.into(),
+                effective: BACKEND_GROK_ACP.into(),
+                override_source: OVERRIDE_NONE.into(),
+            }
+        );
     }
 
     #[test]
@@ -3229,6 +3605,9 @@ mod tests {
         assert!(listed.contains("search_replace"));
         assert!(listed.contains("run_command"));
         assert!(listed.contains("spawn_agent"));
+        assert!(listed.contains("command_output"));
+        assert!(listed.contains("wait_commands"));
+        assert!(listed.contains("kill_command"));
         assert!(listed.contains("ask_user_question"));
         let skills = skill_tool_definitions().to_string();
         assert!(skills.contains("list_skills"));
@@ -3242,7 +3621,41 @@ mod tests {
         let child_general = tool_definitions_for(AgentKind::General, 1).to_string();
         assert!(child_general.contains("write_file"));
         assert!(!child_general.contains("spawn_agent"));
+        assert!(!child_general.contains("command_output"));
         assert!(!child_general.contains("ask_user_question"));
+    }
+
+    #[tokio::test]
+    async fn background_run_command_returns_id_without_waiting() {
+        let root = temp_root("bg-run");
+        let (tool, answer) = sse_tool_then(
+            "run_command",
+            r#"{"command":"sleep 30","background":true}"#,
+            &["started in background"],
+        );
+        let (base, server) = spawn_mock_llm(vec![tool, answer]).await;
+        let mut cfg = base_cfg(base, Some(root.clone()), true, "run");
+        cfg.permission_gate = Some(allow_gate());
+        cfg.command_jobs.start = Some(Arc::new(|request| {
+            Box::pin(async move {
+                json!({
+                    "id": "cmd-1",
+                    "status": "running",
+                    "command": request.command,
+                })
+                .to_string()
+            })
+        }));
+        let started = std::time::Instant::now();
+        let events = collect_events(cfg).await;
+        server.abort();
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AcpEvent::ToolCall { kind, status, .. }
+                if kind == "execute" && status == "in_progress"
+        )));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[tokio::test]
@@ -3620,6 +4033,11 @@ mod tests {
     }
 
     #[test]
+    fn command_timeout_default_is_fifteen_minutes() {
+        assert_eq!(COMMAND_TIMEOUT_SECS, 15 * 60);
+    }
+
+    #[test]
     fn journal_history_drops_current_user_and_markers() {
         let now = chrono::Utc::now();
         let history = chat_history_from_journal(&[
@@ -3994,6 +4412,56 @@ mod tests {
                 assert!(!dumped.contains("secret_token"), "{dumped}");
             }
         }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn stream_idle_timeout_fails_without_total_request_cap() {
+        let (base, server) = spawn_stalling_llm(Duration::from_secs(3)).await;
+        let mut cfg = base_cfg(base, None, false, "hi");
+        cfg.stream_idle = Duration::from_millis(250);
+        let started = std::time::Instant::now();
+        let events = collect_events(cfg).await;
+        server.abort();
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AcpEvent::Error { error }
+                if error.code == AgentErrorCode::NetworkProvider
+                    && error.message.contains("stalled")
+        )));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, AcpEvent::PromptComplete { .. })));
+    }
+
+    #[tokio::test]
+    async fn tool_budget_completes_instead_of_crashing() {
+        let root = temp_root("tool-budget");
+        write_file(&root, "src/lib.rs", "pub fn marker() {}\n");
+        let (tool, _answer) = sse_tool_then(
+            "grep",
+            r#"{"pattern":"marker"}"#,
+            &["should not be needed"],
+        );
+        let (base, server) = spawn_mock_llm(vec![tool.clone(), tool]).await;
+        let mut cfg = base_cfg(base, Some(root.clone()), true, "search");
+        cfg.max_tool_rounds = 2;
+        let events = collect_events(cfg).await;
+        server.abort();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AcpEvent::PromptComplete { stop_reason } if stop_reason == TOOL_BUDGET_STOP_REASON
+        )));
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            AcpEvent::Error { error } if error.code == AgentErrorCode::AgentCrashed
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AcpEvent::Stream { text, done: false, .. }
+                if text.contains("2 tool rounds")
+        )));
         let _ = std::fs::remove_dir_all(&root);
     }
 

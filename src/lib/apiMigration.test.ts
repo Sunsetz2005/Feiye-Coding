@@ -32,6 +32,11 @@ describe("migration API contracts", () => {
       version: 1,
       clientVersion: "browser",
       sandbox: { requested: "off", verified: true },
+      kernel: {
+        stored: "sunsetz",
+        effective: "sunsetz",
+        overrideSource: "none",
+      },
     });
     await expect(api.capabilityManifestExportV1()).rejects.toThrow("desktop Host");
     await expect(

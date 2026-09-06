@@ -11,7 +11,7 @@
 - 账户。
 - 已归档会话。
 - 扩展。
-- Runtime（内建内核为主，CLI / ACP 仅旧版折叠区；可选退出后继续跑已安排任务）。
+- Runtime（内建内核为主，CLI / ACP 仅旧版折叠区；可选退出后继续跑已安排任务）。`runtime_capabilities_v1.kernel` 报告已保存偏好与有效内核；`SUNSETZ_ACP=mock` 或 `SUNSETZ_RUNTIME_BACKEND` 盖过设置时，页面标明覆盖来源，不把内核切换画成立即生效。
 - 关于。
 
 新增栏目必须同时具备真实页面、数据读取和必要的保存命令，才能进入注册表。语音、智能快照、浏览器、电脑控制、Hooks、Git、Environment、Worktree 和快捷键编辑等未完成能力不得作为占位入口出现。

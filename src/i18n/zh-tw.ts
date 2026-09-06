@@ -714,6 +714,11 @@ export const zhTW: Record<MessageKey, string> = {
   "settings.runtime.legacy": "舊版 ACP / CLI",
   "settings.runtime.legacyDesc":
     "僅在使用 Grok ACP 轉接器時需要。預設 Sunsetz Runtime 不會啟動 grok 二進位檔。",
+  "settings.runtime.kernelOverrideMock":
+    "SUNSETZ_ACP=mock 正在蓋過設定。目前行程是開發樁，去掉該變數後重新啟動才會使用已儲存的核心偏好。",
+  "settings.runtime.kernelOverrideEnv":
+    "SUNSETZ_RUNTIME_BACKEND 正在蓋過設定。去掉該變數後重新啟動，才會使用已儲存的 Runtime 偏好。",
+  "settings.runtime.savedPreference": "已儲存偏好：{kernel}",
   "settings.archived.desc":
     "已封存的對話依專案分組。可多選後批次還原或刪除。",
   "settings.archived.empty": "尚無已封存對話。",
@@ -877,7 +882,7 @@ export const zhTW: Record<MessageKey, string> = {
     "超過該分鐘數無活動後回收 Agent 行程。對話紀錄保留，下次傳送會自動重連。",
   "settings.streamStallSeconds": "串流停滯逾時（秒）",
   "settings.streamStallSecondsDesc":
-    "若一輪對話在該時間內無任何串流片段或工具活動，將提示「取消本輪 / 繼續等待」（預設 120）。仍有工具事件的長任務不會誤判為停滯。",
+    "若一輪對話在該時間內無任何串流片段或工具活動，將提示「取消本輪 / 繼續等待」（預設 120）。內建核心的模型串流在同樣空閒視窗後也會失敗。仍有工具事件的長任務不會誤判為停滯。",
   "settings.sandboxProfile": "Runtime 沙箱",
   "settings.sandboxProfileDesc":
     "隔離內建核心的命令。Linux 使用 bubblewrap，macOS 使用 sandbox-exec，Windows 使用 AppContainer。缺少輔助程式時會直接拒絕，不會靜默降級。預設核心對下一條命令生效；舊版 ACP 轉接器仍會在修改後重新啟動，且僅 Linux 可隔離行程。",
