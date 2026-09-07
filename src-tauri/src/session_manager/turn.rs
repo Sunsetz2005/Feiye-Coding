@@ -1214,11 +1214,13 @@ impl SessionManager {
             }
         };
         let wakes = self.subagents.lock().await.take_pending_wakes(&app_sid);
-        let command_wakes = self
-            .command_jobs
-            .lock()
-            .await
-            .take_pending_wakes(&app_sid);
+        let (command_wakes, monitor_wakes) = {
+            let mut commands = self.command_jobs.lock().await;
+            (
+                commands.take_pending_wakes(&app_sid),
+                commands.take_pending_monitor_wakes(&app_sid),
+            )
+        };
         let mut wake_context = String::new();
         if !wakes.is_empty() {
             wake_context.push_str(&subagents::wake_prompt(&wakes));
@@ -1228,6 +1230,12 @@ impl SessionManager {
                 wake_context.push('\n');
             }
             wake_context.push_str(&command_jobs::wake_prompt(&command_wakes));
+        }
+        if !monitor_wakes.is_empty() {
+            if !wake_context.is_empty() {
+                wake_context.push('\n');
+            }
+            wake_context.push_str(&command_jobs::monitor_wake_prompt(&monitor_wakes));
         }
         if !wake_context.is_empty() {
             agent_prompt =
@@ -1386,8 +1394,20 @@ impl SessionManager {
         let commands_out = Arc::clone(&self.command_jobs);
         let commands_wait = Arc::clone(&self.command_jobs);
         let commands_kill = Arc::clone(&self.command_jobs);
+        let commands_monitor = Arc::clone(&self.command_jobs);
         let command_session = app_sid.clone();
         let command_turn = host_turn_id.clone();
+        let on_monitor_wake: Option<command_jobs::MonitorTriggeredFn> = {
+            let mgr = Arc::clone(self);
+            let app_mon = app.clone();
+            Some(Arc::new(move |session_id| {
+                let mgr = Arc::clone(&mgr);
+                let app_mon = app_mon.clone();
+                Box::pin(async move {
+                    let _ = mgr.maybe_start_wake_turn(&app_mon, &session_id).await;
+                })
+            }))
+        };
         let on_command_finished: Option<command_jobs::CommandFinishedFn> = {
             let mgr = Arc::clone(self);
             let app_fin = app.clone();
@@ -1413,6 +1433,7 @@ impl SessionManager {
                 let turn = command_turn.clone();
                 let on_finished = on_command_finished.clone();
                 let on_event = on_command_event.clone();
+                let on_wake = on_monitor_wake.clone();
                 Box::pin(async move {
                     command_jobs::start_with_registry(
                         registry,
@@ -1428,6 +1449,7 @@ impl SessionManager {
                         },
                         on_finished,
                         on_event,
+                        on_wake,
                     )
                     .await
                 })
@@ -1451,6 +1473,20 @@ impl SessionManager {
             kill: Some(Arc::new(move |id| {
                 let registry = Arc::clone(&commands_kill);
                 Box::pin(async move { registry.lock().await.kill(&id) })
+            })),
+            monitor: Some(Arc::new(move |id, pattern| {
+                let registry = Arc::clone(&commands_monitor);
+                Box::pin(async move {
+                    match registry.lock().await.start_monitor(&id, pattern) {
+                        Ok(monitor_id) => serde_json::json!({
+                            "monitorId": monitor_id,
+                            "jobId": id,
+                            "status": "watching",
+                        })
+                        .to_string(),
+                        Err(error) => error,
+                    }
+                })
             })),
         };
         let mgr = Arc::clone(self);
@@ -1785,7 +1821,8 @@ impl SessionManager {
             let registry = self.subagents.lock().await;
             let commands = self.command_jobs.lock().await;
             let pending = registry.pending_wake_count(session_id)
-                + commands.pending_wake_count(session_id);
+                + commands.pending_wake_count(session_id)
+                + commands.pending_monitor_wake_count(session_id);
             let this_turn_running = inspect
                 .host_turn_id
                 .as_deref()

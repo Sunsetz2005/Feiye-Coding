@@ -231,6 +231,9 @@ pub type StartCommandJobFn = Arc<
 pub type WaitCommandsFn = Arc<
     dyn Fn(Vec<String>, bool, u64) -> Pin<Box<dyn Future<Output = String> + Send>> + Send + Sync,
 >;
+pub type StartMonitorFn = Arc<
+    dyn Fn(String, Option<String>) -> Pin<Box<dyn Future<Output = String> + Send>> + Send + Sync,
+>;
 
 #[derive(Clone, Default)]
 pub struct CommandJobHooks {
@@ -238,6 +241,7 @@ pub struct CommandJobHooks {
     pub output: Option<AgentLookupFn>,
     pub wait: Option<WaitCommandsFn>,
     pub kill: Option<AgentLookupFn>,
+    pub monitor: Option<StartMonitorFn>,
 }
 
 pub const SUBAGENT_SUMMARY_CHARS: usize = 8_192;
@@ -985,6 +989,21 @@ pub fn tool_definitions_for(kind: AgentKind, spawn_depth: u32) -> Value {
                 }
             }
         }));
+        tools.push(json!({
+            "type": "function",
+            "function": {
+                "name": "monitor",
+                "description": "Subscribe to a running background command's output. Wakes this session (no reply needed now) when a new line arrives matching the optional regex pattern, or any new line if pattern is omitted. Detaches automatically after a bounded number of wakes or when the command ends. Not for polling; do not call repeatedly.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string", "description": "Command id returned by run_command with background true." },
+                        "pattern": { "type": "string", "description": "Optional regular expression; only matching lines trigger a wake." }
+                    },
+                    "required": ["id"]
+                }
+            }
+        }));
     }
     Value::Array(tools)
 }
@@ -1079,6 +1098,7 @@ fn is_host_tool(name: &str) -> bool {
             | "command_output"
             | "wait_commands"
             | "kill_command"
+            | "monitor"
             | "ask_user_question"
             | "list_skills"
             | "view_skill"
@@ -1093,7 +1113,10 @@ fn is_spawn_tool(name: &str) -> bool {
 }
 
 fn is_command_job_tool(name: &str) -> bool {
-    matches!(name, "command_output" | "wait_commands" | "kill_command")
+    matches!(
+        name,
+        "command_output" | "wait_commands" | "kill_command" | "monitor"
+    )
 }
 
 fn tool_timeout_ms(arguments: &Value) -> Option<u64> {
@@ -1727,6 +1750,52 @@ pub(crate) enum RunCommandOutcome {
     Cancelled,
 }
 
+/// Fired once per completed line (from either stdout or stderr, in arrival
+/// order) while a command is still running — the mechanism `monitor` uses to
+/// wake on new/matching output without waiting for the process to exit.
+/// Async and side-effect-only so it can take the same command-jobs registry
+/// lock the terminal-status path already uses.
+pub type CommandLineFn =
+    Arc<dyn Fn(String) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
+
+/// Drains an async byte stream, decoding complete lines lossily and handing
+/// each to `on_line` as it arrives, while still returning the raw bytes read
+/// so the caller's final combined-output text is unaffected by the per-line
+/// lossy decode. Reading only at EOF (the prior behavior) would block the
+/// stream shut for the duration of a long-running command, which is exactly
+/// what `monitor` needs to observe.
+async fn stream_command_output<R: tokio::io::AsyncRead + Unpin>(
+    mut reader: R,
+    on_line: Option<CommandLineFn>,
+) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 4096];
+    let mut line_start = 0usize;
+    loop {
+        match reader.read(&mut chunk).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                buf.extend_from_slice(&chunk[..n]);
+                if let Some(sink) = &on_line {
+                    while let Some(pos) = buf[line_start..].iter().position(|&b| b == b'\n') {
+                        let end = line_start + pos;
+                        let line = String::from_utf8_lossy(&buf[line_start..end]).into_owned();
+                        line_start = end + 1;
+                        sink(line).await;
+                    }
+                }
+            }
+        }
+    }
+    if let Some(sink) = &on_line {
+        if line_start < buf.len() {
+            let line = String::from_utf8_lossy(&buf[line_start..]).into_owned();
+            sink(line).await;
+        }
+    }
+    buf
+}
+
 async fn execute_run_command(
     command: &str,
     cwd: &Path,
@@ -1741,6 +1810,7 @@ async fn execute_run_command(
         Duration::from_secs(COMMAND_TIMEOUT_SECS),
         profile,
         project_root,
+        None,
     )
     .await
 }
@@ -1752,6 +1822,7 @@ pub(crate) async fn execute_run_command_timed(
     timeout: Duration,
     profile: runtime_compat::SandboxProfileV1,
     project_root: &Path,
+    on_line: Option<CommandLineFn>,
 ) -> Result<RunCommandOutcome, String> {
     let plan = crate::command_sandbox::plan_run_command(command, cwd, project_root, profile)?;
     #[cfg(windows)]
@@ -1813,16 +1884,8 @@ pub(crate) async fn execute_run_command_timed(
         .stderr
         .take()
         .ok_or_else(|| "run_command: missing stderr".to_string())?;
-    let read_out = async {
-        let mut buf = Vec::new();
-        let _ = stdout.read_to_end(&mut buf).await;
-        buf
-    };
-    let read_err = async {
-        let mut buf = Vec::new();
-        let _ = stderr.read_to_end(&mut buf).await;
-        buf
-    };
+    let read_out = stream_command_output(&mut stdout, on_line.clone());
+    let read_err = stream_command_output(&mut stderr, on_line.clone());
     tokio::select! {
         _ = wait_until_stopped(Arc::clone(&stop)) => {
             kill_run_command_child(&mut child);
@@ -1838,8 +1901,11 @@ pub(crate) async fn execute_run_command_timed(
             ))
         }
         joined = async {
-            let status = child.wait().await;
-            let (out, err) = tokio::join!(read_out, read_err);
+            // Drain both pipes concurrently with waiting for exit (not after,
+            // as a strict read-then-wait would), both so a chatty command
+            // can't deadlock on a full pipe buffer and so `on_line` actually
+            // observes lines while the process is still running.
+            let (status, out, err) = tokio::join!(child.wait(), read_out, read_err);
             (status, out, err)
         } => {
             let (status, out, err) = joined;
@@ -2304,6 +2370,17 @@ async fn dispatch_host_tool(
                     return HostToolDispatch::Output("background commands are not available".into());
                 };
                 return HostToolDispatch::Output(kill(id).await);
+            }
+            "monitor" => {
+                let id = tool_agent_id_arg(arguments);
+                if id.is_empty() {
+                    return HostToolDispatch::Output("monitor requires `id`".into());
+                }
+                let pattern = tool_string_field(arguments, &["pattern"]);
+                let Some(monitor) = cfg.command_jobs.monitor.clone() else {
+                    return HostToolDispatch::Output("background commands are not available".into());
+                };
+                return HostToolDispatch::Output(monitor(id, pattern).await);
             }
             _ => {}
         }
@@ -3608,6 +3685,7 @@ mod tests {
         assert!(listed.contains("command_output"));
         assert!(listed.contains("wait_commands"));
         assert!(listed.contains("kill_command"));
+        assert!(listed.contains("monitor"));
         assert!(listed.contains("ask_user_question"));
         let skills = skill_tool_definitions().to_string();
         assert!(skills.contains("list_skills"));
@@ -3622,6 +3700,7 @@ mod tests {
         assert!(child_general.contains("write_file"));
         assert!(!child_general.contains("spawn_agent"));
         assert!(!child_general.contains("command_output"));
+        assert!(!child_general.contains("monitor"));
         assert!(!child_general.contains("ask_user_question"));
     }
 
@@ -3706,6 +3785,66 @@ mod tests {
             }
             HostToolDispatch::Cancelled => panic!("expected disabled message"),
         }
+    }
+
+    #[tokio::test]
+    async fn monitor_dispatches_id_and_pattern_to_the_hook() {
+        let root = temp_root("monitor-dispatch");
+        let mut cfg = base_cfg("http://127.0.0.1/v1".into(), Some(root.clone()), true, "hi");
+        cfg.command_jobs.monitor = Some(Arc::new(|id, pattern| {
+            Box::pin(async move {
+                json!({ "id": id, "pattern": pattern, "status": "watching" }).to_string()
+            })
+        }));
+        let output = dispatch_host_tool(
+            &cfg,
+            "monitor",
+            &json!({ "id": "cmd-1", "pattern": "error" }),
+            "monitor-1",
+            None,
+            None,
+        )
+        .await;
+        match output {
+            HostToolDispatch::Output(text) => {
+                let parsed: Value = serde_json::from_str(&text).unwrap();
+                assert_eq!(parsed["id"], "cmd-1");
+                assert_eq!(parsed["pattern"], "error");
+            }
+            HostToolDispatch::Cancelled => panic!("expected monitor output"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn monitor_requires_id_and_is_parent_only() {
+        let root = temp_root("monitor-guard");
+        let mut cfg = base_cfg("http://127.0.0.1/v1".into(), Some(root.clone()), true, "hi");
+        cfg.command_jobs.monitor = Some(Arc::new(|id, pattern| {
+            Box::pin(async move { json!({ "id": id, "pattern": pattern }).to_string() })
+        }));
+        let missing_id = dispatch_host_tool(&cfg, "monitor", &json!({}), "monitor-1", None, None).await;
+        match missing_id {
+            HostToolDispatch::Output(text) => assert!(text.contains("requires `id`"), "{text}"),
+            HostToolDispatch::Cancelled => panic!("expected missing-id message"),
+        }
+        cfg.spawn_depth = 1;
+        let from_child = dispatch_host_tool(
+            &cfg,
+            "monitor",
+            &json!({ "id": "cmd-1" }),
+            "monitor-2",
+            None,
+            None,
+        )
+        .await;
+        match from_child {
+            HostToolDispatch::Output(text) => {
+                assert!(text.contains("only available on the parent agent"), "{text}");
+            }
+            HostToolDispatch::Cancelled => panic!("expected parent-only message"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -4024,11 +4163,51 @@ mod tests {
             Duration::from_millis(400),
             runtime_compat::SandboxProfileV1::Off,
             &root,
+            None,
         )
         .await
         .unwrap_err();
         assert!(err.contains("timed out"), "{err}");
         assert!(started.elapsed() < Duration::from_secs(8));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn execute_run_command_streams_lines_to_on_line() {
+        let root = temp_root("run-stream-lines");
+        let multi = if cfg!(windows) {
+            "echo one&echo two&echo three"
+        } else {
+            "printf 'one\\ntwo\\nthree\\n'"
+        };
+        let prepared = prepare_run_command(&root, &json!({"command": multi})).unwrap();
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = Arc::clone(&seen);
+        let on_line: CommandLineFn = Arc::new(move |line: String| {
+            let sink = Arc::clone(&sink);
+            Box::pin(async move {
+                sink.lock().unwrap().push(line);
+            })
+        });
+        let outcome = execute_run_command_timed(
+            &prepared.command,
+            &prepared.cwd_canon,
+            Arc::new(AtomicBool::new(false)),
+            Duration::from_secs(10),
+            runtime_compat::SandboxProfileV1::Off,
+            &root,
+            Some(on_line),
+        )
+        .await
+        .unwrap();
+        match outcome {
+            RunCommandOutcome::Output(text) => {
+                assert!(text.contains("one") && text.contains("two") && text.contains("three"));
+            }
+            RunCommandOutcome::Cancelled => panic!("stream command cancelled"),
+        }
+        let lines = seen.lock().unwrap().clone();
+        assert_eq!(lines, vec!["one", "two", "three"], "{lines:?}");
         let _ = std::fs::remove_dir_all(&root);
     }
 

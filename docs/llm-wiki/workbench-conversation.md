@@ -209,7 +209,7 @@ Host 校验名称、frontmatter、相对路径、体积、路径穿越、符号�
 | 原生语音 | `unavailable` | v2 能力表 + `speechRecognition: false`；无 speech 命令 |
 | 会话/项目预览、Git 摘要、资源审阅 | `available` | `HostCapabilities v2` 对应实现 |
 | 应用存活期间后台调度 | `available` | Rust claim ledger + 现有 ACP 会话路径 |
-| 后台命令托管 | `available`，前端尚未接线 UI | `run_command background=true`、`command_output`、`wait_commands`、`kill_command`、`session://command_job_v1`、`session_command_jobs_list_v1` |
+| 后台命令托管 | `available`，前端尚未接线 UI | `run_command background=true`、`command_output`、`wait_commands`、`kill_command`、`monitor`、`session://command_job_v1`、`session_command_jobs_list_v1` |
 | 智能快照、电脑控制、系统级常驻调度 | `unavailable` | v2 能力表或专项里程碑 |
 
 Runtime sandbox 默认 `off`。内建内核把 `workspace_write` / `read_only` 应用到 `run_command`：Linux 用 bubblewrap，macOS 用 sandbox-exec。Windows 和非支持平台请求非 off 会拒绝该命令，不会静默降级。旧版 ACP 仍仅 Linux 可隔离 Runtime 进程。完整边界见 [runtime-migration-v1.md](./runtime-migration-v1.md)。
@@ -226,9 +226,19 @@ Runtime sandbox 默认 `off`。内建内核把 `workspace_write` / `read_only` �
 事件面（`session://command_job_v1`，Host → 前端，不带完整 stdout 正文）：
 
 - 载荷：`sessionId`、`jobId`、`status`（`running` | `completed` | `failed` | `cancelled`）、`command`、`summary`。
-- 发射时机：job 注册时发一次 `running`；job 落地终态（完成、失败、或 kill 触发的取消）时再发一次终态事件。中途不做增量输出流式事件——完整正文仍须通过 `command_output` 显式拉取。
+- 发射时机：job 注册时发一次 `running`；job 落地终态（完成、失败、或 kill 触发的取消）时再发一次终态事件。这两次是唯一的 Tauri 事件——中途的逐行输出（见下）只更新 Host 内存态，不额外发事件；完整正文仍须通过 `command_output` 显式拉取。
 - `session_command_jobs_list_v1(session_id)`：只读命令，返回该会话当前已知的 hosted job 摘要列表（同样不带 `output`），用于前端重连后恢复计数，不必等下一次事件。
 - 前端尚未订阅这两者（composer 托管计数 pill 和后台待批准横幅是后续切片），不要据此宣称已有对应 UI。
+
+### 9.2 `monitor`：后台命令的行唤醒订阅
+
+父会话专属，同 `command_output`/`wait_commands`/`kill_command` 一样只在 `spawn_depth == 0` 时开放。`execute_run_command_timed`（`agent_loop.rs`）已经从"进程退出后一次性 `read_to_end`"改为逐行流式读取 stdout/stderr（两路并发，与等待进程退出同时进行，而不是退出后才读，顺带修掉了长输出可能把管道写满导致的潜在阻塞），所以 hosted job 的 `output` 字段现在在运行期间就会增量增长，`command_output` 中途查询也能看到部分输出，不必等 job 结束。
+
+- `monitor(id, pattern?)`：订阅一个仍在运行的 job（对已终态的 job 直接拒绝，返回"already finished"——不会再产生新行，没有可监视的对象）。`pattern` 是可选正则；省略时任意新行都触发。
+- 每当一行新输出到达且匹配（或未设 `pattern`）时，该行被缓冲到这次订阅的待投递队列；投递复用命令 job 完成时同一条"跳过 `prepare_user_send` 的无用户气泡 wake turn"路径（`maybe_start_wake_turn`），并只在父回合空闲、`decide_auto_wake` 判定可以唤醒时才真正发起——正在进行的前台回合不会被 monitor 打断。
+- 唤醒内容通过与 `command_jobs::wake_prompt`（job 完成结果）同一机制注入：新增 `command_jobs::monitor_wake_prompt` 把本次投递的行拼进下一次 wake turn 的 `wake_context`，模型据此继续任务，不需要再手动调用 `command_output`。
+- 单次订阅最多投递 `MAX_MONITOR_WAKES`（20）次唤醒，达到上限后自动 detach（不是 OS 常驻,也不重试）；job 本身结束后自然不会再有新行，订阅无需显式清理。要继续监视需重新调用 `monitor`。
+- 不发送独立的 Tauri 事件；monitor 完全是模型可见的 Host 工具语义，不改变 `session://command_job_v1` 的两段式（`running`/终态）事件面。
 
 不得据此声称以下项目已经完成：
 

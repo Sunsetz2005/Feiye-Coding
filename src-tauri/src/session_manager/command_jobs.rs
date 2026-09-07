@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use regex::Regex;
 use serde::Serialize;
 use serde_json::json;
 use tokio::sync::Notify;
@@ -24,6 +25,18 @@ pub const MAX_RUNNING_COMMAND_JOBS: usize = 4;
 pub const MAX_WAIT_IDS: usize = 20;
 pub const BACKGROUND_COMMAND_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 const OUTPUT_WAKE_CHARS: usize = 4_000;
+/// Wake deliveries a single `monitor` subscription gets before it auto-detaches.
+/// Not an OS-resident watch — bounded so a chatty command can't keep waking the
+/// parent turn forever; the model can call `monitor` again to re-arm.
+const MAX_MONITOR_WAKES: u32 = 20;
+/// Matched (or, with no pattern, any) lines buffered per wake delivery.
+const MAX_MONITOR_LINES_PER_WAKE: usize = 200;
+
+/// Fired for the parent session when a `monitor` subscription has new lines
+/// ready to deliver. Async and side-effect-only, matching `CommandFinishedFn` —
+/// in production this calls `SessionManager::maybe_start_wake_turn`.
+pub type MonitorTriggeredFn =
+    Arc<dyn Fn(String) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
 pub type CommandFinishedFn = Arc<
     dyn Fn(String, String, String, String, String) -> Pin<Box<dyn Future<Output = ()> + Send>>
@@ -94,6 +107,26 @@ pub struct CommandJobSummaryV1 {
     pub summary: String,
 }
 
+struct MonitorSubscription {
+    id: String,
+    pattern: Option<Regex>,
+    pending_lines: Vec<String>,
+    wakes_used: u32,
+}
+
+/// One matched-line delivery for a `monitor` subscription, taken alongside the
+/// command-job wakes in the same wake-turn (`take_pending_wakes`'s sibling).
+#[derive(Debug, Clone)]
+pub struct MonitorWakeView {
+    pub monitor_id: String,
+    pub job_id: String,
+    pub command: String,
+    pub lines: Vec<String>,
+    /// True when this delivery exhausted `MAX_MONITOR_WAKES` and the
+    /// subscription was auto-removed — the model must call `monitor` again.
+    pub detached: bool,
+}
+
 struct CommandJobRecord {
     id: String,
     parent_session_id: String,
@@ -107,6 +140,7 @@ struct CommandJobRecord {
     output: String,
     summary: String,
     wake_pending: bool,
+    monitors: Vec<MonitorSubscription>,
 }
 
 #[derive(Default)]
@@ -196,6 +230,131 @@ impl CommandJobRegistry {
         views.sort_by(|left, right| left.id.cmp(&right.id));
         views
     }
+
+    /// Subscribe to a running job's output. Rejects unknown or already-terminal
+    /// jobs — a finished job will never produce another line, so there is
+    /// nothing to wake on. `pattern`, if given, must be a valid regex.
+    pub fn start_monitor(&mut self, job_id: &str, pattern: Option<String>) -> Result<String, String> {
+        let job = self
+            .jobs
+            .get_mut(job_id)
+            .ok_or_else(|| format!("unknown command `{job_id}`"))?;
+        if job.status.is_terminal() {
+            return Err(format!(
+                "command `{job_id}` already finished ({}); nothing left to monitor",
+                job.status.as_str()
+            ));
+        }
+        let regex = match pattern.as_deref().map(str::trim) {
+            Some(raw) if !raw.is_empty() => {
+                Some(Regex::new(raw).map_err(|error| format!("invalid pattern: {error}"))?)
+            }
+            _ => None,
+        };
+        let monitor_id = Uuid::new_v4().to_string();
+        job.monitors.push(MonitorSubscription {
+            id: monitor_id.clone(),
+            pattern: regex,
+            pending_lines: Vec::new(),
+            wakes_used: 0,
+        });
+        Ok(monitor_id)
+    }
+
+    /// Appends a newly-arrived output line to the job's live buffer (so
+    /// `command_output`/`wait_commands` can see partial output mid-run too,
+    /// not just after completion) and buffers it for any matching monitor.
+    /// Returns true if at least one subscription now has a line to deliver.
+    fn record_output_line(&mut self, job_id: &str, line: &str) -> bool {
+        let Some(job) = self.jobs.get_mut(job_id) else {
+            return false;
+        };
+        if !job.output.is_empty() {
+            job.output.push('\n');
+        }
+        job.output.push_str(line);
+        let mut any_hit = false;
+        for monitor in &mut job.monitors {
+            let matches = monitor
+                .pattern
+                .as_ref()
+                .map(|re| re.is_match(line))
+                .unwrap_or(true);
+            if matches && monitor.pending_lines.len() < MAX_MONITOR_LINES_PER_WAKE {
+                monitor.pending_lines.push(line.to_string());
+                any_hit = true;
+            }
+        }
+        any_hit
+    }
+
+    pub fn pending_monitor_wake_count(&self, session_id: &str) -> usize {
+        self.jobs
+            .values()
+            .filter(|job| job.parent_session_id == session_id)
+            .flat_map(|job| job.monitors.iter())
+            .filter(|monitor| !monitor.pending_lines.is_empty())
+            .count()
+    }
+
+    /// Drains every subscription with buffered lines for one session, one
+    /// delivery (`MonitorWakeView`) per subscription. A subscription that hits
+    /// `MAX_MONITOR_WAKES` on this delivery is removed (`detached: true`).
+    pub fn take_pending_monitor_wakes(&mut self, session_id: &str) -> Vec<MonitorWakeView> {
+        let mut out = Vec::new();
+        for job in self.jobs.values_mut() {
+            if job.parent_session_id != session_id {
+                continue;
+            }
+            let command = job.command.clone();
+            let job_id = job.id.clone();
+            job.monitors.retain_mut(|monitor| {
+                if monitor.pending_lines.is_empty() {
+                    return true;
+                }
+                let lines = std::mem::take(&mut monitor.pending_lines);
+                monitor.wakes_used += 1;
+                let detached = monitor.wakes_used >= MAX_MONITOR_WAKES;
+                out.push(MonitorWakeView {
+                    monitor_id: monitor.id.clone(),
+                    job_id: job_id.clone(),
+                    command: command.clone(),
+                    lines,
+                    detached,
+                });
+                !detached
+            });
+        }
+        out
+    }
+}
+
+pub fn monitor_wake_prompt(views: &[MonitorWakeView]) -> String {
+    let mut body = String::from("Background command monitor output:\n");
+    let reserve = 160usize;
+    let budget = 16_384usize.saturating_sub(reserve);
+    for view in views {
+        let joined = view.lines.join("\n");
+        let line = format!(
+            "- monitor {} on `{}` (id={}){}:\n{}\n",
+            view.monitor_id,
+            view.command,
+            view.job_id,
+            if view.detached {
+                " [wake budget exhausted, detached — call monitor again to re-arm]"
+            } else {
+                ""
+            },
+            joined
+        );
+        if body.chars().count() + line.chars().count() > budget {
+            body.push_str("- … additional monitor output truncated\n");
+            break;
+        }
+        body.push_str(&line);
+    }
+    body.push_str("Continue the parent task using this output. Do not claim you are still waiting for it.");
+    body
 }
 
 fn emit_command_job_event(
@@ -271,6 +430,7 @@ pub async fn start_with_registry(
     request: StartCommandJobRequest,
     on_finished: Option<CommandFinishedFn>,
     on_event: Option<CommandJobEventFn>,
+    on_monitor_wake: Option<MonitorTriggeredFn>,
 ) -> String {
     let stop = Arc::new(AtomicBool::new(false));
     let id = Uuid::new_v4().to_string();
@@ -295,6 +455,7 @@ pub async fn start_with_registry(
                 output: String::new(),
                 summary: String::new(),
                 wake_pending: false,
+                monitors: Vec::new(),
             },
         );
     }
@@ -311,6 +472,25 @@ pub async fn start_with_registry(
     let command_label = request.command.clone();
     let on_event_done = on_event.clone();
     let session_done = session_id.clone();
+    let on_line: agent_loop::CommandLineFn = {
+        let registry_line = Arc::clone(&registry);
+        let line_job_id = id.clone();
+        let line_session = session_id.clone();
+        Arc::new(move |line: String| {
+            let registry = Arc::clone(&registry_line);
+            let job_id = line_job_id.clone();
+            let session = line_session.clone();
+            let on_wake = on_monitor_wake.clone();
+            Box::pin(async move {
+                let triggered = registry.lock().await.record_output_line(&job_id, &line);
+                if triggered {
+                    if let Some(on_wake) = on_wake {
+                        on_wake(session).await;
+                    }
+                }
+            })
+        })
+    };
     tokio::spawn(async move {
         let outcome = agent_loop::execute_run_command_timed(
             &request.command,
@@ -319,6 +499,7 @@ pub async fn start_with_registry(
             BACKGROUND_COMMAND_TIMEOUT,
             request.sandbox,
             &request.project_root,
+            Some(on_line),
         )
         .await;
         let (status, output, summary) = match outcome {
@@ -534,6 +715,7 @@ mod tests {
             },
             Some(on_finished),
             None,
+            None,
         )
         .await;
         let parsed: serde_json::Value = serde_json::from_str(&started).unwrap();
@@ -579,6 +761,7 @@ mod tests {
             },
             None,
             None,
+            None,
         )
         .await;
         let parsed: serde_json::Value = serde_json::from_str(&started).unwrap();
@@ -620,6 +803,7 @@ mod tests {
             },
             None,
             Some(on_event),
+            None,
         )
         .await;
         let parsed: serde_json::Value = serde_json::from_str(&started).unwrap();
@@ -662,6 +846,7 @@ mod tests {
             },
             None,
             Some(on_event),
+            None,
         )
         .await;
         let parsed: serde_json::Value = serde_json::from_str(&started).unwrap();
@@ -703,6 +888,7 @@ mod tests {
             },
             None,
             Some(on_event),
+            None,
         )
         .await;
         let parsed: serde_json::Value = serde_json::from_str(&started).unwrap();
@@ -746,6 +932,7 @@ mod tests {
                 },
                 None,
                 None,
+                None,
             )
             .await;
         }
@@ -763,5 +950,171 @@ mod tests {
             registry.lock().await.kill(&id);
         }
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn staggered_lines_command() -> &'static str {
+        if cfg!(windows) {
+            "echo start & ping -n 1 127.0.0.1 >NUL & echo match-me & ping -n 1 127.0.0.1 >NUL & echo done"
+        } else {
+            "echo start; sleep 0.2; echo match-me; sleep 0.2; echo done"
+        }
+    }
+
+    #[tokio::test]
+    async fn monitor_wakes_only_on_matching_lines() {
+        let root = temp_root("bg-monitor-pattern");
+        let registry = Arc::new(tokio::sync::Mutex::new(CommandJobRegistry::default()));
+        let started = start_with_registry(
+            Arc::clone(&registry),
+            "sess".into(),
+            "turn".into(),
+            StartCommandJobRequest {
+                command: staggered_lines_command().into(),
+                cwd: root.clone(),
+                project_root: root.clone(),
+                sandbox: SandboxProfileV1::Off,
+                tool_call_id: "tool-1".into(),
+                title: "Watch".into(),
+            },
+            None,
+            None,
+            None,
+        )
+        .await;
+        let parsed: serde_json::Value = serde_json::from_str(&started).unwrap();
+        let id = parsed["id"].as_str().unwrap().to_string();
+        // Subscribe while the job is still running (the first `echo` + sleep
+        // has not resolved yet); a terminal job is rejected by `start_monitor`.
+        let monitor_id = registry
+            .lock()
+            .await
+            .start_monitor(&id, Some("match".into()))
+            .expect("monitor should attach to a running job");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while registry.lock().await.pending_monitor_wake_count("sess") == 0
+            && tokio::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        let wakes = registry.lock().await.take_pending_monitor_wakes("sess");
+        assert_eq!(wakes.len(), 1, "{wakes:?}");
+        assert_eq!(wakes[0].monitor_id, monitor_id);
+        assert_eq!(wakes[0].job_id, id);
+        assert_eq!(wakes[0].lines, vec!["match-me".to_string()]);
+        assert!(!wakes[0].detached);
+        wait_for_jobs(Arc::clone(&registry), vec![id], true, Duration::from_secs(5)).await;
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn monitor_without_pattern_wakes_on_any_line() {
+        let root = temp_root("bg-monitor-any");
+        let registry = Arc::new(tokio::sync::Mutex::new(CommandJobRegistry::default()));
+        let started = start_with_registry(
+            Arc::clone(&registry),
+            "sess".into(),
+            "turn".into(),
+            StartCommandJobRequest {
+                command: staggered_lines_command().into(),
+                cwd: root.clone(),
+                project_root: root.clone(),
+                sandbox: SandboxProfileV1::Off,
+                tool_call_id: "tool-1".into(),
+                title: "Watch".into(),
+            },
+            None,
+            None,
+            None,
+        )
+        .await;
+        let parsed: serde_json::Value = serde_json::from_str(&started).unwrap();
+        let id = parsed["id"].as_str().unwrap().to_string();
+        registry
+            .lock()
+            .await
+            .start_monitor(&id, None)
+            .expect("monitor should attach to a running job");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while registry.lock().await.pending_monitor_wake_count("sess") == 0
+            && tokio::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        let wakes = registry.lock().await.take_pending_monitor_wakes("sess");
+        assert_eq!(wakes.len(), 1, "{wakes:?}");
+        assert_eq!(wakes[0].lines[0], "start");
+        wait_for_jobs(Arc::clone(&registry), vec![id], true, Duration::from_secs(5)).await;
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn start_monitor_rejects_unknown_and_terminal_jobs() {
+        let root = temp_root("bg-monitor-reject");
+        let registry = Arc::new(tokio::sync::Mutex::new(CommandJobRegistry::default()));
+        let unknown = registry.lock().await.start_monitor("nope", None);
+        assert!(unknown.unwrap_err().contains("unknown command"));
+        let started = start_with_registry(
+            Arc::clone(&registry),
+            "sess".into(),
+            "turn".into(),
+            StartCommandJobRequest {
+                command: "echo hi".into(),
+                cwd: root.clone(),
+                project_root: root.clone(),
+                sandbox: SandboxProfileV1::Off,
+                tool_call_id: "tool-1".into(),
+                title: "Echo".into(),
+            },
+            None,
+            None,
+            None,
+        )
+        .await;
+        let parsed: serde_json::Value = serde_json::from_str(&started).unwrap();
+        let id = parsed["id"].as_str().unwrap().to_string();
+        wait_for_jobs(Arc::clone(&registry), vec![id.clone()], true, Duration::from_secs(5)).await;
+        let terminal = registry.lock().await.start_monitor(&id, None);
+        assert!(
+            terminal.as_ref().unwrap_err().contains("already finished"),
+            "{terminal:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn monitor_auto_detaches_after_wake_budget_exhausted() {
+        let mut registry = CommandJobRegistry::default();
+        let job_id = "job-1".to_string();
+        registry.jobs.insert(
+            job_id.clone(),
+            CommandJobRecord {
+                id: job_id.clone(),
+                parent_session_id: "sess".into(),
+                parent_turn_id: "turn".into(),
+                command: "watch".into(),
+                tool_call_id: "tool".into(),
+                title: "Watch".into(),
+                status: CommandJobStatus::Running,
+                stop: Arc::new(AtomicBool::new(false)),
+                output: String::new(),
+                summary: String::new(),
+                wake_pending: false,
+                monitors: Vec::new(),
+            },
+        );
+        let monitor_id = registry.start_monitor(&job_id, None).unwrap();
+        for i in 0..MAX_MONITOR_WAKES {
+            assert!(registry.record_output_line(&job_id, &format!("line-{i}")));
+            let mut wakes = registry.take_pending_monitor_wakes("sess");
+            assert_eq!(wakes.len(), 1, "iteration {i}: {wakes:?}");
+            let wake = wakes.remove(0);
+            assert_eq!(wake.monitor_id, monitor_id);
+            let expect_detached = i + 1 == MAX_MONITOR_WAKES;
+            assert_eq!(wake.detached, expect_detached, "iteration {i}");
+        }
+        // Budget exhausted: the subscription was removed on the last delivery,
+        // so further lines have nothing left to notify.
+        assert!(!registry.record_output_line(&job_id, "line-after-detach"));
+        assert_eq!(registry.pending_monitor_wake_count("sess"), 0);
     }
 }
