@@ -19,7 +19,7 @@ use crate::session_fsm::SessionState;
 use crate::store::{self, MessageAttachmentStored};
 
 use super::types::*;
-use super::{command_jobs, subagents, SessionManager, SubagentView};
+use super::{command_jobs, session_loop, subagents, SessionManager, SubagentView};
 
 impl SessionManager {
 
@@ -1221,6 +1221,7 @@ impl SessionManager {
                 commands.take_pending_monitor_wakes(&app_sid),
             )
         };
+        let loop_ticks = self.session_loops.lock().await.take_pending_ticks(&app_sid);
         let mut wake_context = String::new();
         if !wakes.is_empty() {
             wake_context.push_str(&subagents::wake_prompt(&wakes));
@@ -1236,6 +1237,12 @@ impl SessionManager {
                 wake_context.push('\n');
             }
             wake_context.push_str(&command_jobs::monitor_wake_prompt(&monitor_wakes));
+        }
+        if !loop_ticks.is_empty() {
+            if !wake_context.is_empty() {
+                wake_context.push('\n');
+            }
+            wake_context.push_str(&session_loop::wake_prompt(&loop_ticks));
         }
         if !wake_context.is_empty() {
             agent_prompt =
@@ -1310,6 +1317,7 @@ impl SessionManager {
             spawn_depth: 0,
             subagents: agent_loop::SubagentHooks::default(),
             command_jobs: agent_loop::CommandJobHooks::default(),
+            session_loops: agent_loop::SessionLoopHooks::default(),
             sandbox_profile: crate::runtime_compat::SandboxProfileV1::parse(
                 &crate::store::load_settings().sandbox_profile,
             ),
@@ -1322,6 +1330,7 @@ impl SessionManager {
         let child_template = agent_loop::AgentTurnConfig {
             subagents: agent_loop::SubagentHooks::default(),
             command_jobs: agent_loop::CommandJobHooks::default(),
+            session_loops: agent_loop::SessionLoopHooks::default(),
             permission_gate: Some(permission_gate_for_child),
             skill_prompt_chars: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             ..cfg.clone()
@@ -1487,6 +1496,37 @@ impl SessionManager {
                         Err(error) => error,
                     }
                 })
+            })),
+        };
+        let loops = Arc::clone(&self.session_loops);
+        let loops_cancel = Arc::clone(&self.session_loops);
+        let loop_session = app_sid.clone();
+        let loop_cancel_session = app_sid.clone();
+        let on_loop_tick: session_loop::LoopTickFn = {
+            let mgr = Arc::clone(self);
+            let app_loop = app.clone();
+            Arc::new(move |session_id| {
+                let mgr = Arc::clone(&mgr);
+                let app_loop = app_loop.clone();
+                Box::pin(async move {
+                    let _ = mgr.maybe_start_wake_turn(&app_loop, &session_id).await;
+                })
+            })
+        };
+        cfg.session_loops = agent_loop::SessionLoopHooks {
+            start: Some(Arc::new(move |interval_secs, prompt| {
+                let registry = Arc::clone(&loops);
+                let session = loop_session.clone();
+                let on_tick = Arc::clone(&on_loop_tick);
+                Box::pin(async move {
+                    session_loop::start_with_registry(registry, session, interval_secs, prompt, on_tick)
+                        .await
+                })
+            })),
+            cancel: Some(Arc::new(move |id| {
+                let registry = Arc::clone(&loops_cancel);
+                let session = loop_cancel_session.clone();
+                Box::pin(async move { registry.lock().await.cancel(&session, &id) })
             })),
         };
         let mgr = Arc::clone(self);
@@ -1820,9 +1860,11 @@ impl SessionManager {
         let (pending, this_turn_running) = {
             let registry = self.subagents.lock().await;
             let commands = self.command_jobs.lock().await;
+            let loops = self.session_loops.lock().await;
             let pending = registry.pending_wake_count(session_id)
                 + commands.pending_wake_count(session_id)
-                + commands.pending_monitor_wake_count(session_id);
+                + commands.pending_monitor_wake_count(session_id)
+                + loops.pending_tick_count(session_id);
             let this_turn_running = inspect
                 .host_turn_id
                 .as_deref()

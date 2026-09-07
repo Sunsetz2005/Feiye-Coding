@@ -59,6 +59,29 @@
 - **已有 sessionId 但无消息**：提示「此会话暂无消息…」，不显示新建页大牌。
 - **删除 / 危险操作**：禁止 `window.confirm`；用应用内弹窗（见 [dialogs.md](./dialogs.md)）。`AutomationsPage` 删除确认即范例。
 
+## 同会话循环（`loop_start` / `loop_cancel`）与本账本的边界
+
+本节机制与上面整节描述的 automation 账本是**两回事**，不要混用：
+
+| | 已安排任务（本节以上） | 同会话循环 |
+|---|---|---|
+| 存储 | `automations.json` + `automation-runs.v1.json` 磁盘账本 | 纯内存，进程内 `SessionManager::session_loops`（`session_manager/session_loop.rs`） |
+| 生命周期 | 跨应用重启存活；由 Host 每 30s 轮询到期认领 | 应用重启或进程退出即消失；不落盘、无 claim/heartbeat/replacement CAS |
+| 触发的会话 | 每次到期新建/复用一个独立的 scheduled 会话 | 只绑定当前 `sessionId`，tick 直接在同一会话发起无用户气泡的 wake 回合 |
+| 最小间隔 | `intervalMinutes ≥ 15`（`interval` 频率）或 daily/weekly 等日历频率 | `interval_secs`，Host 侧强制 `.max(60)` 地板，不信任模型传入的原始值 |
+| 过期 | 不自动过期（`enabled` 手动关闭或 `once` 用完） | 7 天 TTL（`MAX_LOOP_TTL`），到期自动停止；也可 `loop_cancel` 提前停止 |
+| 上限 | 无单会话上限（清单式管理） | 每会话最多 `MAX_LOOPS_PER_SESSION`（4）个并发循环 |
+| 适用场景 | "每天早上帮我总结邮件" 这类需要独立会话、跨重启持续存在的日程 | "每隔 2 分钟看一眼这个部署有没有完成" 这类绑定当前对话、活到会话结束就够的短期轮询 |
+
+**实现要点**（`session_manager/session_loop.rs`）：
+
+- `loop_start(interval_secs, prompt)`：仅父会话可调用（`spawn_depth == 0`），与 `command_output`/`monitor` 同一收紧规则。返回 `id`，`intervalSecs` 为地板夹紧后的实际值。
+- 每个循环有独立的 tokio 计时任务：`sleep(min(interval, 距 7 天 TTL 剩余时间))` 后置位一次 `tick_pending`，再调用 `on_tick` 触发 `SessionManager::maybe_start_wake_turn`——与 `monitor` 的行唤醒复用同一条"跳过 `prepare_user_send`、不写用户气泡"wake-turn 路径。
+- `tick_pending` 走的是与 subagent/command-job/monitor 完全相同的"排队 pending → 下次真正唤醒时统一取走并拼进 `wake_context`"模型（`pending_loop_tick_count` / `take_pending_loop_ticks` / `wake_prompt`），因此 `decide_auto_wake` 的"父回合空闲才唤醒"闸门天然覆盖循环，不需要新的决策逻辑。
+- 定时器**不因未被消费而停摆**：即使上一次 tick 还没被 drain（父回合仍在流式输出），下一次 tick 到时依然会重新置位 `tick_pending` 并再次尝试唤醒；真正是否打断由共享的 `decide_auto_wake` 决定。
+- `loop_cancel(id)` 按 `sessionId` 校验归属——不能取消别的会话的循环；命中后 `Notify::notify_waiters()` 立即唤醒计时任务退出，不必等到下一次 `sleep` 到期。
+- Stop/Steer 不取消循环本身（与 `command_jobs.rs` 里 hosted job 的既有约定一致）；应用重启或会话真正消失后，循环因为整个进程内存态注册表被丢弃而自然失效,不需要显式清理钩子。
+
 ## Tauri 命令
 
 - `automations_list`

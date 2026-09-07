@@ -244,6 +244,16 @@ pub struct CommandJobHooks {
     pub monitor: Option<StartMonitorFn>,
 }
 
+pub type StartLoopFn = Arc<
+    dyn Fn(u64, String) -> Pin<Box<dyn Future<Output = String> + Send>> + Send + Sync,
+>;
+
+#[derive(Clone, Default)]
+pub struct SessionLoopHooks {
+    pub start: Option<StartLoopFn>,
+    pub cancel: Option<AgentLookupFn>,
+}
+
 pub const SUBAGENT_SUMMARY_CHARS: usize = 8_192;
 pub const MAX_RUNNING_SUBAGENTS: usize = 4;
 
@@ -275,6 +285,7 @@ pub struct AgentTurnConfig {
     pub spawn_depth: u32,
     pub subagents: SubagentHooks,
     pub command_jobs: CommandJobHooks,
+    pub session_loops: SessionLoopHooks,
     pub sandbox_profile: runtime_compat::SandboxProfileV1,
     pub skill_prompt_chars: Arc<AtomicUsize>,
     pub allow_schedule_task: bool,
@@ -1004,6 +1015,35 @@ pub fn tool_definitions_for(kind: AgentKind, spawn_depth: u32) -> Value {
                 }
             }
         }));
+        tools.push(json!({
+            "type": "function",
+            "function": {
+                "name": "loop_start",
+                "description": "Start a recurring wake-turn on this same session: every interval_secs (floored to 60 by the Host regardless of what is passed), the session wakes with no reply needed now and continues the task described in prompt. Expires after 7 days or on loop_cancel. Not a substitute for schedule_task, which opens a new session on its own ledger.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "interval_secs": { "type": "integer", "description": "Seconds between ticks. Floored to 60." },
+                        "prompt": { "type": "string", "description": "What to do on each tick." }
+                    },
+                    "required": ["interval_secs", "prompt"]
+                }
+            }
+        }));
+        tools.push(json!({
+            "type": "function",
+            "function": {
+                "name": "loop_cancel",
+                "description": "Stop a same-session loop started by loop_start.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string", "description": "Loop id returned by loop_start." }
+                    },
+                    "required": ["id"]
+                }
+            }
+        }));
     }
     Value::Array(tools)
 }
@@ -1099,6 +1139,8 @@ fn is_host_tool(name: &str) -> bool {
             | "wait_commands"
             | "kill_command"
             | "monitor"
+            | "loop_start"
+            | "loop_cancel"
             | "ask_user_question"
             | "list_skills"
             | "view_skill"
@@ -1119,6 +1161,10 @@ fn is_command_job_tool(name: &str) -> bool {
     )
 }
 
+fn is_session_loop_tool(name: &str) -> bool {
+    matches!(name, "loop_start" | "loop_cancel")
+}
+
 fn tool_timeout_ms(arguments: &Value) -> Option<u64> {
     arguments
         .get("timeout_ms")
@@ -1129,6 +1175,18 @@ fn tool_timeout_ms(arguments: &Value) -> Option<u64> {
                 .or_else(|| value.as_i64().and_then(|n| u64::try_from(n).ok()))
         })
         .filter(|ms| *ms > 0)
+}
+
+fn tool_interval_secs_arg(arguments: &Value) -> u64 {
+    arguments
+        .get("interval_secs")
+        .or_else(|| arguments.get("intervalSecs"))
+        .and_then(|value| {
+            value
+                .as_u64()
+                .or_else(|| value.as_i64().and_then(|n| u64::try_from(n).ok()))
+        })
+        .unwrap_or(0)
 }
 
 fn tool_id_list(arguments: &Value) -> Vec<String> {
@@ -2385,6 +2443,43 @@ async fn dispatch_host_tool(
             _ => {}
         }
     }
+    if is_session_loop_tool(name) {
+        if cfg.kind != AgentKind::Parent || cfg.spawn_depth != 0 {
+            return HostToolDispatch::Output(
+                "same-session loops are only available on the parent agent".into(),
+            );
+        }
+        match name {
+            "loop_start" => {
+                let interval_secs = tool_interval_secs_arg(arguments);
+                if interval_secs == 0 {
+                    return HostToolDispatch::Output("loop_start requires `interval_secs`".into());
+                }
+                let prompt = tool_string_field(arguments, &["prompt", "task"])
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string();
+                if prompt.is_empty() {
+                    return HostToolDispatch::Output("loop_start requires `prompt`".into());
+                }
+                let Some(start) = cfg.session_loops.start.clone() else {
+                    return HostToolDispatch::Output("same-session loops are not available".into());
+                };
+                return HostToolDispatch::Output(start(interval_secs, prompt).await);
+            }
+            "loop_cancel" => {
+                let id = tool_agent_id_arg(arguments);
+                if id.is_empty() {
+                    return HostToolDispatch::Output("loop_cancel requires `id`".into());
+                }
+                let Some(cancel) = cfg.session_loops.cancel.clone() else {
+                    return HostToolDispatch::Output("same-session loops are not available".into());
+                };
+                return HostToolDispatch::Output(cancel(id).await);
+            }
+            _ => {}
+        }
+    }
     if !is_host_tool(name) {
         return HostToolDispatch::Output(format!("unknown tool `{name}`"));
     }
@@ -3570,6 +3665,7 @@ mod tests {
             spawn_depth: 0,
             subagents: SubagentHooks::default(),
             command_jobs: CommandJobHooks::default(),
+            session_loops: SessionLoopHooks::default(),
             sandbox_profile: runtime_compat::SandboxProfileV1::Off,
             skill_prompt_chars: Arc::new(AtomicUsize::new(0)),
             allow_schedule_task: true,
@@ -3686,6 +3782,8 @@ mod tests {
         assert!(listed.contains("wait_commands"));
         assert!(listed.contains("kill_command"));
         assert!(listed.contains("monitor"));
+        assert!(listed.contains("loop_start"));
+        assert!(listed.contains("loop_cancel"));
         assert!(listed.contains("ask_user_question"));
         let skills = skill_tool_definitions().to_string();
         assert!(skills.contains("list_skills"));
@@ -3701,6 +3799,7 @@ mod tests {
         assert!(!child_general.contains("spawn_agent"));
         assert!(!child_general.contains("command_output"));
         assert!(!child_general.contains("monitor"));
+        assert!(!child_general.contains("loop_start"));
         assert!(!child_general.contains("ask_user_question"));
     }
 
@@ -3843,6 +3942,121 @@ mod tests {
                 assert!(text.contains("only available on the parent agent"), "{text}");
             }
             HostToolDispatch::Cancelled => panic!("expected parent-only message"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn loop_start_dispatches_interval_and_prompt_to_the_hook() {
+        let root = temp_root("loop-dispatch");
+        let mut cfg = base_cfg("http://127.0.0.1/v1".into(), Some(root.clone()), true, "hi");
+        cfg.session_loops.start = Some(Arc::new(|interval_secs, prompt| {
+            Box::pin(async move {
+                json!({ "id": "loop-1", "intervalSecs": interval_secs, "prompt": prompt, "status": "running" })
+                    .to_string()
+            })
+        }));
+        let output = dispatch_host_tool(
+            &cfg,
+            "loop_start",
+            &json!({ "interval_secs": 90, "prompt": "poll the deploy" }),
+            "loop-1",
+            None,
+            None,
+        )
+        .await;
+        match output {
+            HostToolDispatch::Output(text) => {
+                let parsed: Value = serde_json::from_str(&text).unwrap();
+                assert_eq!(parsed["intervalSecs"], 90);
+                assert_eq!(parsed["prompt"], "poll the deploy");
+            }
+            HostToolDispatch::Cancelled => panic!("expected loop_start output"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn loop_start_requires_interval_and_prompt_and_is_parent_only() {
+        let root = temp_root("loop-guard");
+        let mut cfg = base_cfg("http://127.0.0.1/v1".into(), Some(root.clone()), true, "hi");
+        cfg.session_loops.start = Some(Arc::new(|interval_secs, prompt| {
+            Box::pin(async move { json!({ "intervalSecs": interval_secs, "prompt": prompt }).to_string() })
+        }));
+        let missing_interval = dispatch_host_tool(
+            &cfg,
+            "loop_start",
+            &json!({ "prompt": "watch it" }),
+            "loop-1",
+            None,
+            None,
+        )
+        .await;
+        match missing_interval {
+            HostToolDispatch::Output(text) => assert!(text.contains("requires `interval_secs`"), "{text}"),
+            HostToolDispatch::Cancelled => panic!("expected missing-interval message"),
+        }
+        let missing_prompt = dispatch_host_tool(
+            &cfg,
+            "loop_start",
+            &json!({ "interval_secs": 60 }),
+            "loop-2",
+            None,
+            None,
+        )
+        .await;
+        match missing_prompt {
+            HostToolDispatch::Output(text) => assert!(text.contains("requires `prompt`"), "{text}"),
+            HostToolDispatch::Cancelled => panic!("expected missing-prompt message"),
+        }
+        cfg.spawn_depth = 1;
+        let from_child = dispatch_host_tool(
+            &cfg,
+            "loop_start",
+            &json!({ "interval_secs": 60, "prompt": "watch it" }),
+            "loop-3",
+            None,
+            None,
+        )
+        .await;
+        match from_child {
+            HostToolDispatch::Output(text) => {
+                assert!(text.contains("only available on the parent agent"), "{text}");
+            }
+            HostToolDispatch::Cancelled => panic!("expected parent-only message"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn loop_cancel_dispatches_id_to_the_hook() {
+        let root = temp_root("loop-cancel-dispatch");
+        let mut cfg = base_cfg("http://127.0.0.1/v1".into(), Some(root.clone()), true, "hi");
+        cfg.session_loops.cancel = Some(Arc::new(|id| {
+            Box::pin(async move { json!({ "id": id, "status": "cancelled" }).to_string() })
+        }));
+        let output = dispatch_host_tool(
+            &cfg,
+            "loop_cancel",
+            &json!({ "id": "loop-1" }),
+            "loop-cancel-1",
+            None,
+            None,
+        )
+        .await;
+        match output {
+            HostToolDispatch::Output(text) => {
+                let parsed: Value = serde_json::from_str(&text).unwrap();
+                assert_eq!(parsed["id"], "loop-1");
+                assert_eq!(parsed["status"], "cancelled");
+            }
+            HostToolDispatch::Cancelled => panic!("expected loop_cancel output"),
+        }
+        let missing_id =
+            dispatch_host_tool(&cfg, "loop_cancel", &json!({}), "loop-cancel-2", None, None).await;
+        match missing_id {
+            HostToolDispatch::Output(text) => assert!(text.contains("requires `id`"), "{text}"),
+            HostToolDispatch::Cancelled => panic!("expected missing-id message"),
         }
         let _ = std::fs::remove_dir_all(&root);
     }

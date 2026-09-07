@@ -16,6 +16,7 @@ mod command_jobs;
 mod connect;
 mod interactions;
 mod live;
+mod session_loop;
 mod subagents;
 #[cfg(test)]
 mod test_support;
@@ -52,6 +53,8 @@ pub struct SessionManager {
     subagents: Arc<tokio::sync::Mutex<subagents::SubagentRegistry>>,
     /// Parent-session background `run_command` jobs.
     command_jobs: Arc<tokio::sync::Mutex<command_jobs::CommandJobRegistry>>,
+    /// Same-session recurring wake-turn loops (`loop_start`/`loop_cancel`).
+    session_loops: Arc<tokio::sync::Mutex<session_loop::LoopRegistry>>,
     /// Session ids with a Host wake turn starting or running.
     wake_inflight: Mutex<HashSet<String>>,
 }
@@ -112,6 +115,7 @@ impl SessionManager {
             command_jobs: Arc::new(tokio::sync::Mutex::new(
                 command_jobs::CommandJobRegistry::default(),
             )),
+            session_loops: Arc::new(tokio::sync::Mutex::new(session_loop::LoopRegistry::default())),
             wake_inflight: Mutex::new(HashSet::new()),
         }
     }
