@@ -242,6 +242,7 @@ pub fn run() {
             commands::session_get_pending_ask_user,
             commands::session_pending_interactions,
             commands::session_interactions_list,
+            commands::session_command_jobs_list_v1,
             commands::session_plan_artifacts_list_v1,
             commands::project_instruction_inspect_v1,
             commands::composer_recovery_get_v1,

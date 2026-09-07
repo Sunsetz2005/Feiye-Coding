@@ -644,6 +644,17 @@ pub fn session_interactions_list(
     Ok(mgr.interactions_list(session_id.as_deref()))
 }
 
+/// Read-only hosted background-command snapshot for one session (no stdout body).
+/// Lets the UI restore the composer's hosted-count pill on reconnect instead of
+/// waiting for the next `session://command_job_v1` event.
+#[tauri::command]
+pub async fn session_command_jobs_list_v1(
+    mgr: State<'_, Arc<SessionManager>>,
+    session_id: String,
+) -> Result<Vec<crate::session_manager::CommandJobSummaryV1>, String> {
+    Ok(mgr.command_jobs_list(&session_id).await)
+}
+
 /// List durable Plan artifacts. These survive after their live approval RPC is gone.
 #[tauri::command]
 pub async fn session_plan_artifacts_list_v1(

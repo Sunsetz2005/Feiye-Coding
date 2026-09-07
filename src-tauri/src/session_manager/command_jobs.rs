@@ -31,6 +31,22 @@ pub type CommandFinishedFn = Arc<
         + Sync,
 >;
 
+/// Fired on registration and on every terminal status transition so the UI can
+/// mirror hosted-job lifecycle (`session://command_job_v1`) without polling.
+/// Synchronous and side-effect-only (an `AppHandle::emit`, in production) so
+/// tests can inject a no-op instead of needing a live Tauri app.
+pub type CommandJobEventFn = Arc<dyn Fn(CommandJobEventPayload) + Send + Sync>;
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandJobEventPayload {
+    pub session_id: String,
+    pub job_id: String,
+    pub status: CommandJobStatus,
+    pub command: String,
+    pub summary: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum CommandJobStatus {
@@ -63,6 +79,18 @@ pub struct CommandJobView {
     pub command: String,
     pub status: CommandJobStatus,
     pub output: String,
+    pub summary: String,
+}
+
+/// UI-facing hosted-job summary for `session_command_jobs_list_v1`. Deliberately
+/// omits `output` — the same "no full text body" convention as `session://permission`
+/// previews; a caller that needs the full body still goes through `command_output`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandJobSummaryV1 {
+    pub id: String,
+    pub status: CommandJobStatus,
+    pub command: String,
     pub summary: String,
 }
 
@@ -150,6 +178,43 @@ impl CommandJobRegistry {
             .filter_map(|id| self.jobs.get(id).map(CommandJobRecord::view))
             .collect()
     }
+
+    /// Hosted jobs for one session, in a stable (id-sorted) order. Read-only,
+    /// used by the UI to restore the composer's hosted-count pill on reconnect.
+    pub fn list_for_session(&self, session_id: &str) -> Vec<CommandJobSummaryV1> {
+        let mut views: Vec<_> = self
+            .jobs
+            .values()
+            .filter(|job| job.parent_session_id == session_id)
+            .map(|job| CommandJobSummaryV1 {
+                id: job.id.clone(),
+                status: job.status,
+                command: job.command.clone(),
+                summary: job.summary.clone(),
+            })
+            .collect();
+        views.sort_by(|left, right| left.id.cmp(&right.id));
+        views
+    }
+}
+
+fn emit_command_job_event(
+    on_event: &Option<CommandJobEventFn>,
+    session_id: &str,
+    job_id: &str,
+    status: CommandJobStatus,
+    command: &str,
+    summary: &str,
+) {
+    if let Some(on_event) = on_event {
+        on_event(CommandJobEventPayload {
+            session_id: session_id.to_string(),
+            job_id: job_id.to_string(),
+            status,
+            command: command.to_string(),
+            summary: summary.to_string(),
+        });
+    }
 }
 
 impl CommandJobRecord {
@@ -205,6 +270,7 @@ pub async fn start_with_registry(
     turn_id: String,
     request: StartCommandJobRequest,
     on_finished: Option<CommandFinishedFn>,
+    on_event: Option<CommandJobEventFn>,
 ) -> String {
     let stop = Arc::new(AtomicBool::new(false));
     let id = Uuid::new_v4().to_string();
@@ -232,9 +298,19 @@ pub async fn start_with_registry(
             },
         );
     }
+    emit_command_job_event(
+        &on_event,
+        &session_id,
+        &id,
+        CommandJobStatus::Running,
+        &request.command,
+        "",
+    );
     let run_id = id.clone();
     let registry_run = Arc::clone(&registry);
     let command_label = request.command.clone();
+    let on_event_done = on_event.clone();
+    let session_done = session_id.clone();
     tokio::spawn(async move {
         let outcome = agent_loop::execute_run_command_timed(
             &request.command,
@@ -259,6 +335,8 @@ pub async fn start_with_registry(
         };
         let mut tool_id = request.tool_call_id;
         let mut title = request.title;
+        let mut final_status = status;
+        let mut final_summary = String::new();
         {
             let mut guard = registry_run.lock().await;
             if let Some(job) = guard.jobs.get_mut(&run_id) {
@@ -281,9 +359,19 @@ pub async fn start_with_registry(
                 }
                 tool_id = job.tool_call_id.clone();
                 title = job.title.clone();
+                final_status = job.status;
+                final_summary = job.summary.clone();
             }
             guard.slot.notify_waiters();
         }
+        emit_command_job_event(
+            &on_event_done,
+            &session_done,
+            &run_id,
+            final_status,
+            &request.command,
+            &final_summary,
+        );
         if let Some(on_finished) = on_finished {
             let status_str = {
                 let guard = registry_run.lock().await;
@@ -445,6 +533,7 @@ mod tests {
                 title: "Run sleep".into(),
             },
             Some(on_finished),
+            None,
         )
         .await;
         let parsed: serde_json::Value = serde_json::from_str(&started).unwrap();
@@ -489,6 +578,7 @@ mod tests {
                 title: "Run sleep".into(),
             },
             None,
+            None,
         )
         .await;
         let parsed: serde_json::Value = serde_json::from_str(&started).unwrap();
@@ -496,6 +586,182 @@ mod tests {
         let killed = registry.lock().await.kill(&id);
         let kill_json: serde_json::Value = serde_json::from_str(&killed).unwrap();
         assert_eq!(kill_json["status"], "cancelled");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn event_sink() -> (
+        CommandJobEventFn,
+        Arc<std::sync::Mutex<Vec<CommandJobEventPayload>>>,
+    ) {
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = Arc::clone(&events);
+        let on_event: CommandJobEventFn = Arc::new(move |payload| {
+            captured.lock().unwrap().push(payload);
+        });
+        (on_event, events)
+    }
+
+    #[tokio::test]
+    async fn success_path_emits_running_then_completed() {
+        let root = temp_root("bg-events-success");
+        let registry = Arc::new(tokio::sync::Mutex::new(CommandJobRegistry::default()));
+        let (on_event, events) = event_sink();
+        let started = start_with_registry(
+            Arc::clone(&registry),
+            "sess".into(),
+            "turn".into(),
+            StartCommandJobRequest {
+                command: "echo hi".into(),
+                cwd: root.clone(),
+                project_root: root.clone(),
+                sandbox: SandboxProfileV1::Off,
+                tool_call_id: "tool-1".into(),
+                title: "Echo".into(),
+            },
+            None,
+            Some(on_event),
+        )
+        .await;
+        let parsed: serde_json::Value = serde_json::from_str(&started).unwrap();
+        let id = parsed["id"].as_str().unwrap().to_string();
+        wait_for_jobs(
+            Arc::clone(&registry),
+            vec![id.clone()],
+            true,
+            Duration::from_secs(5),
+        )
+        .await;
+        let seen = events.lock().unwrap().clone();
+        assert_eq!(seen.len(), 2, "expected running + completed events, got {seen:?}");
+        assert_eq!(seen[0].job_id, id);
+        assert_eq!(seen[0].status, CommandJobStatus::Running);
+        assert_eq!(seen[1].status, CommandJobStatus::Completed);
+        assert_eq!(seen[1].session_id, "sess");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn failure_path_emits_failed_event() {
+        let root = temp_root("bg-events-failure");
+        let registry = Arc::new(tokio::sync::Mutex::new(CommandJobRegistry::default()));
+        let (on_event, events) = event_sink();
+        // A non-zero exit still resolves as `Output` (`execute_run_command_timed`
+        // just appends "exit N" to the text) — an empty command is what actually
+        // fails, rejected by `plan_run_command` before any process spawns.
+        let started = start_with_registry(
+            Arc::clone(&registry),
+            "sess".into(),
+            "turn".into(),
+            StartCommandJobRequest {
+                command: "".into(),
+                cwd: root.clone(),
+                project_root: root.clone(),
+                sandbox: SandboxProfileV1::Off,
+                tool_call_id: "tool-1".into(),
+                title: "Fail".into(),
+            },
+            None,
+            Some(on_event),
+        )
+        .await;
+        let parsed: serde_json::Value = serde_json::from_str(&started).unwrap();
+        let id = parsed["id"].as_str().unwrap().to_string();
+        wait_for_jobs(
+            Arc::clone(&registry),
+            vec![id],
+            true,
+            Duration::from_secs(5),
+        )
+        .await;
+        let seen = events.lock().unwrap().clone();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[1].status, CommandJobStatus::Failed);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn cancel_path_emits_cancelled_event() {
+        let root = temp_root("bg-events-cancel");
+        let registry = Arc::new(tokio::sync::Mutex::new(CommandJobRegistry::default()));
+        let (on_event, events) = event_sink();
+        let hang = if cfg!(windows) {
+            "ping -n 30 127.0.0.1 >NUL"
+        } else {
+            "sleep 30"
+        };
+        let started = start_with_registry(
+            Arc::clone(&registry),
+            "sess".into(),
+            "turn".into(),
+            StartCommandJobRequest {
+                command: hang.into(),
+                cwd: root.clone(),
+                project_root: root.clone(),
+                sandbox: SandboxProfileV1::Off,
+                tool_call_id: "tool-1".into(),
+                title: "Run sleep".into(),
+            },
+            None,
+            Some(on_event),
+        )
+        .await;
+        let parsed: serde_json::Value = serde_json::from_str(&started).unwrap();
+        let id = parsed["id"].as_str().unwrap().to_string();
+        registry.lock().await.kill(&id);
+        // `kill()` marks the registry cancelled synchronously, so `wait_for_jobs`
+        // (which only polls registry status) can return before the spawned task
+        // notices `stop` and reaches the completion block that emits the second
+        // event. Poll the event sink itself instead of the registry.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while events.lock().unwrap().len() < 2 && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        let seen = events.lock().unwrap().clone();
+        assert_eq!(seen.len(), 2, "expected running + cancelled events, got {seen:?}");
+        assert_eq!(seen[1].status, CommandJobStatus::Cancelled);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn list_for_session_scopes_by_session_and_ignores_others() {
+        let root = temp_root("bg-list");
+        let registry = Arc::new(tokio::sync::Mutex::new(CommandJobRegistry::default()));
+        let hang = if cfg!(windows) {
+            "ping -n 30 127.0.0.1 >NUL"
+        } else {
+            "sleep 30"
+        };
+        for session in ["sess-a", "sess-a", "sess-b"] {
+            start_with_registry(
+                Arc::clone(&registry),
+                session.into(),
+                "turn".into(),
+                StartCommandJobRequest {
+                    command: hang.into(),
+                    cwd: root.clone(),
+                    project_root: root.clone(),
+                    sandbox: SandboxProfileV1::Off,
+                    tool_call_id: "tool-1".into(),
+                    title: "Run sleep".into(),
+                },
+                None,
+                None,
+            )
+            .await;
+        }
+        let guard = registry.lock().await;
+        assert_eq!(guard.list_for_session("sess-a").len(), 2);
+        assert_eq!(guard.list_for_session("sess-b").len(), 1);
+        assert_eq!(guard.list_for_session("sess-c").len(), 0);
+        drop(guard);
+        // Collect ids into an owned Vec in its own `let` first: a MutexGuard
+        // created in a `for` loop's head expression is kept alive for the
+        // whole loop body (temporaries in a for-loop scrutinee live until the
+        // loop ends), so locking again inside the loop would deadlock.
+        let ids: Vec<String> = registry.lock().await.jobs.keys().cloned().collect();
+        for id in ids {
+            registry.lock().await.kill(&id);
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 }

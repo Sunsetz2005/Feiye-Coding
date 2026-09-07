@@ -209,9 +209,26 @@ Host 校验名称、frontmatter、相对路径、体积、路径穿越、符号�
 | 原生语音 | `unavailable` | v2 能力表 + `speechRecognition: false`；无 speech 命令 |
 | 会话/项目预览、Git 摘要、资源审阅 | `available` | `HostCapabilities v2` 对应实现 |
 | 应用存活期间后台调度 | `available` | Rust claim ledger + 现有 ACP 会话路径 |
+| 后台命令托管 | `available`，前端尚未接线 UI | `run_command background=true`、`command_output`、`wait_commands`、`kill_command`、`session://command_job_v1`、`session_command_jobs_list_v1` |
 | 智能快照、电脑控制、系统级常驻调度 | `unavailable` | v2 能力表或专项里程碑 |
 
 Runtime sandbox 默认 `off`。内建内核把 `workspace_write` / `read_only` 应用到 `run_command`：Linux 用 bubblewrap，macOS 用 sandbox-exec。Windows 和非支持平台请求非 off 会拒绝该命令，不会静默降级。旧版 ACP 仍仅 Linux 可隔离 Runtime 进程。完整边界见 [runtime-migration-v1.md](./runtime-migration-v1.md)。
+
+### 9.1 后台命令托管（`run_command background=true`）
+
+父会话专属（`spawn_depth == 0`）。模型把 `run_command` 的 `background` 设为 `true` 后立刻拿到一个 job id 并继续本轮，命令在 `command_jobs.rs` 的独立 `tokio::spawn` 任务里跑，最长 24 小时超时；Stop / Steer 不取消已启动的后台 job（与后台子代理同一约定）。
+
+- `command_output(id, timeout_ms?)`：查询状态和有界输出；带 `timeout_ms` 会等到完成或超时。
+- `wait_commands(ids, mode?, timeout_ms?)`：`wait_all`（默认）或 `wait_any`，默认超时 30s，不做 sleep 轮询。
+- `kill_command(id)`：终止运行中的 job，随后状态转为 `cancelled`。
+- Job 完成（`completed` / `failed`）会置位 pending wake；父会话循环结束后由 Host 发起一轮无用户气泡的 wake turn，把有界结果摘要交回模型——和后台子代理完成后的 wake 走同一条路径。
+
+事件面（`session://command_job_v1`，Host → 前端，不带完整 stdout 正文）：
+
+- 载荷：`sessionId`、`jobId`、`status`（`running` | `completed` | `failed` | `cancelled`）、`command`、`summary`。
+- 发射时机：job 注册时发一次 `running`；job 落地终态（完成、失败、或 kill 触发的取消）时再发一次终态事件。中途不做增量输出流式事件——完整正文仍须通过 `command_output` 显式拉取。
+- `session_command_jobs_list_v1(session_id)`：只读命令，返回该会话当前已知的 hosted job 摘要列表（同样不带 `output`），用于前端重连后恢复计数，不必等下一次事件。
+- 前端尚未订阅这两者（composer 托管计数 pill 和后台待批准横幅是后续切片），不要据此宣称已有对应 UI。
 
 不得据此声称以下项目已经完成：
 

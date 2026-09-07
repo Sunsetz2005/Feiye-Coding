@@ -22,6 +22,7 @@ mod test_support;
 mod turn;
 mod types;
 
+pub use command_jobs::CommandJobSummaryV1;
 pub use subagents::SubagentView;
 pub use types::{
     RewindExecuteResult, RewindPointDto, SessionSendResultV2, SessionSnapshot, UiAskUserRequest,

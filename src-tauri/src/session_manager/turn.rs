@@ -1400,12 +1400,19 @@ impl SessionManager {
                 })
             }))
         };
+        let on_command_event: Option<command_jobs::CommandJobEventFn> = {
+            let app_evt = app.clone();
+            Some(Arc::new(move |payload| {
+                let _ = app_evt.emit("session://command_job_v1", &payload);
+            }))
+        };
         cfg.command_jobs = agent_loop::CommandJobHooks {
             start: Some(Arc::new(move |request| {
                 let registry = Arc::clone(&commands);
                 let session = command_session.clone();
                 let turn = command_turn.clone();
                 let on_finished = on_command_finished.clone();
+                let on_event = on_command_event.clone();
                 Box::pin(async move {
                     command_jobs::start_with_registry(
                         registry,
@@ -1420,6 +1427,7 @@ impl SessionManager {
                             title: request.title,
                         },
                         on_finished,
+                        on_event,
                     )
                     .await
                 })
@@ -1645,6 +1653,16 @@ impl SessionManager {
             .await;
         }
         let _ = self.maybe_start_wake_turn(&app, &session_id).await;
+    }
+
+    /// Read-only hosted-job snapshot for one session (`session_command_jobs_list_v1`).
+    /// Used by the UI to restore the composer's hosted-count pill after a reconnect,
+    /// without waiting for the next `session://command_job_v1` event.
+    pub async fn command_jobs_list(
+        &self,
+        session_id: &str,
+    ) -> Vec<command_jobs::CommandJobSummaryV1> {
+        self.command_jobs.lock().await.list_for_session(session_id)
     }
 
     pub(super) fn process_id_for_session(&self, session_id: &str) -> Option<String> {
