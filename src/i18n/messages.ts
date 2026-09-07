@@ -129,6 +129,11 @@ const en = {
   "session.forkFailed": "Could not fork chat",
   "session.backgroundPermission":
     "Another chat needs permission — switch to it to approve or deny.",
+  "banner.backgroundApprovalOne":
+    "Another chat is waiting on your approval.",
+  "banner.backgroundApprovalMany":
+    "{n} other chats are waiting on your approval.",
+  "banner.backgroundApprovalGo": "Go",
   "session.rewind": "Rewind timeline",
   "session.rewindTitle": "Rewind conversation",
   "session.rewindHint":
@@ -555,6 +560,11 @@ const en = {
   "composer.queueDroppedOldest":
     "Queue full ({max}) — dropped {n} oldest",
   "composer.queueCount": "{n} queued in this chat",
+  "composer.hostedJobsCount": "{n} background command(s) running",
+  "composer.hostedJobsRunning": "running",
+  "composer.hostedJobsCompleted": "completed",
+  "composer.hostedJobsFailed": "failed",
+  "composer.hostedJobsCancelled": "cancelled",
   "composer.queueHold":
     "Auto-send paused — retry or send again to resume",
   "composer.queueHoldRetry": "Retry",
@@ -1872,6 +1882,9 @@ const zh: Record<MessageKey, string> = {
   "session.forkOk": "已分叉 · 已打开新会话",
   "session.backgroundPermission":
     "另一个会话需要权限批准 — 请切换过去以允许或拒绝。",
+  "banner.backgroundApprovalOne": "另一个会话正在等待你的批准。",
+  "banner.backgroundApprovalMany": "有 {n} 个会话正在等待你的批准。",
+  "banner.backgroundApprovalGo": "前往",
   "session.forkFailed": "分叉会话失败",
   "session.rewind": "回退时间线",
   "session.rewindTitle": "回退对话",
@@ -2279,6 +2292,11 @@ const zh: Record<MessageKey, string> = {
   "composer.queueBlockedPermission": "请先处理权限请求",
   "composer.queueDroppedOldest": "队列已满（{max}）— 已丢弃最旧 {n} 条",
   "composer.queueCount": "本会话队列 {n} 条",
+  "composer.hostedJobsCount": "{n} 个后台命令运行中",
+  "composer.hostedJobsRunning": "运行中",
+  "composer.hostedJobsCompleted": "已完成",
+  "composer.hostedJobsFailed": "失败",
+  "composer.hostedJobsCancelled": "已取消",
   "composer.queueHold": "自动发送已暂停 — 点重试或再发送以继续",
   "composer.queueHoldRetry": "重试",
   "composer.queueClear": "清空",

@@ -431,6 +431,48 @@ describe("ComposerDock", () => {
     expect(props.onAddAttachment).toHaveBeenCalledWith(image);
   });
 
+  it("shows the hosted-jobs pill only while a job is running, and lists commands on click", async () => {
+    const user = userEvent.setup();
+    const hostedJobsLabels = {
+      count: (n: number) => `${n} background command(s) running`,
+      running: "running",
+      completed: "completed",
+      failed: "failed",
+      cancelled: "cancelled",
+    };
+    const { rerender, props } = renderDock({
+      hostedJobs: {
+        items: [
+          { id: "job-1", status: "running", command: "sleep 30", summary: "" },
+        ],
+        labels: hostedJobsLabels,
+      },
+    });
+    expect(
+      screen.getByRole("button", { name: "1 background command(s) running" }),
+    ).toBeTruthy();
+    await user.click(
+      screen.getByRole("button", { name: "1 background command(s) running" }),
+    );
+    expect(screen.getByRole("menuitem", { name: "sleep 30" })).toBeTruthy();
+
+    // No running jobs (all terminal) — the pill disappears entirely.
+    rerender(
+      <ComposerDock
+        {...props}
+        hostedJobs={{
+          items: [
+            { id: "job-1", status: "completed", command: "sleep 30", summary: "done" },
+          ],
+          labels: hostedJobsLabels,
+        }}
+      />,
+    );
+    expect(
+      screen.queryByRole("button", { name: /background command/ }),
+    ).toBeNull();
+  });
+
   it("supports the goal and project rails plus all preference actions", async () => {
     const user = userEvent.setup();
     const projectView = renderDock({ preferences: { mode: "plan" } });

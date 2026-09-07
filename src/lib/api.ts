@@ -3,6 +3,7 @@
 import type { PlanArtifactV1 } from "./planArtifacts";
 import type {
   AskUserPayload,
+  CommandJobSummaryV1,
   InteractionSnapshotV1,
   SessionSnapshot,
 } from "./session";
@@ -407,6 +408,15 @@ export async function sessionInteractionsList(
   return invoke("session_interactions_list", {
     sessionId: sessionId ?? null,
   });
+}
+
+/** Read-only hosted `run_command background` job snapshot for one session
+ * (restores the composer's hosted-count pill on reconnect, no stdout body). */
+export async function sessionCommandJobsListV1(
+  sessionId: string,
+): Promise<CommandJobSummaryV1[]> {
+  if (!isTauri()) return [];
+  return invoke("session_command_jobs_list_v1", { sessionId });
 }
 
 export interface ResolveInteractionRequestV1 {

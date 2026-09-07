@@ -209,7 +209,7 @@ Host 校验名称、frontmatter、相对路径、体积、路径穿越、符号�
 | 原生语音 | `unavailable` | v2 能力表 + `speechRecognition: false`；无 speech 命令 |
 | 会话/项目预览、Git 摘要、资源审阅 | `available` | `HostCapabilities v2` 对应实现 |
 | 应用存活期间后台调度 | `available` | Rust claim ledger + 现有 ACP 会话路径 |
-| 后台命令托管 | `available`，前端尚未接线 UI | `run_command background=true`、`command_output`、`wait_commands`、`kill_command`、`monitor`、`session://command_job_v1`、`session_command_jobs_list_v1` |
+| 后台命令托管 | `available`，前端已接线 composer 托管计数 pill | `run_command background=true`、`command_output`、`wait_commands`、`kill_command`、`monitor`、`session://command_job_v1`、`session_command_jobs_list_v1` |
 | 智能快照、电脑控制、系统级常驻调度 | `unavailable` | v2 能力表或专项里程碑 |
 
 Runtime sandbox 默认 `off`。内建内核把 `workspace_write` / `read_only` 应用到 `run_command`：Linux 用 bubblewrap，macOS 用 sandbox-exec。Windows 和非支持平台请求非 off 会拒绝该命令，不会静默降级。旧版 ACP 仍仅 Linux 可隔离 Runtime 进程。完整边界见 [runtime-migration-v1.md](./runtime-migration-v1.md)。
@@ -228,7 +228,7 @@ Runtime sandbox 默认 `off`。内建内核把 `workspace_write` / `read_only` �
 - 载荷：`sessionId`、`jobId`、`status`（`running` | `completed` | `failed` | `cancelled`）、`command`、`summary`。
 - 发射时机：job 注册时发一次 `running`；job 落地终态（完成、失败、或 kill 触发的取消）时再发一次终态事件。这两次是唯一的 Tauri 事件——中途的逐行输出（见下）只更新 Host 内存态，不额外发事件；完整正文仍须通过 `command_output` 显式拉取。
 - `session_command_jobs_list_v1(session_id)`：只读命令，返回该会话当前已知的 hosted job 摘要列表（同样不带 `output`），用于前端重连后恢复计数，不必等下一次事件。
-- 前端尚未订阅这两者（composer 托管计数 pill 和后台待批准横幅是后续切片），不要据此宣称已有对应 UI。
+- 前端已订阅：见下方 §9.3。
 
 ### 9.2 `monitor`：后台命令的行唤醒订阅
 
@@ -239,6 +239,13 @@ Runtime sandbox 默认 `off`。内建内核把 `workspace_write` / `read_only` �
 - 唤醒内容通过与 `command_jobs::wake_prompt`（job 完成结果）同一机制注入：新增 `command_jobs::monitor_wake_prompt` 把本次投递的行拼进下一次 wake turn 的 `wake_context`，模型据此继续任务，不需要再手动调用 `command_output`。
 - 单次订阅最多投递 `MAX_MONITOR_WAKES`（20）次唤醒，达到上限后自动 detach（不是 OS 常驻,也不重试）；job 本身结束后自然不会再有新行，订阅无需显式清理。要继续监视需重新调用 `monitor`。
 - 不发送独立的 Tauri 事件；monitor 完全是模型可见的 Host 工具语义，不改变 `session://command_job_v1` 的两段式（`running`/终态）事件面。
+
+### 9.3 前端：composer 托管计数 pill 与后台待批准横幅
+
+- `src/hooks/useHostedCommandJobs.ts`：按 sessionId 维护 hosted job 列表的轻量 hook（形态参照 `useSendQueue.ts`，不是同一个 store）。切会话时先用 `session_command_jobs_list_v1` 拉一次初始快照（重连不必等下一次事件），随后靠 `session://command_job_v1` 增量更新——按 `jobId` 找到已有条目就地替换状态，否则追加，同一 job 的 `running → completed/failed/cancelled` 两段式事件因此落到同一行而不是变成两条记录。
+- `ComposerDock` 新增可选 `hostedJobs` prop（`items` + 状态文案 `labels`），克隆已有 `composer__queue-count` 徽章形状：图标 + 数字 + 点击弹出只读菜单（每行是一个 job 的命令文本，`disabled` 因为当前没有从 UI 发起 kill 的入口）。只在存在 `status === "running"` 的 job 时显示——已终态的 job 从 pill 计数里消失，但仍留在 `items` 里供菜单展示直到下次会话切换刷新。
+- `src/components/BackgroundApprovalBanner.tsx`：独立的展示组件（不是内嵌在 `App.tsx` 里的匿名 JSX），渲染在 `App.tsx` 里已有的顶部 Banner 堆叠（mock 内核提示同一位置）。读取的是已有的 `pendingAskSessionIds` 集合——这个集合本来就通过 `session://interaction` 快照（`pendingInteractionSessionIds`）覆盖所有非聚焦会话的待处理 permission/ask_user/plan 交互，包括后台 `run_command` 的权限请求，不需要为此新增事件或另建一套集合。点击横幅的「前往」调用 `openSessionById`（从原来内联在侧栏 `onOpenSession` 里的查找逻辑中提炼出的共享辅助函数），跳转后对应会话被聚焦，`pendingAskSessionIds` 随下一次交互快照自然把该 session 移出集合，横幅和侧栏 `?` 徽章同时消失。
+- 已知限制：`pnpm verify:contracts` 的事件扫描器只扫 `.tsx` 文件里的 `listen(...)` 调用，`useHostedCommandJobs.ts` 是 `.ts`，因此这次改动虽然让前端真正订阅了 `session://command_job_v1`，契约脚本的"25 个事件"计数不会因此增加（`session_command_jobs_list_v1` 这个新增 Tauri 命令让命令计数从 179 变成 180，是可见的）。这是脚本扫描范围的既有限制，不是遗漏了监听；不要因为事件数字没变就怀疑前端未接线。
 
 不得据此声称以下项目已经完成：
 

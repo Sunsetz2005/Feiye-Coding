@@ -705,6 +705,28 @@ export interface InteractionSnapshotV1 {
   payload: InteractionPayloadV1;
 }
 
+export type CommandJobStatusV1 = "running" | "completed" | "failed" | "cancelled";
+
+/** Read-only hosted `run_command background` summary. No stdout body — same
+ * "no full text" convention as a permission preview; the full output only
+ * ever reaches the model via `command_output`. */
+export interface CommandJobSummaryV1 {
+  id: string;
+  status: CommandJobStatusV1;
+  command: string;
+  summary: string;
+}
+
+/** Payload for `session://command_job_v1` — hosted job lifecycle (registered,
+ * then one terminal transition). */
+export interface CommandJobEventV1 {
+  sessionId: string;
+  jobId: string;
+  status: CommandJobStatusV1;
+  command: string;
+  summary: string;
+}
+
 export interface RuntimeEventEnvelopeV1 {
   version: 1;
   eventId: string;

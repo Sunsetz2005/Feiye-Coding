@@ -118,6 +118,9 @@ export const zhTW: Record<MessageKey, string> = {
   "session.forkFailed": "分叉對話失敗",
   "session.backgroundPermission":
     "另一個對話需要權限批准 — 請切換過去以允許或拒絕。",
+  "banner.backgroundApprovalOne": "另一個對話正在等待你的批准。",
+  "banner.backgroundApprovalMany": "有 {n} 個對話正在等待你的批准。",
+  "banner.backgroundApprovalGo": "前往",
   "session.rewind": "回退時間線",
   "session.rewindTitle": "回退對話",
   "session.rewindHint":
@@ -534,6 +537,11 @@ export const zhTW: Record<MessageKey, string> = {
   "composer.queueBlockedPermission": "請先處理權限請求",
   "composer.queueDroppedOldest": "佇列已滿（{max}）— 已丟棄最舊 {n} 則",
   "composer.queueCount": "此對話佇列 {n} 則",
+  "composer.hostedJobsCount": "{n} 個背景命令執行中",
+  "composer.hostedJobsRunning": "執行中",
+  "composer.hostedJobsCompleted": "已完成",
+  "composer.hostedJobsFailed": "失敗",
+  "composer.hostedJobsCancelled": "已取消",
   "composer.queueHold": "自動傳送已暫停 — 點重試或再傳送以繼續",
   "composer.queueHoldRetry": "重試",
   "composer.queueClear": "清空",

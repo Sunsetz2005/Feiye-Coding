@@ -65,6 +65,7 @@ import {
   type TaskProgressRailProps,
 } from "@/components/lobe-chat/TaskProgressRail";
 import {
+  IconActivity,
   IconClock,
   IconClose,
   IconImagine,
@@ -76,6 +77,7 @@ import {
   IconStop,
   IconTrash,
 } from "@/components/icons";
+import type { CommandJobSummaryV1 } from "@/lib/session";
 import { ContextMenu } from "@/components/ContextMenu";
 import { Tip } from "@/components/ui/tooltip";
 
@@ -136,6 +138,17 @@ export interface ComposerDockProps {
     pack: MemoryContextPackV1 | null;
     labels: MemoryContextBadgeLabels;
     onClear: () => void;
+  };
+  /** Hosted `run_command background` jobs for the current session. */
+  hostedJobs?: {
+    items: CommandJobSummaryV1[];
+    labels: {
+      count: (n: number) => string;
+      running: string;
+      completed: string;
+      failed: string;
+      cancelled: string;
+    };
   };
   connectors?: {
     items: Array<{ id: string; name: string }>;
@@ -234,6 +247,7 @@ export function ComposerDock({
   project,
   queue,
   memory,
+  hostedJobs,
   connectors,
   projectInstruction = null,
   menu,
@@ -253,6 +267,12 @@ export function ComposerDock({
   const tr = useMemo(() => createT(locale), [locale]);
   const [queueMenuOpen, setQueueMenuOpen] = useState(false);
   const queueMoreRef = useRef<HTMLButtonElement>(null);
+  const [hostedJobsMenuOpen, setHostedJobsMenuOpen] = useState(false);
+  const hostedJobsTriggerRef = useRef<HTMLButtonElement>(null);
+  const hostedJobsRunning = useMemo(
+    () => hostedJobs?.items.filter((job) => job.status === "running") ?? [],
+    [hostedJobs],
+  );
   const galleryPaths = useMemo(
     () =>
       attachments
@@ -472,6 +492,42 @@ export function ComposerDock({
                   onClick: queue.onClear,
                 },
               ]}
+            />
+          </div>
+        ) : null}
+        {hostedJobs && hostedJobsRunning.length > 0 ? (
+          <div className="composer__queue">
+            <div className="composer__queue-bar">
+              <Tip label={hostedJobs.labels.count(hostedJobsRunning.length)}>
+                <button
+                  type="button"
+                  ref={hostedJobsTriggerRef}
+                  className="composer__queue-count"
+                  aria-label={hostedJobs.labels.count(hostedJobsRunning.length)}
+                  aria-haspopup="menu"
+                  aria-expanded={hostedJobsMenuOpen}
+                  onClick={() => setHostedJobsMenuOpen((open) => !open)}
+                >
+                  <IconActivity size={14} aria-hidden />
+                  <span>{hostedJobsRunning.length}</span>
+                </button>
+              </Tip>
+            </div>
+            <ContextMenu
+              open={hostedJobsMenuOpen}
+              x={0}
+              y={0}
+              anchorRect={
+                hostedJobsTriggerRef.current?.getBoundingClientRect() ?? null
+              }
+              restoreFocusTo={hostedJobsTriggerRef.current}
+              onClose={() => setHostedJobsMenuOpen(false)}
+              items={(hostedJobs.items ?? []).map((job) => ({
+                id: job.id,
+                label: job.command || job.id,
+                disabled: true,
+                shortcut: hostedJobs.labels[job.status],
+              }))}
             />
           </div>
         ) : null}

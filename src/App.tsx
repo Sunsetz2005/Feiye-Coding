@@ -152,6 +152,8 @@ import {
   type ExecuteSendFromQueue,
 } from "@/hooks/useSendQueue";
 import { useComposerRecovery } from "@/hooks/useComposerRecovery";
+import { useHostedCommandJobs } from "@/hooks/useHostedCommandJobs";
+import { BackgroundApprovalBanner } from "@/components/BackgroundApprovalBanner";
 import {
   COMPOSER_RECOVERY_DRAFT_KEY,
   memoryPackRefFromContext,
@@ -2074,6 +2076,17 @@ export default function App() {
    * Open a stored session. Loads journal immediately; warms the ACP agent in
    * the background so the first send skips cold process spawn when possible.
    */
+  /** Look up a session by id and switch to it — shared by the sidebar row
+   * click and the background-approval banner so both use the same path. */
+  const openSessionById = (sessionId: string) => {
+    const row = sessions.find((item) => item.id === sessionId);
+    if (!row) return;
+    const project = row.projectId
+      ? projects.find((item) => item.id === row.projectId)
+      : undefined;
+    void openSession(row, project);
+  };
+
   const openSession = async (s: SessionRow, project?: Project | null) => {
     const proj =
       project ||
@@ -5172,6 +5185,7 @@ export default function App() {
     showToast,
     labels: sendQueueLabels,
   });
+  const hostedCommandJobs = useHostedCommandJobs(session.sessionId);
   const applyRecoveredMemoryPack = useCallback(
     (ref: ComposerMemoryPackRefV1 | null) => {
       const generation = ++memoryPackRestoreGenRef.current;
@@ -8034,6 +8048,15 @@ export default function App() {
             isDeveloperMockBackend(liveHost.backend)) && (
             <Banner tone="warning">{tr("runtime.mockBanner")}</Banner>
           )}
+          <BackgroundApprovalBanner
+            pendingSessionIds={pendingAskSessionIds}
+            labels={{
+              one: tr("banner.backgroundApprovalOne"),
+              many: (n) => tr("banner.backgroundApprovalMany", { n: String(n) }),
+              go: tr("banner.backgroundApprovalGo"),
+            }}
+            onGo={openSessionById}
+          />
           {activeProject && !activeProject.trusted && (
             <div className="conn-bar">
               <button
@@ -8599,6 +8622,16 @@ export default function App() {
                   setAttachments(item.attachments);
                 },
                 onPause: sendQueue.pauseAutoSend,
+              }}
+              hostedJobs={{
+                items: hostedCommandJobs.jobsForSession,
+                labels: {
+                  count: (n) => tr("composer.hostedJobsCount", { n: String(n) }),
+                  running: tr("composer.hostedJobsRunning"),
+                  completed: tr("composer.hostedJobsCompleted"),
+                  failed: tr("composer.hostedJobsFailed"),
+                  cancelled: tr("composer.hostedJobsCancelled"),
+                },
               }}
               projectInstruction={
                 projectInstruction?.relativePath

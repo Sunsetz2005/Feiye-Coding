@@ -5876,6 +5876,18 @@ html[data-theme="light"] .ui-check.is-mixed .ui-check__box {
   color: var(--text-primary);
 }
 
+button.composer__queue-count {
+  border: none;
+  background: transparent;
+  padding: 2px 4px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+button.composer__queue-count:hover {
+  background: var(--bg-hover);
+}
+
 .composer__queue-steer {
   margin-left: auto;
   border: none;
