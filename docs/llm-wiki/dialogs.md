@@ -56,7 +56,9 @@ import { GlassModal } from "@/components/GlassModal";
 </div>
 ```
 
-## 首选：App 级 `appDialog`（`src/App.tsx`）
+## 首选：App 级 `appDialog`（`src/hooks/useAppDialog.ts` + `src/components/AppDialogHost.tsx`）
+
+状态、类型和键盘（Escape/Enter）逻辑在 `useAppDialog` hook；`createPortal` 渲染在 `AppDialogHost` 组件；`App.tsx` 只调一次 hook 并渲染一次 `<AppDialogHost />`（已从 `App.tsx` 抽出，行为不变）。
 
 工作台内主流程（项目 / 会话重命名、YOLO 二次确认等）使用：
 
@@ -128,7 +130,9 @@ setAppDialog({
 ## 相关源码
 
 - `src/components/GlassModal.tsx` — 公共对话框壳  
-- `src/App.tsx` — `AppDialog` 类型、`setAppDialog`、portal 渲染  
+- `src/hooks/useAppDialog.ts` — `AppDialog` 类型、状态、Escape/Enter 键盘处理  
+- `src/components/AppDialogHost.tsx` — portal 渲染（confirm/prompt/edit-project 三种表单）  
+- `src/App.tsx` — 调用 `useAppDialog()` 并渲染 `<AppDialogHost />`；24 处 `setAppDialog(...)` 调用点仍在此文件  
 - `src/styles/tokens.css` — `--menu-*` / `--modal-*` / 可选 `--glass-*`  
 - `src/styles/app.css` — modal / menu / cmm 布局  
 - `src/components/ComposerModelMenu.tsx` / `ComposerProjectMenu.tsx` — composer 芯片菜单范例  

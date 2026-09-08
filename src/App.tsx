@@ -9,7 +9,6 @@ import {
   type CSSProperties,
   type MouseEvent as ReactMouseEvent,
 } from "react";
-import { createPortal } from "react-dom";
 import { useFloatingMenu } from "@/lib/floatingMenu";
 import {
   applyNativeWindowTheme,
@@ -90,6 +89,7 @@ import {
   type PermissionPolicyId,
 } from "@/lib/grokCatalog";
 import { useComposerCatalog } from "@/hooks/useComposerCatalog";
+import { useAppDialog } from "@/hooks/useAppDialog";
 import {
   formatPermissionSummary,
   mapPermissionButtons,
@@ -169,6 +169,7 @@ import {
   type ComposerPlusEntry,
 } from "@/components/ComposerPlusPanel";
 import { StatusModal } from "@/components/StatusModal";
+import { AppDialogHost } from "@/components/AppDialogHost";
 import { McpStatusModal } from "@/components/McpStatusModal";
 import {
   IconSearch,
@@ -317,33 +318,6 @@ const ResourceViewer = lazy(async () => {
   const module = await import("@/components/ResourceViewer");
   return { default: module.ResourceViewer };
 });
-
-/** In-app dialogs — window.prompt/confirm are unreliable in Tauri WebView. */
-type AppDialog =
-  | {
-      kind: "confirm";
-      title: string;
-      message: string;
-      confirmLabel?: string;
-      danger?: boolean;
-      onConfirm: () => void | Promise<void>;
-    }
-  | {
-      kind: "prompt";
-      title: string;
-      initial: string;
-      placeholder?: string;
-      onSubmit: (value: string) => void | Promise<void>;
-    }
-  | {
-      kind: "edit-project";
-      title: string;
-      projectId: string;
-      name: string;
-      path: string;
-      onSubmit: (name: string, path: string) => void | Promise<void>;
-    }
-  | null;
 
 interface PlanState {
   title: string;
@@ -501,14 +475,17 @@ export default function App() {
   const [projectsOpen, setProjectsOpen] = useState(true);
   const [historyOpen, setHistoryOpen] = useState(true);
   const [ctxMenu, setCtxMenu] = useState<ContextMenuState>(null);
-  const [appDialog, setAppDialog] = useState<AppDialog>(null);
-  const [dialogInput, setDialogInput] = useState("");
-  const [dialogPath, setDialogPath] = useState("");
-  const dialogInputRef = useRef<HTMLInputElement>(null);
-  const confirmBtnRef = useRef<HTMLButtonElement>(null);
-  /** Latest dialog for Enter/Escape handlers (avoids stale chained confirms). */
-  const appDialogRef = useRef<AppDialog>(null);
-  appDialogRef.current = appDialog;
+  const {
+    appDialog,
+    setAppDialog,
+    dialogInput,
+    setDialogInput,
+    dialogPath,
+    setDialogPath,
+    dialogInputRef,
+    confirmBtnRef,
+    appDialogRef,
+  } = useAppDialog();
   const [showSearch, setShowSearch] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [contentSearchHits, setContentSearchHits] = useState<
@@ -572,61 +549,6 @@ export default function App() {
   const openingSessionIdRef = useRef<string | null>(null);
 
   // ContextMenu handles outside click + Escape for sidebar menus.
-
-  useEffect(() => {
-    if (!appDialog) return;
-    if (appDialog.kind === "prompt") {
-      setDialogInput(appDialog.initial);
-      const t = window.setTimeout(() => {
-        dialogInputRef.current?.focus();
-        dialogInputRef.current?.select();
-      }, 0);
-      return () => window.clearTimeout(t);
-    }
-    if (appDialog.kind === "edit-project") {
-      setDialogInput(appDialog.name);
-      setDialogPath(appDialog.path);
-      const t = window.setTimeout(() => {
-        dialogInputRef.current?.focus();
-        dialogInputRef.current?.select();
-      }, 0);
-      return () => window.clearTimeout(t);
-    }
-    // Confirm: focus primary action so keyboard users land on Confirm.
-    // Enter is also handled globally below so it still confirms if focus
-    // sits on Cancel / close (needed for multi-step YOLO Enter spam).
-    if (appDialog.kind === "confirm") {
-      const t = window.setTimeout(() => {
-        confirmBtnRef.current?.focus();
-      }, 0);
-      return () => window.clearTimeout(t);
-    }
-  }, [appDialog]);
-
-  useEffect(() => {
-    if (!appDialog) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        setAppDialog(null);
-        return;
-      }
-      // Confirm dialogs: Enter always accepts (including chained YOLO steps).
-      // Capture phase + preventDefault so we don't double-fire with a focused
-      // submit button's native activation.
-      if (e.key !== "Enter" && e.key !== "NumpadEnter") return;
-      if (e.isComposing || e.altKey || e.ctrlKey || e.metaKey) return;
-      const dialog = appDialogRef.current;
-      if (!dialog || dialog.kind !== "confirm") return;
-      e.preventDefault();
-      e.stopPropagation();
-      const run = dialog.onConfirm;
-      setAppDialog(null);
-      void run();
-    };
-    document.addEventListener("keydown", onKey, true);
-    return () => document.removeEventListener("keydown", onKey, true);
-  }, [appDialog]);
 
   // Compact context modal: focus note field on open; Escape dismisses.
   useEffect(() => {
@@ -9223,165 +9145,18 @@ export default function App() {
         </div>
       )}
 
-      {/* In-app confirm / prompt (Tauri WebView has no reliable window.prompt/confirm) */}
-      {appDialog &&
-        typeof document !== "undefined" &&
-        createPortal(
-          <div
-            className="overlay app-dialog-overlay"
-            role="presentation"
-            onMouseDown={(e) => {
-              if (e.target === e.currentTarget) setAppDialog(null);
-            }}
-          >
-            <div
-              className="modal app-dialog"
-              role="dialog"
-              aria-modal="true"
-              aria-labelledby="app-dialog-title"
-              onMouseDown={(e) => e.stopPropagation()}
-            >
-              <header className="modal-head">
-                <h2 id="app-dialog-title" className="modal-title">
-                  {appDialog.title}
-                </h2>
-                <button
-                  type="button"
-                  className="icon-btn modal-close"
-                  onClick={() => setAppDialog(null)}
-                  aria-label={tr("common.close")}
-                >
-                  <IconClose size={16} />
-                </button>
-              </header>
-              {appDialog.kind === "confirm" ? (
-                <form
-                  className="app-dialog__form"
-                  onSubmit={(e) => {
-                    e.preventDefault();
-                    // Prefer the keyboard path's latest ref so chained
-                    // dialogs (YOLO step1 → step2) stay consistent.
-                    const dialog = appDialogRef.current;
-                    if (!dialog || dialog.kind !== "confirm") return;
-                    const run = dialog.onConfirm;
-                    setAppDialog(null);
-                    void run();
-                  }}
-                >
-                  <p className="app-dialog__msg">{appDialog.message}</p>
-                  <div className="app-dialog__actions modal-actions">
-                    <button
-                      type="button"
-                      className="btn btn--ghost"
-                      onClick={() => setAppDialog(null)}
-                    >
-                      {tr("common.cancel")}
-                    </button>
-                    <button
-                      ref={confirmBtnRef}
-                      type="submit"
-                      className={`btn ${appDialog.danger ? "btn--danger" : "btn--solid"}`}
-                    >
-                      {appDialog.confirmLabel || tr("common.confirm")}
-                    </button>
-                  </div>
-                </form>
-              ) : appDialog.kind === "edit-project" ? (
-                <form
-                  className="app-dialog__form"
-                  onSubmit={(e) => {
-                    e.preventDefault();
-                    if (appDialog.kind !== "edit-project") return;
-                    const submit = appDialog.onSubmit;
-                    const name = dialogInput;
-                    const path = dialogPath;
-                    setAppDialog(null);
-                    void submit(name, path);
-                  }}
-                >
-                  <label className="app-dialog__field">
-                    <span>{tr("project.name")}</span>
-                    <input
-                      ref={dialogInputRef}
-                      className="app-dialog__input"
-                      value={dialogInput}
-                      onChange={(e) => setDialogInput(e.target.value)}
-                      autoComplete="off"
-                    />
-                  </label>
-                  <label className="app-dialog__field">
-                    <span>{tr("project.folder")}</span>
-                    <div className="app-dialog__path-row">
-                      <input
-                        className="app-dialog__input"
-                        value={dialogPath}
-                        onChange={(e) => setDialogPath(e.target.value)}
-                        autoComplete="off"
-                      />
-                      <button
-                        type="button"
-                        className="btn btn--ghost"
-                        onClick={() => {
-                          void api.pickDirectory().then((picked) => {
-                            if (picked) setDialogPath(picked);
-                          });
-                        }}
-                      >
-                        {tr("project.chooseFolder")}
-                      </button>
-                    </div>
-                  </label>
-                  <div className="app-dialog__actions modal-actions">
-                    <button
-                      type="button"
-                      className="btn btn--ghost"
-                      onClick={() => setAppDialog(null)}
-                    >
-                      {tr("common.cancel")}
-                    </button>
-                    <button type="submit" className="btn btn--solid">
-                      {tr("common.save")}
-                    </button>
-                  </div>
-                </form>
-              ) : (
-                <form
-                  className="app-dialog__form"
-                  onSubmit={(e) => {
-                    e.preventDefault();
-                    if (appDialog.kind !== "prompt") return;
-                    const value = dialogInput;
-                    const submit = appDialog.onSubmit;
-                    setAppDialog(null);
-                    void submit(value);
-                  }}
-                >
-                  <input
-                    ref={dialogInputRef}
-                    className="app-dialog__input"
-                    value={dialogInput}
-                    placeholder={appDialog.placeholder}
-                    onChange={(e) => setDialogInput(e.target.value)}
-                    autoComplete="off"
-                  />
-                  <div className="app-dialog__actions modal-actions">
-                    <button
-                      type="button"
-                      className="btn btn--ghost"
-                      onClick={() => setAppDialog(null)}
-                    >
-                      {tr("common.cancel")}
-                    </button>
-                    <button type="submit" className="btn btn--solid">
-                      {tr("common.save")}
-                    </button>
-                  </div>
-                </form>
-              )}
-            </div>
-          </div>,
-          document.body,
-        )}
+      <AppDialogHost
+        appDialog={appDialog}
+        setAppDialog={setAppDialog}
+        dialogInput={dialogInput}
+        setDialogInput={setDialogInput}
+        dialogPath={dialogPath}
+        setDialogPath={setDialogPath}
+        dialogInputRef={dialogInputRef}
+        confirmBtnRef={confirmBtnRef}
+        appDialogRef={appDialogRef}
+        tr={tr}
+      />
 
       {/* Floating context menu (project / session) — unified ContextMenu */}
       {(() => {
