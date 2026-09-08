@@ -85,19 +85,11 @@ import {
 } from "@/lib/sessionMove";
 import { createT, resolveLocale, type Locale } from "@/i18n";
 import {
-  DEFAULT_EFFORT,
-  DEFAULT_MODEL_ID,
-  GROK_BUILD_MODELS,
   PERMISSION_POLICIES,
-  isValidEffort,
-  isValidModelId,
-  isValidPolicy,
   isValidPrefsScope,
-  pickDefaultModelId,
-  type ComposerPrefsScope,
-  type ModelOption,
   type PermissionPolicyId,
 } from "@/lib/grokCatalog";
+import { useComposerCatalog } from "@/hooks/useComposerCatalog";
 import {
   formatPermissionSummary,
   mapPermissionButtons,
@@ -856,16 +848,6 @@ export default function App() {
   useEffect(() => {
     syncPendingInteractionSessions();
   }, [session.sessionId, syncPendingInteractionSessions]);
-  const [modelId, setModelId] = useState(DEFAULT_MODEL_ID);
-  const [effort, setEffort] = useState(DEFAULT_EFFORT);
-  const [mode, setMode] = useState("agent");
-  const [policy, setPolicy] = useState("ask");
-  /** Live selectable models from Host (official CLI catalog only; not providers). */
-  const [availableModels, setAvailableModels] =
-    useState<ModelOption[]>(GROK_BUILD_MODELS);
-  /** Where model/permission chips are remembered. */
-  const [prefsScope, setPrefsScope] =
-    useState<ComposerPrefsScope>("global");
   /** Files/folders attached for next send (@path to agent). */
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   /** Chat file/url card → open in right resource pane. */
@@ -1011,28 +993,6 @@ export default function App() {
     };
   }, [useCustomWindowChrome]);
 
-  const applyComposerPrefs = useCallback(
-    (prefs: api.ComposerPrefs, catalog: ModelOption[]) => {
-      const models = catalog.length > 0 ? catalog : GROK_BUILD_MODELS;
-      if (prefs.modelId && isValidModelId(prefs.modelId, models)) {
-        setModelId(prefs.modelId);
-      } else {
-        setModelId(pickDefaultModelId(models));
-      }
-      setEffort(
-        isValidEffort(prefs.effort) ? prefs.effort : DEFAULT_EFFORT,
-      );
-      setMode(prefs.mode || "agent");
-      setPolicy(
-        isValidPolicy(prefs.permissionPolicy) ? prefs.permissionPolicy : "ask",
-      );
-      if (isValidPrefsScope(prefs.scope)) {
-        setPrefsScope(prefs.scope);
-      }
-    },
-    [],
-  );
-
   const refreshLists = useCallback(async () => {
     if (!api.isTauri()) {
       // Browser/Vite-only preview: skip Host gate.
@@ -1074,52 +1034,7 @@ export default function App() {
       );
       void api.trayRefresh();
       setLocale(resolveLocale(settings.locale));
-      const catalog: ModelOption[] =
-        modelsRes?.models?.length
-          ? modelsRes.models.map((m) => ({
-              id: m.id,
-              label: m.label || m.id,
-              source: m.source,
-              isDefault: m.isDefault,
-              capabilities: m.capabilities,
-            }))
-          : GROK_BUILD_MODELS;
-      setAvailableModels(catalog);
-      if (
-        settings.composerPrefsScope &&
-        isValidPrefsScope(settings.composerPrefsScope)
-      ) {
-        setPrefsScope(settings.composerPrefsScope);
-      }
-      // Bootstrap: global-effective prefs (context re-resolved when project/session changes).
-      const prefs = await api
-        .composerPrefsResolve({ projectId: null, sessionId: null })
-        .catch(() => null);
-      if (prefs) {
-        applyComposerPrefs(prefs, catalog);
-      } else {
-        setPolicy(
-          isValidPolicy(settings.permissionPolicy || "")
-            ? settings.permissionPolicy
-            : "ask",
-        );
-        setEffort(
-          isValidEffort(settings.effort || "")
-            ? (settings.effort as typeof effort)
-            : DEFAULT_EFFORT,
-        );
-        setMode(settings.mode || "agent");
-        if (settings.modelId && isValidModelId(settings.modelId, catalog)) {
-          setModelId(settings.modelId);
-        } else {
-          setModelId(
-            modelsRes?.defaultModelId &&
-              isValidModelId(modelsRes.defaultModelId, catalog)
-              ? modelsRes.defaultModelId
-              : pickDefaultModelId(catalog),
-          );
-        }
-      }
+      await applyBootstrap(modelsRes, settings);
       setSessionDataMode(settings.sessionDataMode || "independent");
       setDefaultOpenTarget(
         (settings as { defaultOpenTarget?: string }).defaultOpenTarget ||
@@ -1236,32 +1151,6 @@ export default function App() {
   useEffect(() => {
     void refreshLists();
   }, [refreshLists]);
-
-  // Re-resolve model/permission when project or chat changes.
-  // Permission always cascades project/session tiers (L10), even when model
-  // memory scope is global — so project-level tiers apply after a switch.
-  useEffect(() => {
-    if (!api.isTauri()) return;
-    let cancelled = false;
-    void api
-      .composerPrefsResolve({
-        projectId: activeProject?.id ?? null,
-        sessionId: session.sessionId ?? null,
-      })
-      .then((prefs) => {
-        if (!cancelled) applyComposerPrefs(prefs, availableModels);
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, [
-    activeProject?.id,
-    session.sessionId,
-    prefsScope,
-    applyComposerPrefs,
-    availableModels,
-  ]);
 
   // Keep refs aligned for event handlers — but not while openSession is loading
   // (otherwise an intermediate null sessionId wipes viewing id and skips UI update).
@@ -3038,11 +2927,7 @@ export default function App() {
                 }
               : p,
           );
-          const prefs = await api.composerPrefsResolve({
-            projectId: proj.id,
-            sessionId: session.sessionId ?? null,
-          });
-          applyComposerPrefs(prefs, availableModels);
+          await reresolve();
         }
         const msg = next
           ? tr("project.permissionSet", {
@@ -5510,38 +5395,33 @@ export default function App() {
     ],
   );
 
-  /**
-   * Apply permission policy (incl. YOLO). Never use window.confirm in Tauri —
-   * it is unreliable in the WebView and blocks YOLO enable/disable.
-   */
-  const applyPermissionPolicy = useCallback(
-    (next: PermissionPolicyId, opts?: { toastYoloToggle?: boolean }) => {
-      if (!isValidPolicy(next)) return;
+  /** Active inference channel: custom relay identity replaces official account chrome. */
+  const [activeCustomProvider, setActiveCustomProvider] =
+    useState<api.CustomProvider | null>(null);
+  const customRouteActive = activeCustomProvider != null;
+  const refreshProviderRoute = useCallback(async () => {
+    if (!api.isTauri()) {
+      setActiveCustomProvider(null);
+      return;
+    }
+    try {
+      const list = await api.providersList();
+      const active =
+        list.activeSource === "custom"
+          ? list.providers.find((provider) => provider.id === list.activeProviderId) ?? null
+          : null;
+      setActiveCustomProvider(active);
+    } catch {
+      /* keep previous */
+    }
+  }, []);
+  useEffect(() => {
+    void refreshProviderRoute();
+  }, [refreshProviderRoute]);
 
-      const commit = () => {
-        setPolicy(next);
-        void api
-          .sessionSetPolicy(next, {
-            projectId: activeProject?.id ?? null,
-            sessionId: session.sessionId ?? null,
-          })
-          .catch((e) => showToast(String(e), 4000));
-        if (opts?.toastYoloToggle) {
-          showToast(
-            next === "always_approve"
-              ? tr("slash.yoloOn")
-              : tr("slash.yoloOff"),
-            2500,
-          );
-        }
-      };
-
-      if (next !== "always_approve") {
-        commit();
-        return;
-      }
-
-      // Two-step in-app confirm (dangerous YOLO).
+  /** Two-step in-app confirm for `always_approve` (YOLO). Never window.confirm in Tauri. */
+  const confirmAlwaysApprove = useCallback(
+    (onConfirmed: () => void) => {
       setAppDialog({
         kind: "confirm",
         title: tr("policy.always_approve"),
@@ -5555,13 +5435,61 @@ export default function App() {
             message: tr("policy.yoloConfirm2"),
             confirmLabel: tr("policy.short.always_approve"),
             danger: true,
-            onConfirm: commit,
+            onConfirm: onConfirmed,
           });
         },
       });
     },
-    [activeProject?.id, session.sessionId, showToast, tr],
+    [tr],
   );
+
+  /**
+   * Breaks a forward-reference cycle: `patchSettingsSafely` (defined later,
+   * below `applyAuthoritativeSettingFields`) is needed by the catalog hook
+   * here, but `applyAuthoritativeSettingFields` itself needs the catalog
+   * hook's `setPrefsScopeRaw`. A stable ref indirection lets both sides
+   * exist without moving the large, catalog-unrelated settings machinery.
+   */
+  const patchSettingsSafelyRef = useRef<
+    (patch: Partial<api.AppSettings>) => Promise<unknown>
+  >(async () => null);
+  const patchSettingsSafelyForCatalog = useCallback(
+    (patch: Partial<api.AppSettings>) => patchSettingsSafelyRef.current(patch),
+    [],
+  );
+
+  const catalogPrefs = useComposerCatalog({
+    activeProjectId: activeProject?.id ?? null,
+    sessionId: session.sessionId ?? null,
+    locked: composerSettingsLocked,
+    showToast,
+    tr,
+    confirmAlwaysApprove,
+    refreshProviderRoute,
+    onModeApplied: (value) => {
+      if (value === "plan") setGoalMode(false);
+    },
+    patchSettingsSafely: patchSettingsSafelyForCatalog,
+  });
+  const {
+    modelId,
+    effort,
+    mode,
+    policy,
+    availableModels,
+    prefsScope,
+    onMode,
+    onPolicy,
+    onDisablePlan,
+    onModel,
+    onEffort,
+    onReset,
+    onPrefsScope,
+    setModeRaw,
+    setPrefsScopeRaw,
+    applyBootstrap,
+    reresolve,
+  } = catalogPrefs;
 
   const applySlashItem = useCallback(
     (item: SlashItem) => {
@@ -5622,12 +5550,12 @@ export default function App() {
         if (composerSettingsLocked) return;
         if (item.mode === "goal") {
           setGoalMode(true);
-          if (mode === "plan") setMode("agent");
+          if (mode === "plan") setModeRaw("agent");
           return;
         }
         if (item.mode === "plan") {
           setGoalMode(false);
-          setMode("plan");
+          setModeRaw("plan");
           void api
             .composerPrefsSet({
               projectId: activeProject?.id ?? null,
@@ -5668,7 +5596,7 @@ export default function App() {
             if (composerSettingsLocked) return;
             const next: PermissionPolicyId =
               policy === "always_approve" ? "ask" : "always_approve";
-            applyPermissionPolicy(next, { toastYoloToggle: true });
+            onPolicy(next, { toastYoloToggle: true });
             return;
           }
           default:
@@ -5686,7 +5614,8 @@ export default function App() {
       session.sessionId,
       tr,
       openMcpModal,
-      applyPermissionPolicy,
+      onPolicy,
+      setModeRaw,
       composerSettingsLocked,
       showToast,
       plusMenuMode,
@@ -5819,29 +5748,6 @@ export default function App() {
   // welcome logo paints immediately — the SVG itself is inline, not a fetch.
   const [cachedBrandKind, setCachedBrandKind] =
     useState<SunsetzProBrandKind | null>(() => loadCachedSunsetzProBrand());
-  /** Active inference channel: custom relay identity replaces official account chrome. */
-  const [activeCustomProvider, setActiveCustomProvider] =
-    useState<api.CustomProvider | null>(null);
-  const customRouteActive = activeCustomProvider != null;
-  const refreshProviderRoute = useCallback(async () => {
-    if (!api.isTauri()) {
-      setActiveCustomProvider(null);
-      return;
-    }
-    try {
-      const list = await api.providersList();
-      const active =
-        list.activeSource === "custom"
-          ? list.providers.find((provider) => provider.id === list.activeProviderId) ?? null
-          : null;
-      setActiveCustomProvider(active);
-    } catch {
-      /* keep previous */
-    }
-  }, []);
-  useEffect(() => {
-    void refreshProviderRoute();
-  }, [refreshProviderRoute]);
   const liveBrandKind = useMemo(
     () =>
       sunsetzProBrandKind(
@@ -6067,12 +5973,12 @@ export default function App() {
           return;
         case "goal":
           setGoalMode(true);
-          if (mode === "plan") setMode("agent");
+          if (mode === "plan") setModeRaw("agent");
           return;
         case "plan": {
           setGoalMode(false);
           const previousMode = mode;
-          setMode("plan");
+          setModeRaw("plan");
           void api
             .composerPrefsSet({
               projectId: activeProject?.id ?? null,
@@ -6080,7 +5986,7 @@ export default function App() {
               mode: "plan",
             })
             .catch((error) => {
-              setMode((current) =>
+              setModeRaw((current) =>
                 rollbackOptimisticSetting(current, "plan", previousMode),
               );
               showToast(String(error), 4000);
@@ -6090,7 +5996,7 @@ export default function App() {
         case "ask": {
           setGoalMode(false);
           const previousMode = mode;
-          setMode("ask");
+          setModeRaw("ask");
           void api
             .composerPrefsSet({
               projectId: activeProject?.id ?? null,
@@ -6098,7 +6004,7 @@ export default function App() {
               mode: "ask",
             })
             .catch((error) => {
-              setMode((current) =>
+              setModeRaw((current) =>
                 rollbackOptimisticSetting(current, "ask", previousMode),
               );
               showToast(String(error), 4000);
@@ -7165,7 +7071,7 @@ export default function App() {
       }
       if (keys.has("composerPrefsScope")) {
         const storedScope = stored.composerPrefsScope;
-        setPrefsScope(
+        setPrefsScopeRaw(
           storedScope && isValidPrefsScope(storedScope) ? storedScope : "global",
         );
       }
@@ -7245,6 +7151,9 @@ export default function App() {
     },
     [applyAuthoritativeSettingFields, showToast],
   );
+  useEffect(() => {
+    patchSettingsSafelyRef.current = patchSettingsSafely;
+  }, [patchSettingsSafely]);
 
   const settingsLabels = useMemo(() => {
     const keys = [
@@ -7526,23 +7435,9 @@ export default function App() {
             commit();
           }}
           policy={policy}
-          onPolicy={(v) => {
-            if (!isValidPolicy(v)) return;
-            applyPermissionPolicy(v);
-          }}
+          onPolicy={onPolicy}
           prefsScope={prefsScope}
-          onPrefsScope={(v) => {
-            if (!isValidPrefsScope(v)) return;
-            setPrefsScope(v);
-            void patchSettingsSafely({ composerPrefsScope: v });
-            void api
-              .composerPrefsResolve({
-                projectId: activeProject?.id ?? null,
-                sessionId: session.sessionId ?? null,
-              })
-              .then((prefs) => applyComposerPrefs(prefs, availableModels))
-              .catch(() => {});
-          }}
+          onPrefsScope={onPrefsScope}
           availableModels={availableModels}
           manualCliPath={manualCliPath}
           onManualCliPath={setManualCliPath}
@@ -8727,144 +8622,16 @@ export default function App() {
                 modelId,
                 effort,
                 models: availableModels,
-                onMode: (value) => {
-                  if (composerSettingsLocked) return;
-                  const previousMode = mode;
-                  setMode(value);
-                  if (value === "plan") setGoalMode(false);
-                  void api
-                    .composerPrefsSet({
-                      projectId: activeProject?.id ?? null,
-                      sessionId: session.sessionId ?? null,
-                      mode: value,
-                    })
-                    .catch((error) => {
-                      setMode((current) =>
-                        rollbackOptimisticSetting(
-                          current,
-                          value,
-                          previousMode,
-                        ),
-                      );
-                      showToast(String(error), 4000);
-                    });
-                },
-                onPolicy: (value) => {
-                  if (composerSettingsLocked) return;
-                  applyPermissionPolicy(value);
-                },
-                onDisablePlan: () => {
-                  if (composerSettingsLocked) return;
-                  const previousMode = mode;
-                  setMode("agent");
-                  void api
-                    .composerPrefsSet({
-                      projectId: activeProject?.id ?? null,
-                      sessionId: session.sessionId ?? null,
-                      mode: "agent",
-                    })
-                    .catch((error) => {
-                      setMode((current) =>
-                        rollbackOptimisticSetting(
-                          current,
-                          "agent",
-                          previousMode,
-                        ),
-                      );
-                      showToast(String(error), 4000);
-                    });
-                },
+                onMode,
+                onPolicy,
+                onDisablePlan,
                 onClearGoal: () => {
                   if (composerSettingsLocked) return;
                   setGoalMode(false);
                 },
-                onModel: (value) => {
-                  if (composerSettingsLocked) return;
-                  if (!isValidModelId(value, availableModels)) return;
-                  const previousModelId = modelId;
-                  setModelId(value);
-                  const selected = availableModels.find((item) => item.id === value);
-                  void (async () => {
-                    try {
-                      if (api.isTauri()) {
-                        if (selected?.source === "custom") {
-                          await api.providersActivate("custom", value);
-                        } else {
-                          await api.providersActivate("official");
-                        }
-                        await refreshProviderRoute();
-                      }
-                      await api.composerPrefsSet({
-                        projectId: activeProject?.id ?? null,
-                        sessionId: session.sessionId ?? null,
-                        modelId: value,
-                      });
-                    } catch (error) {
-                      setModelId((current) =>
-                        rollbackOptimisticSetting(
-                          current,
-                          value,
-                          previousModelId,
-                        ),
-                      );
-                      showToast(String(error), 4000);
-                    }
-                  })();
-                },
-                onEffort: (value) => {
-                  if (composerSettingsLocked) return;
-                  if (!isValidEffort(value)) return;
-                  const previousEffort = effort;
-                  setEffort(value);
-                  void api
-                    .composerPrefsSet({
-                      projectId: activeProject?.id ?? null,
-                      sessionId: session.sessionId ?? null,
-                      effort: value,
-                    })
-                    .catch((error) => {
-                      setEffort((current) =>
-                        rollbackOptimisticSetting(
-                          current,
-                          value,
-                          previousEffort,
-                        ),
-                      );
-                      showToast(String(error), 4000);
-                    });
-                },
-                onReset: () => {
-                  if (composerSettingsLocked) return;
-                  const nextModelId = pickDefaultModelId(availableModels);
-                  const previousModelId = modelId;
-                  const previousEffort = effort;
-                  setModelId(nextModelId);
-                  setEffort(DEFAULT_EFFORT);
-                  void api
-                    .composerPrefsSet({
-                      projectId: activeProject?.id ?? null,
-                      sessionId: session.sessionId ?? null,
-                      modelId: nextModelId,
-                      effort: DEFAULT_EFFORT,
-                    })
-                    .catch((error) => {
-                      setModelId((current) =>
-                        rollbackOptimisticSetting(
-                          current,
-                          nextModelId,
-                          previousModelId,
-                        ),
-                      );
-                      setEffort((current) =>
-                        rollbackOptimisticSetting(
-                          current,
-                          DEFAULT_EFFORT,
-                          previousEffort,
-                        ),
-                      );
-                      showToast(String(error), 4000);
-                    });
-                },
+                onModel,
+                onEffort,
+                onReset,
               }}
               refs={{
                 wrap: composerWrapRef,

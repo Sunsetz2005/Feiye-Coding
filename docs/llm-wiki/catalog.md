@@ -1,6 +1,6 @@
 # Sunsetz Runtime 对齐：模型 / 推理 / 权限 / 模式
 
-源码：`src/lib/grokCatalog.ts`（静态兜底）、`src-tauri/src/models_catalog.rs`、`src-tauri/src/session_manager/`、`src-tauri/src/agent_prefs.rs`。
+源码：`src/lib/grokCatalog.ts`（静态兜底）、`src/hooks/useComposerCatalog.ts`（前端状态：model/effort/mode/policy/availableModels/prefsScope 的 bootstrap、project/session 重解析、乐观更新 + 回滚的 mutator，已从 `App.tsx` 抽出）、`src-tauri/src/models_catalog.rs`、`src-tauri/src/session_manager/`、`src-tauri/src/agent_prefs.rs`。
 
 官方模型网关仍未实现。容量与接口草稿见 [`model-gateway-capacity.md`](model-gateway-capacity.md)。桌面 Host 不是千人并发服务器。插件连接器见 [`open-connector.md`](open-connector.md)：GitHub、Gmail、Drive、Calendar、Notion、Slack 在 App 内连接，其余目录项即将在 App 内连接。
 

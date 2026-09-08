@@ -1,6 +1,8 @@
 # Changelog
 
-## [UNRELEASED]
+## [UNRELEASED] — 2026-09-08 12:10
+
+- 模型/推理强度/模式/权限策略状态从 `App.tsx` 抽到独立的 `useComposerCatalog` hook，行为不变。
 
 ## [1.0.2] — 2026-09-08 00:30
 

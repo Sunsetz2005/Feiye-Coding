@@ -1205,6 +1205,7 @@ describe("App workbench integration", () => {
         dock.menu.onTogglePlus();
         dock.preferences.onMode("ask");
         dock.preferences.onPolicy("ask");
+        dock.preferences.onPolicy("always_approve");
         dock.preferences.onModel("invalid-model");
         dock.preferences.onModel(modelId);
         dock.preferences.onEffort("high");
@@ -1225,10 +1226,272 @@ describe("App workbench integration", () => {
         expect(composerCapture.current?.menu.showPlus).toBe(false);
       });
 
+      // always_approve (YOLO) goes through a two-step in-app confirm, never
+      // window.confirm — walk both steps before it commits via
+      // session_set_policy.
+      await waitFor(() => {
+        expect(document.querySelector(".app-dialog__form")).toBeTruthy();
+      });
+      fireEvent.submit(document.querySelector(".app-dialog__form")!);
+      await waitFor(() => {
+        expect(document.querySelector(".app-dialog__form")).toBeTruthy();
+      });
+      fireEvent.submit(document.querySelector(".app-dialog__form")!);
+      await waitFor(() => {
+        expect(
+          invoke.mock.calls.some(([command]) => command === "session_set_policy"),
+        ).toBe(true);
+      });
+      expect(document.querySelector(".app-dialog__form")).toBeFalsy();
+
       expect(
         invoke.mock.calls.filter(([command]) => command === "composer_prefs_set")
           .length,
       ).toBeGreaterThanOrEqual(3);
+    },
+    20_000,
+  );
+
+  it(
+    "drives slash-item mode/yolo branches and composer-plus goal/plan/ask actions",
+    async () => {
+      const invoke = vi.fn(
+        async (command: string, args: Record<string, unknown> = {}) => {
+          if (command === "composer_prefs_set") {
+            return {
+              modelId: "sunsetz-4.5",
+              effort: "medium",
+              mode: args.mode ?? "agent",
+              permissionPolicy: "ask",
+              scope: "global",
+              source: "test",
+            };
+          }
+          return null;
+        },
+      );
+      Object.assign(window, { __TAURI_INTERNALS__: { invoke } });
+
+      const { default: App } = await import("./App");
+      render(<App />);
+      await waitFor(() => expect(composerCapture.current).not.toBeNull());
+
+      // "/goal" while not in plan mode is a no-op on mode (covers the
+      // `mode === "plan"` false branch before "/plan" ever runs).
+      await act(async () => {
+        composerCapture.current?.menu.onSelectSlash({
+          id: "goal",
+          kind: "mode",
+          name: "goal",
+          mode: "goal",
+        });
+        await Promise.resolve();
+      });
+      await waitFor(() => {
+        expect(composerCapture.current?.preferences.mode).toBe("agent");
+      });
+
+      // Direct onMode("plan") — covers onModeApplied's goal-mode-clearing branch.
+      await act(async () => {
+        composerCapture.current?.preferences.onMode("plan");
+        await Promise.resolve();
+      });
+      await waitFor(() => {
+        expect(composerCapture.current?.preferences.mode).toBe("plan");
+      });
+
+      // "/plan" persists via composer_prefs_set (no rollback wired on failure).
+      await act(async () => {
+        composerCapture.current?.menu.onSelectSlash({
+          id: "plan",
+          kind: "mode",
+          name: "plan",
+          mode: "plan",
+        });
+        await Promise.resolve();
+      });
+      await waitFor(() => {
+        expect(composerCapture.current?.preferences.mode).toBe("plan");
+      });
+
+      // "/goal" while already in plan flips mode back to agent, no persist call.
+      const prefsSetCallsBeforeGoal = invoke.mock.calls.filter(
+        ([command]) => command === "composer_prefs_set",
+      ).length;
+      await act(async () => {
+        composerCapture.current?.menu.onSelectSlash({
+          id: "goal",
+          kind: "mode",
+          name: "goal",
+          mode: "goal",
+        });
+        await Promise.resolve();
+      });
+      await waitFor(() => {
+        expect(composerCapture.current?.preferences.mode).toBe("agent");
+      });
+      expect(
+        invoke.mock.calls.filter(([command]) => command === "composer_prefs_set")
+          .length,
+      ).toBe(prefsSetCallsBeforeGoal);
+
+      // "/yolo" toggles ask -> always_approve through the two-step confirm.
+      await act(async () => {
+        composerCapture.current?.menu.onSelectSlash({
+          id: "yolo",
+          kind: "action",
+          name: "yolo",
+          action: "yolo",
+        });
+      });
+      await waitFor(() => {
+        expect(document.querySelector(".app-dialog__form")).toBeTruthy();
+      });
+      fireEvent.submit(document.querySelector(".app-dialog__form")!);
+      await waitFor(() => {
+        expect(document.querySelector(".app-dialog__form")).toBeTruthy();
+      });
+      fireEvent.submit(document.querySelector(".app-dialog__form")!);
+      await waitFor(() => {
+        expect(composerCapture.current?.preferences.policy).toBe("always_approve");
+      });
+
+      // "/yolo" again flips back to ask — not always_approve, so no confirm.
+      await act(async () => {
+        composerCapture.current?.menu.onSelectSlash({
+          id: "yolo",
+          kind: "action",
+          name: "yolo",
+          action: "yolo",
+        });
+        await Promise.resolve();
+      });
+      await waitFor(() => {
+        expect(composerCapture.current?.preferences.policy).toBe("ask");
+      });
+
+      // Composer-plus "+" menu goal/plan/ask actions (selectComposerPlusAction).
+      await act(async () => {
+        await composerCapture.current?.menu.onSelectAction({
+          id: "plan",
+          kind: "action",
+          action: "plan",
+          title: "Plan",
+        });
+      });
+      await waitFor(() => {
+        expect(composerCapture.current?.preferences.mode).toBe("plan");
+      });
+
+      await act(async () => {
+        await composerCapture.current?.menu.onSelectAction({
+          id: "goal",
+          kind: "action",
+          action: "goal",
+          title: "Goal",
+        });
+      });
+      await waitFor(() => {
+        expect(composerCapture.current?.preferences.mode).toBe("agent");
+      });
+
+      // Composer-plus "goal" again while not in plan mode — covers the
+      // `mode === "plan"` false branch in selectComposerPlusAction too.
+      await act(async () => {
+        await composerCapture.current?.menu.onSelectAction({
+          id: "goal",
+          kind: "action",
+          action: "goal",
+          title: "Goal",
+        });
+      });
+      await waitFor(() => {
+        expect(composerCapture.current?.preferences.mode).toBe("agent");
+      });
+
+      await act(async () => {
+        await composerCapture.current?.menu.onSelectAction({
+          id: "ask",
+          kind: "action",
+          action: "ask",
+          title: "Ask",
+        });
+      });
+      await waitFor(() => {
+        expect(composerCapture.current?.preferences.mode).toBe("ask");
+      });
+    },
+    20_000,
+  );
+
+  it(
+    "dispatches remaining slash/composer-plus action-switch cases",
+    async () => {
+      Object.assign(window, {
+        __TAURI_INTERNALS__: { invoke: vi.fn(async () => null) },
+      });
+      const { default: App } = await import("./App");
+      render(<App />);
+      await waitFor(() => expect(composerCapture.current).not.toBeNull());
+
+      act(() => {
+        composerCapture.current?.menu.onSelectSlash({
+          id: "status",
+          kind: "action",
+          name: "status",
+          action: "status",
+        });
+      });
+      act(() => {
+        composerCapture.current?.menu.onSelectSlash({
+          id: "doctor",
+          kind: "action",
+          name: "doctor",
+          action: "doctor",
+        });
+      });
+      act(() => {
+        composerCapture.current?.menu.onSelectSlash({
+          id: "unknown",
+          kind: "action",
+          name: "unknown",
+          action: "unknown-action",
+        });
+      });
+      act(() => {
+        composerCapture.current?.menu.onSelectAction({
+          id: "project",
+          kind: "action",
+          action: "project",
+          title: "Project",
+        } as never);
+      });
+      act(() => {
+        composerCapture.current?.menu.onSelectAction({
+          id: "record-skill",
+          kind: "action",
+          action: "record-skill",
+          title: "Record skill",
+        } as never);
+      });
+
+      // Navigating away last — these swap out ComposerDock's pane.
+      act(() => {
+        composerCapture.current?.menu.onSelectSlash({
+          id: "automations",
+          kind: "action",
+          name: "automations",
+          action: "automations",
+        });
+      });
+      act(() => {
+        composerCapture.current?.menu.onSelectSlash({
+          id: "settings",
+          kind: "action",
+          name: "settings",
+          action: "settings",
+        });
+      });
     },
     20_000,
   );
