@@ -14,7 +14,7 @@ use crate::acp_client::{
 use crate::agent_loop;
 use crate::interactions::{InteractionPayloadV1, InteractionSnapshotV1, InteractionStatusV1};
 use crate::permission::{
-    may_auto_allow, may_auto_deny,
+    is_destructive_command, may_auto_allow, may_auto_deny,
     permission_scope_key, pick_option_id,
 };
 use crate::session_fsm::SessionState;
@@ -102,6 +102,7 @@ impl SessionManager {
             );
             let auto_deny = !auto && may_auto_deny(session.policy);
             let options = SessionManager::host_permission_options();
+            let destructive = is_destructive_command(&req.command);
             let snapshot = InteractionSnapshotV1::new(
                 &session.app_session_id,
                 &session.process_id,
@@ -113,6 +114,7 @@ impl SessionManager {
                     preview: req.preview.clone(),
                     scope_key: sk,
                     options,
+                    destructive,
                 },
             );
             let (tx, rx) = tokio::sync::oneshot::channel();
@@ -1290,6 +1292,7 @@ mod tests {
                 preview: "a.txt (4 bytes)".into(),
                 scope_key: "write_file:/tmp/a.txt".into(),
                 options: SessionManager::host_permission_options(),
+                destructive: false,
             },
         );
         session.pending_permission = Some(PendingPermission {
@@ -1348,6 +1351,7 @@ mod tests {
                     preview: "echo (cwd: .)".into(),
                     scope_key: "run_command:echo".into(),
                     options: SessionManager::host_permission_options(),
+                    destructive: false,
                 },
             ),
             host_reply: Some(tx),

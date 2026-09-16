@@ -264,6 +264,16 @@ fn event_parts(event: &AcpEvent) -> (&'static str, Option<String>, Value) {
                 "note": note,
             }),
         ),
+        AcpEvent::ContextCompactStart { trigger } => (
+            "context_compact_start",
+            None,
+            json!({ "trigger": trigger }),
+        ),
+        AcpEvent::ContextCompactEnd { trigger, outcome } => (
+            "context_compact_end",
+            None,
+            json!({ "trigger": trigger, "outcome": outcome }),
+        ),
         AcpEvent::Usage {
             input_tokens,
             output_tokens,

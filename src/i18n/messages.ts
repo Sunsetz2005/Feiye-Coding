@@ -596,6 +596,15 @@ const en = {
   "composer.worktreeMain": "main",
   "composer.worktreeDetached": "detached",
   "composer.worktreeSwitched": "Using worktree {name} ({branch})",
+  "composer.worktreeCreatePlaceholder": "New branch name…",
+  "composer.worktreeCreateButton": "New worktree",
+  "composer.worktreeRemove": "Remove worktree",
+  "composer.worktreeRemoveTitle": "Remove worktree",
+  "composer.worktreeRemoveConfirm": 'Remove the worktree at "{path}"?',
+  "composer.worktreeRemoveForceConfirm":
+    "This worktree has uncommitted changes or is locked. Force remove anyway? This discards those changes.",
+  "composer.worktreeRemoved": "Worktree removed.",
+  "composer.worktreeCreated": "Worktree created.",
   "composer.clearProject": "No project (orphan chat)",
   "composer.projectUntrusted": "Not trusted yet",
   "composer.projectBound": "Session bound to “{name}”",
@@ -1619,6 +1628,10 @@ const en = {
   "perm.hintOnce": "Run this once; ask again next time.",
   "perm.hintSession": "Allow similar actions for the rest of this chat.",
   "perm.hintDeny": "Block this action and tell the agent.",
+  "perm.destructiveWarning":
+    "This command can discard work or escalate scope (e.g. force-delete, hard reset, force-push). Review carefully before allowing.",
+  "perm.previewExpand": "Show full command",
+  "perm.previewCollapse": "Collapse",
 
   // Agent ask_user_question
   "askUser.title": "Agent question",
@@ -2327,6 +2340,15 @@ const zh: Record<MessageKey, string> = {
   "composer.worktreeMain": "主目录",
   "composer.worktreeDetached": "游离 HEAD",
   "composer.worktreeSwitched": "已切换到 worktree {name}（{branch}）",
+  "composer.worktreeCreatePlaceholder": "新分支名…",
+  "composer.worktreeCreateButton": "新建 worktree",
+  "composer.worktreeRemove": "删除 worktree",
+  "composer.worktreeRemoveTitle": "删除 worktree",
+  "composer.worktreeRemoveConfirm": "删除位于「{path}」的 worktree？",
+  "composer.worktreeRemoveForceConfirm":
+    "该 worktree 存在未提交的改动或已被锁定。仍要强制删除吗？这将丢弃这些改动。",
+  "composer.worktreeRemoved": "已删除 worktree。",
+  "composer.worktreeCreated": "已创建 worktree。",
   "composer.clearProject": "无项目（其他会话）",
   "composer.projectUntrusted": "尚未信任",
   "composer.projectBound": "会话已绑定到「{name}」",
@@ -3321,6 +3343,10 @@ const zh: Record<MessageKey, string> = {
   "perm.hintOnce": "仅执行这一次，下次仍会询问。",
   "perm.hintSession": "本会话内同类操作不再询问。",
   "perm.hintDeny": "阻止本次操作并告知 Agent。",
+  "perm.destructiveWarning":
+    "该命令可能丢弃工作内容或扩大影响范围（如强制删除、硬重置、强制推送）。请仔细核对后再允许。",
+  "perm.previewExpand": "展开完整命令",
+  "perm.previewCollapse": "收起",
 
   "askUser.title": "Agent 提问",
   "askUser.submit": "提交",

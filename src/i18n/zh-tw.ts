@@ -346,6 +346,15 @@ export const zhTW: Record<MessageKey, string> = {
   "composer.worktreeMain": "主目錄",
   "composer.worktreeDetached": "游離 HEAD",
   "composer.worktreeSwitched": "已切換到 worktree {name}（{branch}）",
+  "composer.worktreeCreatePlaceholder": "新分支名稱…",
+  "composer.worktreeCreateButton": "新增 worktree",
+  "composer.worktreeRemove": "刪除 worktree",
+  "composer.worktreeRemoveTitle": "刪除 worktree",
+  "composer.worktreeRemoveConfirm": "刪除位於「{path}」的 worktree？",
+  "composer.worktreeRemoveForceConfirm":
+    "該 worktree 存在未提交的變更或已被鎖定。仍要強制刪除嗎？這將捨棄這些變更。",
+  "composer.worktreeRemoved": "已刪除 worktree。",
+  "composer.worktreeCreated": "已建立 worktree。",
   "composer.addFiles": "檔案",
   "composer.planMode": "計劃模式",
   "composer.planModeHint": "開啟計劃模式",
@@ -1555,6 +1564,10 @@ export const zhTW: Record<MessageKey, string> = {
   "perm.hintOnce": "僅執行這一次，下次仍會詢問。",
   "perm.hintSession": "本對話內同類操作不再詢問。",
   "perm.hintDeny": "阻止本次操作並告知 Agent。",
+  "perm.destructiveWarning":
+    "此命令可能丟棄工作內容或擴大影響範圍（如強制刪除、硬重置、強制推送）。請仔細核對後再允許。",
+  "perm.previewExpand": "展開完整命令",
+  "perm.previewCollapse": "收起",
 
   "askUser.title": "Agent 提問",
   "askUser.submit": "提交",

@@ -39,6 +39,8 @@ pub enum InteractionPayloadV1 {
         preview: String,
         scope_key: String,
         options: Value,
+        #[serde(default)]
+        destructive: bool,
     },
     AskUser {
         questions: Vec<AskUserQuestionItem>,
@@ -231,12 +233,14 @@ fn bound_payload(payload: InteractionPayloadV1) -> InteractionPayloadV1 {
             preview,
             scope_key,
             options,
+            destructive,
         } => InteractionPayloadV1::Permission {
             tool_name,
             title: truncate_chars(title, MAX_PREVIEW_CHARS),
             preview: truncate_chars(preview, MAX_PREVIEW_CHARS),
             scope_key: truncate_chars(scope_key, MAX_PREVIEW_CHARS),
             options: bounded_json(options, MAX_OPTIONS_CHARS),
+            destructive,
         },
         InteractionPayloadV1::Plan { entries, body } => InteractionPayloadV1::Plan {
             entries: bounded_json(entries, MAX_PLAN_CHARS),
@@ -276,12 +280,14 @@ fn audit_safe_snapshot(snapshot: &InteractionSnapshotV1) -> InteractionSnapshotV
             preview,
             scope_key,
             options,
+            destructive,
         } => InteractionPayloadV1::Permission {
             tool_name: redact_bounded(&tool_name, 256),
             title: redact_bounded(&title, MAX_PREVIEW_CHARS),
             preview: redact_bounded(&preview, MAX_PREVIEW_CHARS),
             scope_key: audit_scope(&scope_key),
             options: bounded_json(options, MAX_OPTIONS_CHARS),
+            destructive,
         },
         InteractionPayloadV1::AskUser { questions, .. } => InteractionPayloadV1::AskUser {
             questions: bound_questions(questions, true),
@@ -351,6 +357,7 @@ mod tests {
                 preview: "x".repeat(MAX_PREVIEW_CHARS + 10),
                 scope_key: "shell:echo ok".into(),
                 options: serde_json::json!([]),
+                destructive: false,
             },
         );
         let InteractionPayloadV1::Permission { preview, .. } = snapshot.payload else {
@@ -394,6 +401,7 @@ mod tests {
                 preview: "secret".into(),
                 scope_key: "write:/Users/example/private.txt".into(),
                 options: serde_json::json!([]),
+                destructive: false,
             },
         );
         let safe = audit_safe_snapshot(&permission);

@@ -64,6 +64,8 @@ Runtime 没有 mid-session `set_effort` RPC。Host 更新目标 effort 后软断
 
 默认权限是 Ask。Host 继续使用 Runtime optionId 和 scopeKey；完全允许保留二次确认。权限变化会同步 Agent profile，并在进程参数可能变化时 soft-respawn。
 
+**危险命令拦截（2026-09-12，Grok Build 1.0.x 对标同步）。** `always_approve` 不再对所有命令无条件放行：`permission::is_destructive_command`（`rm -rf`、`git reset --hard`、`git clean -f*`、非 `--force-with-lease` 的强制推送、`dd`/`mkfs` 等保守清单）命中时，`may_auto_allow` 强制走正常 Ask 路径，不受策略影响。kernel 与 legacy ACP 两条权限路径共用同一个 `may_auto_allow`，因此两边同时生效。权限载荷新增 `destructive: boolean` 字段，权限卡片据此加醒目提示；命令预览过长时支持展开/收起（此前固定 3 行滚动框）。
+
 ## 偏好记忆范围
 
 `composerPrefsScope` = `global` | `project` | `session`，覆盖 model / effort / mode / permission。当前 composer 使用独立的模型级联菜单与访问菜单，不再使用旧“闪电合并 chip”。

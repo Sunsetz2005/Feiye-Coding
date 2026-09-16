@@ -44,6 +44,9 @@ const apiListenerCapture = vi.hoisted(() => ({
   },
   sessions: [] as Array<Record<string, unknown>>,
   projects: [] as Array<Record<string, unknown>>,
+  gitWorktreesList: vi.fn(async () => ({ available: false, worktrees: [] })),
+  gitWorktreeAdd: vi.fn(async () => ({ available: true, worktrees: [] })),
+  gitWorktreeRemove: vi.fn(async () => ({ available: true, worktrees: [] })),
   interactionRows: [] as Array<Record<string, unknown>>,
   planArtifacts: [] as Array<Record<string, unknown>>,
   planArtifactsBySession: {} as Record<string, Array<Record<string, unknown>>>,
@@ -172,6 +175,9 @@ vi.mock("@/lib/api", async (importOriginal) => {
     }),
     sessionResolvePlan: apiListenerCapture.resolvePlan,
     projectsList: vi.fn(async () => apiListenerCapture.projects),
+    gitWorktreesList: apiListenerCapture.gitWorktreesList,
+    gitWorktreeAdd: apiListenerCapture.gitWorktreeAdd,
+    gitWorktreeRemove: apiListenerCapture.gitWorktreeRemove,
     sessionsList: vi.fn(async () => apiListenerCapture.sessions),
     settingsGet: apiListenerCapture.settingsGet,
     probeCli: vi.fn(async () => ({
@@ -365,6 +371,15 @@ beforeEach(() => {
   apiListenerCapture.planArtifactsBySession = {};
   apiListenerCapture.candidateResponses = [];
   apiListenerCapture.searchHits = [];
+  apiListenerCapture.gitWorktreesList
+    .mockReset()
+    .mockResolvedValue({ available: false, worktrees: [] });
+  apiListenerCapture.gitWorktreeAdd
+    .mockReset()
+    .mockResolvedValue({ available: true, worktrees: [] });
+  apiListenerCapture.gitWorktreeRemove
+    .mockReset()
+    .mockResolvedValue({ available: true, worktrees: [] });
   apiListenerCapture.sessionSearch.mockImplementation(async () =>
     apiListenerCapture.searchHits,
   );
@@ -2206,6 +2221,250 @@ describe("App workbench integration", () => {
             .getViewed()
             .some((message) => message.content.includes("Hello stream")),
         ).toBe(true);
+      });
+    },
+    20_000,
+  );
+
+  it(
+    "flags a destructive permission and lets the long preview expand",
+    async () => {
+      apiListenerCapture.tauri = true;
+      apiListenerCapture.sessionState = {
+        ...apiListenerCapture.sessionState,
+        sessionId: "s1",
+        state: "ready",
+        title: "Task one",
+      };
+      const { default: App } = await import("./App");
+      render(<App />);
+      await waitFor(() => {
+        expect(apiListenerCapture.handlers.has("session://interaction")).toBe(true);
+      });
+
+      const longPreview = Array.from({ length: 6 }, (_, i) => `line ${i}`).join(
+        "\n",
+      );
+      act(() =>
+        apiListenerCapture.handlers.get("session://interaction")?.({
+          version: 1,
+          processId: "p1",
+          rpcId: 1,
+          createdAt: "2026-01-01T00:00:00Z",
+          updatedAt: "2026-01-01T00:00:00Z",
+          interactionId: "perm-destructive",
+          sessionId: "s1",
+          status: "pending",
+          payload: {
+            kind: "permission",
+            toolName: "run_command",
+            title: "Run rm -rf /tmp/x",
+            preview: longPreview,
+            scopeKey: "run_command:rm -rf /tmp/x",
+            options: [],
+            destructive: true,
+          },
+        }),
+      );
+
+      await screen.findByText("Run rm -rf /tmp/x");
+      expect(document.querySelector(".perm-bar--destructive")).toBeTruthy();
+      expect(
+        document.querySelector(".perm-bar__destructive-warning"),
+      ).toBeTruthy();
+
+      const toggle = document.querySelector(
+        ".perm-bar__preview-toggle",
+      ) as HTMLButtonElement | null;
+      expect(toggle).toBeTruthy();
+      const preview = document.querySelector(".perm-bar__preview");
+      expect(preview?.className).not.toContain("is-expanded");
+      await act(async () => {
+        toggle?.click();
+      });
+      expect(
+        document.querySelector(".perm-bar__preview")?.className,
+      ).toContain("is-expanded");
+    },
+    20_000,
+  );
+
+  it(
+    "shows a compacting ring state between start and end signals",
+    async () => {
+      apiListenerCapture.tauri = true;
+      apiListenerCapture.sessionState = {
+        ...apiListenerCapture.sessionState,
+        sessionId: "s1",
+        state: "ready",
+        title: "Task one",
+      };
+      const { default: App } = await import("./App");
+      render(<App />);
+      await waitFor(() => {
+        expect(
+          apiListenerCapture.handlers.has("session://context_compact_start"),
+        ).toBe(true);
+      });
+
+      act(() =>
+        apiListenerCapture.handlers.get("session://context_compact_start")?.({
+          sessionId: "s1",
+          trigger: "auto",
+        }),
+      );
+      await waitFor(() => {
+        expect(composerCapture.current?.contextUsage.compacting).toBe(true);
+      });
+
+      act(() =>
+        apiListenerCapture.handlers.get("session://context_compact_end")?.({
+          sessionId: "s1",
+          trigger: "auto",
+          outcome: "skipped",
+        }),
+      );
+      await waitFor(() => {
+        expect(composerCapture.current?.contextUsage.compacting).toBe(false);
+      });
+    },
+    20_000,
+  );
+
+  it(
+    "clears the compact safety timer when the completion event lands",
+    async () => {
+      apiListenerCapture.tauri = true;
+      apiListenerCapture.sessionState = {
+        ...apiListenerCapture.sessionState,
+        sessionId: "s1",
+        state: "ready",
+        title: "Task one",
+      };
+      const { default: App } = await import("./App");
+      render(<App />);
+      await waitFor(() => {
+        expect(
+          apiListenerCapture.handlers.has("session://context_compact"),
+        ).toBe(true);
+      });
+
+      act(() =>
+        apiListenerCapture.handlers.get("session://context_compact_start")?.({
+          sessionId: "s1",
+          trigger: "manual",
+        }),
+      );
+      await waitFor(() => {
+        expect(composerCapture.current?.contextUsage.compacting).toBe(true);
+      });
+
+      act(() =>
+        apiListenerCapture.handlers.get("session://context_compact")?.({
+          sessionId: "s1",
+          messageId: "m1",
+          trigger: "manual",
+          tokensBefore: 1000,
+          tokensAfter: 200,
+        }),
+      );
+      await waitFor(() => {
+        expect(composerCapture.current?.contextUsage.compacting).toBe(false);
+      });
+    },
+    20_000,
+  );
+
+  it(
+    "creates a worktree via onCreateWorktree and surfaces a failure",
+    async () => {
+      apiListenerCapture.tauri = true;
+      apiListenerCapture.projects = [
+        { id: "p1", name: "repo", path: "/repo", trusted: true },
+      ];
+      apiListenerCapture.gitWorktreeAdd.mockRejectedValueOnce(
+        new Error("git worktree add failed"),
+      );
+      const { default: App } = await import("./App");
+      render(<App />);
+      await waitFor(() => {
+        expect(composerCapture.current?.project.active?.path).toBe("/repo");
+      });
+
+      await act(async () => {
+        await composerCapture.current?.project.onCreateWorktree?.(
+          "feature-x",
+          true,
+        );
+      });
+
+      await waitFor(() => {
+        expect(apiListenerCapture.gitWorktreeAdd).toHaveBeenCalledWith(
+          "/repo",
+          "/repo-feature-x",
+          "feature-x",
+          true,
+        );
+      });
+    },
+    20_000,
+  );
+
+  it(
+    "removes a worktree via onRemoveWorktree, confirming then forcing on refusal",
+    async () => {
+      apiListenerCapture.tauri = true;
+      apiListenerCapture.projects = [
+        { id: "p1", name: "repo", path: "/repo", trusted: true },
+      ];
+      apiListenerCapture.gitWorktreeRemove
+        .mockRejectedValueOnce(new Error("contains modified or untracked files"))
+        .mockResolvedValueOnce({ available: true, worktrees: [] });
+      const { default: App } = await import("./App");
+      render(<App />);
+      await waitFor(() => {
+        expect(composerCapture.current?.project.active?.path).toBe("/repo");
+      });
+
+      const user = userEvent.setup();
+      const confirmSubmitButton = () =>
+        document.querySelector(
+          '.app-dialog__actions button[type="submit"]',
+        ) as HTMLButtonElement | null;
+
+      act(() => {
+        composerCapture.current?.project.onRemoveWorktree?.({
+          path: "/repo-feature",
+          head: "abc",
+          branch: "feature",
+          detached: false,
+          isMain: false,
+          locked: false,
+          prunable: false,
+        });
+      });
+
+      await waitFor(() => expect(confirmSubmitButton()).toBeTruthy());
+      await user.click(confirmSubmitButton()!);
+      await waitFor(() => {
+        expect(apiListenerCapture.gitWorktreeRemove).toHaveBeenNthCalledWith(
+          1,
+          "/repo",
+          "/repo-feature",
+          false,
+        );
+      });
+
+      // First attempt rejected -> Host offers a force-remove confirm dialog.
+      await waitFor(() => expect(confirmSubmitButton()).toBeTruthy());
+      await user.click(confirmSubmitButton()!);
+      await waitFor(() => {
+        expect(apiListenerCapture.gitWorktreeRemove).toHaveBeenNthCalledWith(
+          2,
+          "/repo",
+          "/repo-feature",
+          true,
+        );
       });
     },
     20_000,

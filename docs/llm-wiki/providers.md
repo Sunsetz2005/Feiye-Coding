@@ -58,6 +58,8 @@ Verified working combinations:
 
 Host must rebind both sides on every switch and before each ACP spawn (`prepare_route_auth_for_agent` + `agent_spawn_model_id`). Composer model stays a catalog id for the UI; spawn resolves the channel id separately.
 
+**Expired-token fail-fast (2026-09-12, Grok Build 1.0.x parity sync).** `connect_inner` (`session_manager/connect.rs`) checks `account::read_auth_profile().expired` on the official route before spawning the ACP adapter, and fails immediately with `AUTH_FAILED` ("sign in again in Settings → Account") instead of spawning and hitting the soft-fail `authenticate` RPC or a downstream OIDC 401. This does **not** add a token refresh — per this page's own rule, refresh always goes through the Grok Build CLI itself.
+
 ## Host commands
 
 | Command | Role |

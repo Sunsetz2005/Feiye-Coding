@@ -596,6 +596,29 @@ impl SessionManager {
                 return Ok(snap);
             }
 
+            // Fail fast on a known-expired official cached token instead of
+            // spawning and letting the adapter soft-fail `authenticate` or
+            // surface a confusing downstream OIDC 401 later. We never invent
+            // a parallel refresh here — the user must re-run official sign-in.
+            if matches!(
+                crate::providers::active_route(),
+                crate::providers::ActiveRoute::Official
+            ) && crate::account::read_auth_profile().expired
+            {
+                {
+                    let mut guard = self.inner.lock();
+                    if let Some(s) = guard.as_mut() {
+                        let _ = s.fsm.connect_failed(AgentError::new(
+                            AgentErrorCode::AuthFailed,
+                            "Official sign-in expired. Sign in again in Settings → Account.",
+                        ));
+                    }
+                }
+                let snap = self.snapshot();
+                Self::emit_state(&app, &snap);
+                return Ok(snap);
+            }
+
             let cli_path = std::path::PathBuf::from(probe.path.unwrap());
             let spawn_opts = crate::acp_client::SpawnOptions {
                 model_id: Some(agent_model.clone()),

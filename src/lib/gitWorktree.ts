@@ -128,3 +128,32 @@ export function findWorktreeAt(
 ): GitWorktreeEntry | null {
   return worktrees.find((w) => pathsEqual(w.path, path)) ?? null;
 }
+
+/** Filesystem/branch-safe slug: lowercase, alphanumerics and hyphens only. */
+export function slugifyBranchName(name: string): string {
+  return name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 60);
+}
+
+/**
+ * New worktree path: a sibling directory next to the project, named
+ * `<project-dir-name>-<slugified-branch>`.
+ */
+export function siblingWorktreePath(
+  projectPath: string,
+  branchName: string,
+): string {
+  const normalized = normalizeWorktreePath(projectPath);
+  const isWindowsDrive = /^[a-zA-Z]:\//.test(normalized);
+  const segments = normalized.split("/").filter(Boolean);
+  const projectDir = segments.pop() || "project";
+  const parent = segments.length
+    ? (isWindowsDrive ? "" : "/") + segments.join("/")
+    : "";
+  const slug = slugifyBranchName(branchName) || "worktree";
+  return `${parent}/${projectDir}-${slug}`;
+}

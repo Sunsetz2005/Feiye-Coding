@@ -142,6 +142,8 @@ pub struct UiPermissionRequest {
     pub preview: String,
     pub scope_key: String,
     pub options: serde_json::Value,
+    #[serde(default)]
+    pub destructive: bool,
 }
 
 /// Stable UI/query payload for a recoverable `_x.ai/ask_user_question`.
@@ -207,6 +209,7 @@ impl PendingPermission {
             preview,
             scope_key,
             options,
+            destructive,
         } = &self.interaction.payload
         else {
             unreachable!("pending permission payload kind")
@@ -221,6 +224,7 @@ impl PendingPermission {
             preview: preview.clone(),
             scope_key: scope_key.clone(),
             options: options.clone(),
+            destructive: *destructive,
         }
     }
 }
@@ -643,6 +647,9 @@ pub(super) async fn apply_sunsetz_compact(
     let client = cfg.client.clone();
     let endpoint = cfg.endpoint.clone();
     let model_id = cfg.endpoint.model.clone();
+    let _ = tx.send(AcpEvent::ContextCompactStart {
+        trigger: trigger.to_string(),
+    });
     let result = context_compact::run_compact(
         &journal,
         artifact.as_ref(),
@@ -719,10 +726,20 @@ pub(super) async fn apply_sunsetz_compact(
                 });
                 return CompactGate::Finished;
             }
+            let _ = tx.send(AcpEvent::ContextCompactEnd {
+                trigger: trigger.to_string(),
+                outcome: "skipped".into(),
+            });
             cfg.history = context_compact::history_for_model(&journal, artifact.as_ref());
             CompactGate::Continue
         }
-        Err(CompactError::Cancelled) => CompactGate::Finished,
+        Err(CompactError::Cancelled) => {
+            let _ = tx.send(AcpEvent::ContextCompactEnd {
+                trigger: trigger.to_string(),
+                outcome: "cancelled".into(),
+            });
+            CompactGate::Finished
+        }
         Err(error) if compact_cmd.is_some() => {
             let message = match error {
                 CompactError::EmptySummary => "compact produced an empty summary".into(),
@@ -736,6 +753,10 @@ pub(super) async fn apply_sunsetz_compact(
         }
         Err(_) => {
             tracing::warn!("auto compact failed session={session_id}; using truncated history");
+            let _ = tx.send(AcpEvent::ContextCompactEnd {
+                trigger: trigger.to_string(),
+                outcome: "failed".into(),
+            });
             cfg.history = agent_loop::chat_history_from_journal(&journal);
             CompactGate::Continue
         }

@@ -1360,6 +1360,38 @@ export async function gitWorktreesList(projectPath: string) {
   return invoke<GitWorktreesResult>("git_worktrees_list", { projectPath });
 }
 
+/**
+ * Create a new linked git worktree. When `createBranch` is true, `branchName`
+ * (if given) names the new branch; otherwise `branchName` must name an
+ * existing branch to check out into the new worktree.
+ */
+export async function gitWorktreeAdd(
+  projectPath: string,
+  newPath: string,
+  branchName: string | null,
+  createBranch: boolean,
+) {
+  return invoke<GitWorktreesResult>("git_worktree_add", {
+    projectPath,
+    newPath,
+    branchName,
+    createBranch,
+  });
+}
+
+/** Remove a linked git worktree. `force` is required for a dirty/locked one. */
+export async function gitWorktreeRemove(
+  projectPath: string,
+  worktreePath: string,
+  force: boolean,
+) {
+  return invoke<GitWorktreesResult>("git_worktree_remove", {
+    projectPath,
+    worktreePath,
+    force,
+  });
+}
+
 /** Native folder dialog → add project. Returns null if user cancels. */
 export async function projectAddDialog(trust: boolean) {
   return invoke<{

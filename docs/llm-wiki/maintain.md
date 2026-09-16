@@ -171,7 +171,22 @@ Captured from X open-source thread (2026-07-24). Track as GitHub Issues with `fr
 | Thinking collapse preference | P2 | ✅ auto-collapse default + remember |
 | Multi account | P2 | ✅ 0.1.1 |
 | Grok Web history import | P2 | ❌ out of scope (local sessions) |
-| git worktree UX | P2 | ✅ #46 project chip switch (list + bind cwd; no create/remove) |
+| git worktree UX | P2 | ✅ #46 project chip switch (list + bind cwd) + create/remove (2026-09-12, Grok Build parity sync) |
 | Claude-Code-like pure chat shell | P2 | ❌ product is Agent workbench |
 | Arch Linux package | P2 | ✅ document AppImage on Arch (+ optional AUR later) |
 | Plugin marketplace install UI | P2 | 💬 design note (CLI remains SoT for install) |
+
+## Grok Build parity sync (2026-09-12)
+
+Upstream Grok Build (the legacy `grok` CLI this app's ACP adapter targets) shipped 0.2.106 → 1.0.25 (Aug–Sep 2026). Compared against this codebase and synced:
+
+- Context ring shows a compacting-in-progress state (`AcpEvent::ContextCompactStart`/`ContextCompactEnd`, kernel path only — legacy ACP has no upstream "start" notification to hook).
+- Legacy ACP official route fails fast on an expired cached token instead of spawning + soft-failing (`connect_inner`, see [providers.md](providers.md)).
+- Git worktree create/remove (previously list + bind cwd only) — human-triggered UI only, never exposed as an agent tool (`AGENTS.md`'s "subagents never create worktrees" is unaffected).
+- `AlwaysApprove` no longer blindly auto-runs destructive shell commands (see [catalog.md](catalog.md#权限)).
+- Permission preview supports expand/collapse for long `run_command` previews.
+- `wait_commands`/`command_output` `timeout_ms` clamped to 1 hour (`MAX_TOOL_WAIT_MS`, `agent_loop.rs`).
+
+**Deferred, not implemented** (documented only):
+- `--sandbox strict` — redundant with this Host's own `sandboxProfile` layer (bubblewrap / sandbox-exec / AppContainer).
+- Per-turn cost/usage persistence (`grok usage` parity) — no pricing table exists anywhere in this codebase; real feature, bigger than a sync pass.

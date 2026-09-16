@@ -5289,10 +5289,7 @@ pub fn parse_worktree_porcelain(raw: &str) -> Vec<GitWorktreeEntry> {
     out
 }
 
-/// List linked git worktrees for a project folder. Soft-fails without git / non-repo.
-#[tauri::command]
-pub async fn git_worktrees_list(project_path: String) -> Result<GitWorktreesResult, String> {
-    let project = normalize_fs_path(&project_path);
+fn list_worktrees_result(project: &str) -> Result<GitWorktreesResult, String> {
     if project.is_empty() {
         return Ok(GitWorktreesResult {
             available: false,
@@ -5300,7 +5297,7 @@ pub async fn git_worktrees_list(project_path: String) -> Result<GitWorktreesResu
             reason: Some("empty path".into()),
         });
     }
-    let proj = std::path::PathBuf::from(&project);
+    let proj = std::path::PathBuf::from(project);
     if !proj.is_dir() {
         return Ok(GitWorktreesResult {
             available: false,
@@ -5308,7 +5305,7 @@ pub async fn git_worktrees_list(project_path: String) -> Result<GitWorktreesResu
             reason: Some("project not a directory".into()),
         });
     }
-    if let Err(reason) = git_probe_work_tree(&project) {
+    if let Err(reason) = git_probe_work_tree(project) {
         return Ok(GitWorktreesResult {
             available: false,
             worktrees: vec![],
@@ -5317,7 +5314,7 @@ pub async fn git_worktrees_list(project_path: String) -> Result<GitWorktreesResu
     }
 
     let out = std::process::Command::new("git")
-        .args(["-C", &project, "worktree", "list", "--porcelain"])
+        .args(["-C", project, "worktree", "list", "--porcelain"])
         .output()
         .map_err(|e| e.to_string())?;
 
@@ -5341,6 +5338,106 @@ pub async fn git_worktrees_list(project_path: String) -> Result<GitWorktreesResu
         worktrees,
         reason: None,
     })
+}
+
+/// List linked git worktrees for a project folder. Soft-fails without git / non-repo.
+#[tauri::command]
+pub async fn git_worktrees_list(project_path: String) -> Result<GitWorktreesResult, String> {
+    let project = normalize_fs_path(&project_path);
+    list_worktrees_result(&project)
+}
+
+/// Create a new linked git worktree. When `create_branch` is true, `branch_name`
+/// (if given) names the new branch (`git worktree add -b <branch> <path>`);
+/// otherwise `branch_name` must name an existing branch to check out into the
+/// new worktree (`git worktree add <path> <branch>`).
+#[tauri::command]
+pub async fn git_worktree_add(
+    project_path: String,
+    new_path: String,
+    branch_name: Option<String>,
+    create_branch: bool,
+) -> Result<GitWorktreesResult, String> {
+    let project = normalize_fs_path(&project_path);
+    if project.is_empty() {
+        return Err("empty project path".into());
+    }
+    git_probe_work_tree(&project)?;
+    let target = normalize_fs_path(&new_path);
+    if target.is_empty() {
+        return Err("empty worktree path".into());
+    }
+
+    let mut args: Vec<String> = vec!["-C".into(), project.clone(), "worktree".into(), "add".into()];
+    match (&branch_name, create_branch) {
+        (Some(branch), true) if !branch.trim().is_empty() => {
+            args.push("-b".into());
+            args.push(branch.trim().to_string());
+            args.push(target.clone());
+        }
+        (Some(branch), false) if !branch.trim().is_empty() => {
+            args.push(target.clone());
+            args.push(branch.trim().to_string());
+        }
+        _ => {
+            args.push(target.clone());
+        }
+    }
+
+    let out = std::process::Command::new("git")
+        .args(&args)
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        return Err(if err.is_empty() {
+            "git worktree add failed".into()
+        } else {
+            err.chars().take(200).collect()
+        });
+    }
+
+    list_worktrees_result(&project)
+}
+
+/// Remove a linked git worktree. `force` maps to `git worktree remove --force`,
+/// needed when the worktree has uncommitted changes or is locked.
+#[tauri::command]
+pub async fn git_worktree_remove(
+    project_path: String,
+    worktree_path: String,
+    force: bool,
+) -> Result<GitWorktreesResult, String> {
+    let project = normalize_fs_path(&project_path);
+    if project.is_empty() {
+        return Err("empty project path".into());
+    }
+    git_probe_work_tree(&project)?;
+    let target = normalize_fs_path(&worktree_path);
+    if target.is_empty() {
+        return Err("empty worktree path".into());
+    }
+
+    let mut args: Vec<String> = vec!["-C".into(), project.clone(), "worktree".into(), "remove".into()];
+    if force {
+        args.push("--force".into());
+    }
+    args.push(target);
+
+    let out = std::process::Command::new("git")
+        .args(&args)
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        return Err(if err.is_empty() {
+            "git worktree remove failed".into()
+        } else {
+            err.chars().take(200).collect()
+        });
+    }
+
+    list_worktrees_result(&project)
 }
 
 #[cfg(test)]
@@ -5375,6 +5472,123 @@ detached
     #[test]
     fn empty_input() {
         assert!(parse_worktree_porcelain("").is_empty());
+    }
+
+    /// git worktree list reports the real (symlink-resolved) path, which can
+    /// differ from `std::env::temp_dir()` on macOS (`/var` -> `/private/var`).
+    fn worktree_matches(entry_path: &str, target: &std::path::Path) -> bool {
+        let entry = std::path::Path::new(entry_path);
+        if entry == target {
+            return true;
+        }
+        match (std::fs::canonicalize(entry), std::fs::canonicalize(target)) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        }
+    }
+
+    fn init_temp_repo(name: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(name);
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let run = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&root)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?} failed");
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.email", "test@example.com"]);
+        run(&["config", "user.name", "Test"]);
+        std::fs::write(root.join("a.txt"), "hello").unwrap();
+        run(&["add", "a.txt"]);
+        run(&["commit", "-q", "-m", "init"]);
+        root
+    }
+
+    #[tokio::test]
+    async fn git_worktree_add_then_remove_roundtrip() {
+        let project = init_temp_repo("sunsetz-wt-add-remove");
+        let new_path = std::env::temp_dir().join("sunsetz-wt-add-remove-child");
+        let _ = std::fs::remove_dir_all(&new_path);
+
+        let added = git_worktree_add(
+            project.to_string_lossy().into_owned(),
+            new_path.to_string_lossy().into_owned(),
+            Some("feature-x".into()),
+            true,
+        )
+        .await
+        .expect("add should succeed");
+        assert!(added.available);
+        assert!(added
+            .worktrees
+            .iter()
+            .any(|w| worktree_matches(&w.path, &new_path)));
+
+        let removed = git_worktree_remove(
+            project.to_string_lossy().into_owned(),
+            new_path.to_string_lossy().into_owned(),
+            false,
+        )
+        .await
+        .expect("remove should succeed");
+        assert!(!removed
+            .worktrees
+            .iter()
+            .any(|w| worktree_matches(&w.path, &new_path)));
+
+        let _ = std::fs::remove_dir_all(&project);
+        let _ = std::fs::remove_dir_all(&new_path);
+    }
+
+    #[tokio::test]
+    async fn git_worktree_remove_dirty_without_force_surfaces_error() {
+        let project = init_temp_repo("sunsetz-wt-remove-dirty");
+        let new_path = std::env::temp_dir().join("sunsetz-wt-remove-dirty-child");
+        let _ = std::fs::remove_dir_all(&new_path);
+
+        git_worktree_add(
+            project.to_string_lossy().into_owned(),
+            new_path.to_string_lossy().into_owned(),
+            Some("feature-y".into()),
+            true,
+        )
+        .await
+        .expect("add should succeed");
+        std::fs::write(new_path.join("dirty.txt"), "uncommitted").unwrap();
+
+        let err = git_worktree_remove(
+            project.to_string_lossy().into_owned(),
+            new_path.to_string_lossy().into_owned(),
+            false,
+        )
+        .await
+        .expect_err("dirty worktree without force should be refused");
+        assert!(
+            err.to_lowercase().contains("locked")
+                || err.to_lowercase().contains("dirty")
+                || err.to_lowercase().contains("contains modified")
+                || err.to_lowercase().contains("--force"),
+            "unexpected error message: {err}"
+        );
+
+        let forced = git_worktree_remove(
+            project.to_string_lossy().into_owned(),
+            new_path.to_string_lossy().into_owned(),
+            true,
+        )
+        .await
+        .expect("forced remove should succeed");
+        assert!(!forced
+            .worktrees
+            .iter()
+            .any(|w| worktree_matches(&w.path, &new_path)));
+
+        let _ = std::fs::remove_dir_all(&project);
+        let _ = std::fs::remove_dir_all(&new_path);
     }
 }
 

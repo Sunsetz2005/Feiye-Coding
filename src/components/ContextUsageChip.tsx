@@ -98,10 +98,12 @@ function ContextRing({
   percent,
   size,
   strokeWidth,
+  compacting = false,
 }: {
   percent: number | null;
   size: number;
   strokeWidth: number;
+  compacting?: boolean;
 }) {
   const hasValue = percent != null && Number.isFinite(percent);
   const normalized = hasValue
@@ -113,7 +115,9 @@ function ContextRing({
   const center = size / 2;
   return (
     <svg
-      className={`ctx-ring${hasValue ? "" : " is-unknown"}`}
+      className={`ctx-ring${hasValue ? "" : " is-unknown"}${
+        compacting ? " ctx-ring--compacting" : ""
+      }`}
       width={size}
       height={size}
       viewBox={`0 0 ${size} ${size}`}
@@ -227,7 +231,12 @@ export function ContextUsageChip({
         aria-describedby={open ? undefined : summaryId}
         onClick={() => setOpen((value) => !value)}
       >
-        <ContextRing percent={usedPercent} size={14} strokeWidth={1.7} />
+        <ContextRing
+          percent={usedPercent}
+          size={14}
+          strokeWidth={1.7}
+          compacting={display.compacting}
+        />
       </button>
       <div
         id={summaryId}
@@ -254,7 +263,12 @@ export function ContextUsageChip({
           >
             <header className="ctx-chip__head">
               <div className="ctx-chip__hero-ring">
-                <ContextRing percent={usedPercent} size={28} strokeWidth={2} />
+                <ContextRing
+                  percent={usedPercent}
+                  size={28}
+                  strokeWidth={2}
+                  compacting={display.compacting}
+                />
               </div>
               <div className="ctx-chip__hero-copy">
                 <h3>{labels.menuTitle}</h3>

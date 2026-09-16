@@ -39,12 +39,15 @@ export interface ContextUsageState {
   /** Message id of the last compact marker (for post-compact delta). */
   lastCompactMessageId: string | null;
   lastCompact: LastCompactSummary | null;
+  /** True between a `ContextCompactStart` signal and its terminal event. */
+  compacting: boolean;
 }
 
 export const INITIAL_CONTEXT_USAGE: ContextUsageState = {
   knownTokens: null,
   lastCompactMessageId: null,
   lastCompact: null,
+  compacting: false,
 };
 
 export type ContextUsageMessage = {
@@ -73,7 +76,9 @@ export type ContextUsageAction =
       note?: string;
       messageId?: string;
     }
-  | { type: "hydrate"; messages: ContextUsageMessage[] };
+  | { type: "hydrate"; messages: ContextUsageMessage[] }
+  | { type: "compact_start" }
+  | { type: "compact_end" };
 
 function finiteToken(n: number | undefined | null): number | undefined {
   if (n == null || !Number.isFinite(n) || n < 0) return undefined;
@@ -110,10 +115,15 @@ export function reduceContextUsage(
           note: action.note,
           messageId: action.messageId,
         },
+        compacting: false,
       };
     }
     case "hydrate":
       return hydrateContextUsageFromMessages(action.messages);
+    case "compact_start":
+      return { ...state, compacting: true };
+    case "compact_end":
+      return { ...state, compacting: false };
     default:
       return state;
   }
@@ -150,6 +160,7 @@ export function hydrateContextUsageFromMessages(
         note: meta?.note,
         messageId: m.id,
       },
+      compacting: false,
     };
   }
   return { ...INITIAL_CONTEXT_USAGE };
@@ -188,6 +199,7 @@ export interface ContextUsageDisplay {
   remainingTokens: number | null;
   percentUsed: number | null;
   runtime: RuntimeContextUsage | null;
+  compacting: boolean;
 }
 
 /**
@@ -222,6 +234,7 @@ export function resolveContextUsageDisplay(
       percentUsed:
         window == null ? null : Math.min(100, Math.max(0, (tokens / window) * 100)),
       runtime,
+      compacting: state.compacting,
     };
   }
 
@@ -237,6 +250,7 @@ export function resolveContextUsageDisplay(
       remainingTokens: null,
       percentUsed: null,
       runtime: null,
+      compacting: state.compacting,
     };
   }
 
@@ -251,6 +265,7 @@ export function resolveContextUsageDisplay(
       remainingTokens: null,
       percentUsed: null,
       runtime: null,
+      compacting: state.compacting,
     };
   }
 
@@ -265,5 +280,6 @@ export function resolveContextUsageDisplay(
     remainingTokens: null,
     percentUsed: null,
     runtime: null,
+    compacting: state.compacting,
   };
 }

@@ -58,6 +58,7 @@ export function permissionFromInteraction(
     preview: payload.preview,
     scopeKey: payload.scopeKey,
     options: payload.options,
+    destructive: payload.destructive,
   };
 }
 

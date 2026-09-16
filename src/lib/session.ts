@@ -636,6 +636,7 @@ export interface PermissionPayload {
   preview: string;
   scopeKey: string;
   options: unknown;
+  destructive?: boolean;
 }
 
 export interface AskUserOption {
@@ -680,6 +681,7 @@ export type InteractionPayloadV1 =
       preview: string;
       scopeKey: string;
       options: unknown;
+      destructive?: boolean;
     }
   | {
       kind: "ask_user";

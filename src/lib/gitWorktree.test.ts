@@ -4,7 +4,9 @@ import {
   normalizeWorktreePath,
   parseWorktreePorcelain,
   pathsEqual,
+  siblingWorktreePath,
   siblingWorktrees,
+  slugifyBranchName,
   worktreeLabel,
 } from "./gitWorktree";
 
@@ -66,5 +68,39 @@ describe("path helpers", () => {
       "/Users/me/repo-detached",
     ]);
     expect(findWorktreeAt(list, "/Users/me/repo-feat")?.branch).toBe("feat/x");
+  });
+});
+
+describe("slugifyBranchName", () => {
+  it("lowercases and hyphenates unsafe characters", () => {
+    expect(slugifyBranchName("Feature/Foo Bar")).toBe("feature-foo-bar");
+    expect(slugifyBranchName("  --weird--  ")).toBe("weird");
+    expect(slugifyBranchName("")).toBe("");
+  });
+});
+
+describe("siblingWorktreePath", () => {
+  it("builds a sibling directory named after the project + slug", () => {
+    expect(siblingWorktreePath("/Users/me/sunsetz", "Feature X")).toBe(
+      "/Users/me/sunsetz-feature-x",
+    );
+  });
+
+  it("strips a trailing slash on the project path", () => {
+    expect(siblingWorktreePath("/Users/me/sunsetz/", "fix")).toBe(
+      "/Users/me/sunsetz-fix",
+    );
+  });
+
+  it("handles a Windows drive path without a doubled slash", () => {
+    expect(siblingWorktreePath("C:/Users/me/sunsetz", "fix")).toBe(
+      "C:/Users/me/sunsetz-fix",
+    );
+  });
+
+  it("falls back to a generic slug for an empty branch name", () => {
+    expect(siblingWorktreePath("/Users/me/sunsetz", "   ")).toBe(
+      "/Users/me/sunsetz-worktree",
+    );
   });
 });

@@ -82,6 +82,11 @@ const GREP_SKIP_DIRS: &[&str] = &[
 
 const HTTP_CONNECT_TIMEOUT_SECS: u64 = 30;
 const COMMAND_TIMEOUT_SECS: u64 = 15 * 60;
+/// Upper clamp for model-supplied `timeout_ms` on `wait_commands` /
+/// `command_output`'s optional wait — prevents a single tool call from
+/// blocking a turn indefinitely even though `wait_for_jobs` degrades
+/// gracefully (returns current status) at its deadline either way.
+const MAX_TOOL_WAIT_MS: u64 = 60 * 60 * 1000;
 
 #[derive(Debug, Clone)]
 pub struct HostToolPermission {
@@ -1175,6 +1180,7 @@ fn tool_timeout_ms(arguments: &Value) -> Option<u64> {
                 .or_else(|| value.as_i64().and_then(|n| u64::try_from(n).ok()))
         })
         .filter(|ms| *ms > 0)
+        .map(|ms| ms.min(MAX_TOOL_WAIT_MS))
 }
 
 fn tool_interval_secs_arg(arguments: &Value) -> u64 {
@@ -4428,6 +4434,19 @@ mod tests {
     #[test]
     fn command_timeout_default_is_fifteen_minutes() {
         assert_eq!(COMMAND_TIMEOUT_SECS, 15 * 60);
+    }
+
+    #[test]
+    fn tool_timeout_ms_clamps_to_one_hour() {
+        assert_eq!(
+            tool_timeout_ms(&serde_json::json!({ "timeout_ms": 999_999_999u64 })),
+            Some(MAX_TOOL_WAIT_MS)
+        );
+        assert_eq!(
+            tool_timeout_ms(&serde_json::json!({ "timeout_ms": 5_000u64 })),
+            Some(5_000)
+        );
+        assert_eq!(tool_timeout_ms(&serde_json::json!({})), None);
     }
 
     #[test]

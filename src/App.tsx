@@ -162,7 +162,7 @@ import { ImageViewerProvider } from "@/components/ImageViewer";
 import { SunsetzLogo } from "@/components/SunsetzLogo";
 import { SetupWizard, type SetupCliInfo } from "@/components/SetupWizard";
 import { ComposerDock } from "@/components/ComposerDock";
-import { pathsEqual } from "@/lib/gitWorktree";
+import { pathsEqual, siblingWorktreePath } from "@/lib/gitWorktree";
 import {
   buildComposerPlusEntries,
   uploadMatchesQuery,
@@ -642,6 +642,19 @@ export default function App() {
   const [activeAccountId, setActiveAccountId] = useState<string | null>(null);
   const [perm, setPerm] = useState<PermissionPayload | null>(null);
   const permBarRef = useRef<HTMLDivElement | null>(null);
+  const [permPreviewExpanded, setPermPreviewExpanded] = useState(false);
+  useEffect(() => {
+    setPermPreviewExpanded(false);
+  }, [perm?.interactionId, perm?.rpcId]);
+  /** Safety net: force-clear the compacting flag if no terminal event arrives
+   * (crashed/killed process) so the context ring never pulses forever. */
+  const compactSafetyTimerRef = useRef<number | null>(null);
+  const clearCompactSafetyTimer = useCallback(() => {
+    if (compactSafetyTimerRef.current != null) {
+      window.clearTimeout(compactSafetyTimerRef.current);
+      compactSafetyTimerRef.current = null;
+    }
+  }, []);
   const [askUser, setAskUser] = useState<AskUserPayload | null>(null);
   /** Background tasks paused on permission, plan review, or Agent questions. */
   const [pendingAskSessionIds, setPendingAskSessionIds] = useState<Set<string>>(
@@ -1359,6 +1372,7 @@ export default function App() {
             if (!sid) return;
             patchSessionMessages(sid, (prev) => applyContextCompact(prev, p));
             if (sid === viewingSessionIdRef.current) {
+              clearCompactSafetyTimer();
               setContextUsage((prev) =>
                 reduceContextUsage(prev, {
                   type: "compact",
@@ -1379,6 +1393,38 @@ export default function App() {
               window.setTimeout(() => setToast(null), 3200);
             }
           }),
+        );
+        await track(
+          api.listen<{ sessionId?: string; trigger?: string }>(
+            "session://context_compact_start",
+            (p) => {
+              if (cancelled || !p?.sessionId) return;
+              if (p.sessionId !== viewingSessionIdRef.current) return;
+              clearCompactSafetyTimer();
+              setContextUsage((prev) =>
+                reduceContextUsage(prev, { type: "compact_start" }),
+              );
+              compactSafetyTimerRef.current = window.setTimeout(() => {
+                compactSafetyTimerRef.current = null;
+                setContextUsage((prev) =>
+                  reduceContextUsage(prev, { type: "compact_end" }),
+                );
+              }, 20_000);
+            },
+          ),
+        );
+        await track(
+          api.listen<{ sessionId?: string; trigger?: string; outcome?: string }>(
+            "session://context_compact_end",
+            (p) => {
+              if (cancelled || !p?.sessionId) return;
+              if (p.sessionId !== viewingSessionIdRef.current) return;
+              clearCompactSafetyTimer();
+              setContextUsage((prev) =>
+                reduceContextUsage(prev, { type: "compact_end" }),
+              );
+            },
+          ),
         );
         await track(
           api.listen<{
@@ -1917,6 +1963,7 @@ export default function App() {
     // Point viewing id immediately so late stream chunks land in the right cache.
     openingSessionIdRef.current = s.id;
     viewingSessionIdRef.current = s.id;
+    clearCompactSafetyTimer();
     transcriptStore.setViewing(s.id);
     setEditingUserMessageId(null);
     setEditAttachments([]);
@@ -2318,6 +2365,7 @@ export default function App() {
     viewingSessionIdRef.current = null;
     transcriptStore.setViewing(null);
     transcriptStore.clearViewed();
+    clearCompactSafetyTimer();
     setContextUsage(INITIAL_CONTEXT_USAGE);
     setPlan(emptyPlanState(tr("resources.plan")));
     setPerm(null);
@@ -6101,6 +6149,73 @@ export default function App() {
     ],
   );
 
+  /** Create a new worktree as a sibling of the active project, then switch to it. */
+  const createWorktree = useCallback(
+    async (branchName: string, createBranch: boolean) => {
+      if (!api.isTauri() || !activeProject?.path) return;
+      const branch = branchName.trim();
+      if (!branch) return;
+      const newPath = siblingWorktreePath(activeProject.path, branch);
+      try {
+        const res = await api.gitWorktreeAdd(
+          activeProject.path,
+          newPath,
+          branch,
+          createBranch,
+        );
+        setGitWorktrees(res.worktrees ?? []);
+        showToast(tr("composer.worktreeCreated"), 2500);
+        const created = res.worktrees.find((w) => pathsEqual(w.path, newPath));
+        if (created) {
+          await switchToWorktree(created);
+        }
+      } catch (e) {
+        showToast(String(e), 4500);
+      }
+    },
+    [activeProject?.path, showToast, switchToWorktree, tr],
+  );
+
+  /** Remove a linked worktree, confirming first and offering force on refusal. */
+  const removeWorktree = useCallback(
+    async (wt: api.GitWorktreeEntry) => {
+      if (!api.isTauri() || !activeProject?.path) return;
+      const attempt = async (force: boolean) => {
+        try {
+          const res = await api.gitWorktreeRemove(
+            activeProject.path,
+            wt.path,
+            force,
+          );
+          setGitWorktrees(res.worktrees ?? []);
+          showToast(tr("composer.worktreeRemoved"), 2500);
+        } catch (e) {
+          if (!force) {
+            setAppDialog({
+              kind: "confirm",
+              title: tr("composer.worktreeRemoveTitle"),
+              message: tr("composer.worktreeRemoveForceConfirm"),
+              confirmLabel: tr("composer.worktreeRemove"),
+              danger: true,
+              onConfirm: () => attempt(true),
+            });
+          } else {
+            showToast(String(e), 4500);
+          }
+        }
+      };
+      setAppDialog({
+        kind: "confirm",
+        title: tr("composer.worktreeRemoveTitle"),
+        message: tr("composer.worktreeRemoveConfirm", { path: wt.path }),
+        confirmLabel: tr("composer.worktreeRemove"),
+        danger: true,
+        onConfirm: () => attempt(false),
+      });
+    },
+    [activeProject?.path, setAppDialog, showToast, tr],
+  );
+
   /**
    * Pick folder → add project (name = folder basename; no rename prompt).
    * `bindSession` also attaches the open chat under the new project.
@@ -8189,7 +8304,9 @@ export default function App() {
             perm ? (
               <div
                 ref={permBarRef}
-                className="perm-bar"
+                className={
+                  "perm-bar" + (perm.destructive ? " perm-bar--destructive" : "")
+                }
                 role="region"
                 aria-labelledby="perm-bar-title"
                 aria-describedby="perm-bar-summary"
@@ -8212,8 +8329,36 @@ export default function App() {
                     command: perm.preview,
                   })}
                 </p>
+                {perm.destructive ? (
+                  <p className="perm-bar__destructive-warning">
+                    {tr("perm.destructiveWarning")}
+                  </p>
+                ) : null}
                 {perm.preview?.trim() ? (
-                  <pre className="perm-bar__preview">{perm.preview.trim()}</pre>
+                  <div className="perm-bar__preview-wrap">
+                    <pre
+                      className={
+                        "perm-bar__preview" +
+                        (permPreviewExpanded ? " is-expanded" : "")
+                      }
+                    >
+                      {perm.preview.trim()}
+                    </pre>
+                    {perm.preview.trim().split("\n").length > 3 ||
+                    perm.preview.trim().length > 220 ? (
+                      <button
+                        type="button"
+                        className="perm-bar__preview-toggle"
+                        onClick={() =>
+                          setPermPreviewExpanded((expanded) => !expanded)
+                        }
+                      >
+                        {permPreviewExpanded
+                          ? tr("perm.previewCollapse")
+                          : tr("perm.previewExpand")}
+                      </button>
+                    ) : null}
+                  </div>
                 ) : null}
                 <div className="perm-bar__actions" role="group">
                   {mapPermissionButtons(perm.options, {
@@ -8417,6 +8562,14 @@ export default function App() {
                 onSwitchWorktree: (worktree) => {
                   if (composerSettingsLocked) return;
                   void switchToWorktree(worktree);
+                },
+                onCreateWorktree: (branchName, createBranch) => {
+                  if (composerSettingsLocked) return;
+                  void createWorktree(branchName, createBranch);
+                },
+                onRemoveWorktree: (worktree) => {
+                  if (composerSettingsLocked) return;
+                  void removeWorktree(worktree);
                 },
                 onOpen: refreshGitWorktrees,
               }}

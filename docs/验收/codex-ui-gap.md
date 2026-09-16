@@ -39,7 +39,7 @@
 | Codex | Sunsetz | 状态 |
 |-------|---------|------|
 | 顶部：Threads / Skills / Automations 一类模块入口 | 新建、搜索、已安排、插件市场（精选连接器 + 详情三条提示词） | GitHub / Notion / Slack（粘贴令牌）与 Gmail / Drive / Calendar（Google 登录）在 App 内连接并注入默认内核；其余项显示即将在 App 内连接，不要求本机 Open Connector |
-| 项目列表，悬停三点：Remove，⌘O 再添加 | 项目行无披露箭头；栏标题悬停折叠；悬停三点/新对话；编辑名与源文件夹；磁盘不删 | 已对齐密度；不创建 worktree、不做远程项目 |
+| 项目列表，悬停三点：Remove，⌘O 再添加 | 项目行无披露箭头；栏标题悬停折叠；悬停三点/新对话；编辑名与源文件夹；磁盘不删 | 已对齐密度；不做远程项目。worktree 创建/删除已于 2026-09-12（Grok Build 对标同步）落地，见下一行 |
 | 项目下线程列表；过滤器（含 Chronological） | 项目下任务虚拟列表；后台待回答标记 | 可做：缺线程状态过滤（进行中 / 待审阅 / 时间序）。数据已有 session 状态，不必等新后端 |
 | 线程搜索，文档中曾为 ⌘G；较新文档改为可自定义、默认未指定 | ⌘K 搜会话/项目；FTS5 可搜可见正文 | 已对齐能力；快捷键不要改成 Codex 的 ⌘G（Sunsetz ⌘K 已是命令搜索） |
 | 归档线程在 Settings | 设置「已归档」栏目 + 侧栏可显示归档 | 已对齐 |
@@ -83,7 +83,7 @@ Codex 右栏是「当前线程的结果舱」，不是通用 IDE。Sunsetz 右�
 
 | Codex | Sunsetz | 状态 |
 |-------|---------|------|
-| 项目/worktree 作为线程工作区 | 上层项目条；worktree 只在 `ComposerProjectMenu` 列出已有 worktree，不创建 | 已对齐 MVP；创建/删除 worktree **明确不做** |
+| 项目/worktree 作为线程工作区 | 上层项目条；`ComposerWorktreeMenu` 列出已有 worktree，并支持创建（新分支 + 项目同级目录）/删除（确认 + 脏目录强制二次确认） | 2026-09-12（Grok Build 对标同步）反转此前「创建/删除 worktree 明确不做」的决策；人工触发 UI，未作为 Agent 可调用工具暴露 |
 | 模型入口在顶栏或线程头 | 底层紧凑模型级联；无独立 speed | 已对齐 |
 | 上下文/用量 | 14px 实线圆环；悬停三行摘要；点击才打开 Compact 详情；无容量不估算 | 已对齐 |
 | 计划模式开关 | 访问权限右侧的计划按钮，悬停可关 | 已对齐 |
@@ -122,7 +122,7 @@ Sunsetz 帮助面板只登记已工作的绑定。不要为了对齐 Codex 改�
 | Pets / overlay | 禁止占位 | 明确不做 |
 | 智能快照、浏览器、电脑控制 | 能力 unavailable | 缺后端 |
 | Hooks / 插件市场安装 | 只读目录；安装卸载 fail-closed | 缺后端 |
-| Git / 环境 / Worktree 高级写配置 | Changes + composer worktree 只读 | 缺后端 |
+| Git / 环境 / Worktree 高级写配置 | Changes 只读；composer worktree 支持创建/删除（2026-09-12 起），其余高级配置仍缺后端 | 部分完成 |
 | PR 工作流页 | 无 | 缺后端（阶段 11） |
 
 ---

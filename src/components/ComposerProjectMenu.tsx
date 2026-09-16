@@ -12,6 +12,7 @@ import {
   IconFork,
   IconPlus,
   IconSearch,
+  IconTrash,
 } from "@/components/icons";
 import { Tip } from "@/components/ui/tooltip";
 import { useFloatingMenu } from "@/lib/floatingMenu";
@@ -269,9 +270,15 @@ type WorktreeMenuProps = {
   worktreesAvailable: boolean | null;
   worktreesLoading?: boolean;
   worktreesReason?: string | null;
-  labels: Props["labels"];
+  labels: Props["labels"] & {
+    worktreeCreatePlaceholder?: string;
+    worktreeCreateButton?: string;
+    worktreeRemove?: string;
+  };
   disabled?: boolean;
   onSwitchWorktree?: (wt: GitWorktreeEntry) => void;
+  onCreateWorktree?: (branchName: string, createBranch: boolean) => void;
+  onRemoveWorktree?: (wt: GitWorktreeEntry) => void;
   onOpen?: () => void;
 };
 
@@ -284,10 +291,13 @@ export function ComposerWorktreeMenu({
   labels,
   disabled,
   onSwitchWorktree,
+  onCreateWorktree,
+  onRemoveWorktree,
   onOpen,
 }: WorktreeMenuProps) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
+  const [newBranch, setNewBranch] = useState("");
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const popRef = useRef<HTMLDivElement>(null);
@@ -325,8 +335,19 @@ export function ComposerWorktreeMenu({
     onOpenRef.current?.();
   }, [open]);
   useEffect(() => {
-    if (!open) setQuery("");
+    if (!open) {
+      setQuery("");
+      setNewBranch("");
+    }
   }, [open]);
+
+  const submitCreate = () => {
+    const branch = newBranch.trim();
+    if (!branch || !onCreateWorktree) return;
+    onCreateWorktree(branch, true);
+    setNewBranch("");
+    setOpen(false);
+  };
 
   if (!show) return null;
   const label = current ? worktreeLabel(current) : labels.worktreeMain;
@@ -374,8 +395,10 @@ export function ComposerWorktreeMenu({
                 {visible.map((wt) => {
                   const isCurrent = pathsEqual(wt.path, activeProject?.path);
                   const name = worktreeLabel(wt);
+                  const canRemove =
+                    !!onRemoveWorktree && !wt.isMain && !isCurrent;
                   return (
-                    <li key={wt.path}>
+                    <li key={wt.path} className="cpm__worktree-li">
                       <button
                         type="button"
                         role="menuitem"
@@ -405,6 +428,20 @@ export function ComposerWorktreeMenu({
                           </span>
                         ) : null}
                       </button>
+                      {canRemove ? (
+                        <button
+                          type="button"
+                          className="cpm__worktree-remove"
+                          title={labels.worktreeRemove ?? labels.worktreeDetached}
+                          aria-label={labels.worktreeRemove ?? name}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            onRemoveWorktree?.(wt);
+                          }}
+                        >
+                          <IconTrash size={14} />
+                        </button>
+                      ) : null}
                     </li>
                   );
                 })}
@@ -418,6 +455,29 @@ export function ComposerWorktreeMenu({
                     : labels.worktreesEmpty}
               </p>
             )}
+            {onCreateWorktree ? (
+              <div className="cpm__worktree-create">
+                <input
+                  className="cpm__search-input"
+                  value={newBranch}
+                  placeholder={labels.worktreeCreatePlaceholder ?? ""}
+                  onChange={(event) => setNewBranch(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") submitCreate();
+                  }}
+                  aria-label={labels.worktreeCreatePlaceholder ?? ""}
+                />
+                <button
+                  type="button"
+                  className="cpm__worktree-create-btn"
+                  disabled={!newBranch.trim()}
+                  onClick={submitCreate}
+                >
+                  <IconPlus size={14} />
+                  <span>{labels.worktreeCreateButton ?? "+"}</span>
+                </button>
+              </div>
+            ) : null}
           </div>,
           document.body,
         )}

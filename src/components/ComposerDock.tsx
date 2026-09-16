@@ -121,6 +121,8 @@ export interface ComposerDockProps {
     onSelect: (project: ProjectOption | null) => void;
     onAdd: () => void;
     onSwitchWorktree: (worktree: GitWorktreeEntry) => void;
+    onCreateWorktree?: (branchName: string, createBranch: boolean) => void;
+    onRemoveWorktree?: (worktree: GitWorktreeEntry) => void;
     onOpen: () => void;
   };
   queue: {
@@ -396,9 +398,16 @@ export function ComposerDock({
                 worktreeSwitch: tr("composer.worktreeSwitch"),
                 worktreeMain: tr("composer.worktreeMain"),
                 worktreeDetached: tr("composer.worktreeDetached"),
+                worktreeCreatePlaceholder: tr(
+                  "composer.worktreeCreatePlaceholder",
+                ),
+                worktreeCreateButton: tr("composer.worktreeCreateButton"),
+                worktreeRemove: tr("composer.worktreeRemove"),
               }}
               disabled={settingsLocked}
               onSwitchWorktree={project.onSwitchWorktree}
+              onCreateWorktree={project.onCreateWorktree}
+              onRemoveWorktree={project.onRemoveWorktree}
               onOpen={project.onOpen}
             />
             </div>

@@ -38,6 +38,7 @@ describe("reduceContextUsage", () => {
         knownTokens: 100,
         lastCompactMessageId: "c1",
         lastCompact: { trigger: "auto", tokensAfter: 100 },
+        compacting: false,
       },
       { type: "reset" },
     );
@@ -74,6 +75,20 @@ describe("reduceContextUsage", () => {
     expect(s.knownTokens).toBeNull();
     expect(s.lastCompactMessageId).toBe("c1");
     expect(s.lastCompact?.tokensAfter).toBeUndefined();
+  });
+
+  it("compact_start sets compacting, compact_end and compact clear it", () => {
+    const started = reduceContextUsage(INITIAL_CONTEXT_USAGE, {
+      type: "compact_start",
+    });
+    expect(started.compacting).toBe(true);
+    expect(reduceContextUsage(started, { type: "compact_end" }).compacting).toBe(
+      false,
+    );
+    expect(
+      reduceContextUsage(started, { type: "compact", tokensAfter: 10 })
+        .compacting,
+    ).toBe(false);
   });
 
   it("hydrate picks latest compact marker", () => {

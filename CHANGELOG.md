@@ -4,6 +4,12 @@
 
 - 模型/推理强度/模式/权限策略状态从 `App.tsx` 抽到独立的 `useComposerCatalog` hook，行为不变。
 - 应用内确认/输入/编辑项目弹窗从 `App.tsx` 抽到独立的 `useAppDialog` hook 与 `AppDialogHost` 组件，行为不变。
+- 自动压缩开始时上下文环显示进行中态，不再只在压缩完成后才有反馈；压缩无操作或失败也会给出终止信号，避免进行中态卡死。
+- Grok ACP 官方账号路径连接前会先检查缓存 token 是否已过期，过期则直接提示重新登录，不再静默 spawn 后才发现认证失败。
+- 项目 worktree 切换器新增新建/删除入口（此前只能列出并绑定已存在的 worktree）。
+- Full Access（YOLO）权限策略新增危险命令拦截：`rm -rf`、`git reset --hard`、`git clean -f*`、非 `--force-with-lease` 的强制推送等仍会弹出确认，不再无条件自动放行；权限卡片对危险命令加醒目提示。
+- 权限卡片里过长的命令预览可展开查看完整内容，不再只能在 3 行小窗口里滚动。
+- `wait_commands` / `command_output` 的 `timeout_ms` 增加 1 小时上限，避免模型传入超大值导致单次工具调用长时间阻塞。
 
 ## [1.0.2] — 2026-09-08 00:30
 

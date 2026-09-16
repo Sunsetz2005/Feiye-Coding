@@ -97,7 +97,7 @@ fn strip_compact_prefix(trimmed: &str) -> Option<&str> {
     if trimmed.len() < HEAD.len() {
         return None;
     }
-    if !trimmed[..HEAD.len()].eq_ignore_ascii_case(HEAD) {
+    if !trimmed.get(..HEAD.len())?.eq_ignore_ascii_case(HEAD) {
         return None;
     }
     Some(&trimmed[HEAD.len()..])
@@ -591,6 +591,7 @@ mod tests {
         assert!(parse_manual_command("/compaction").is_none());
         assert!(parse_manual_command("please /compact").is_none());
         assert!(parse_manual_command("compact this").is_none());
+        assert!(parse_manual_command("性能优化建议").is_none());
     }
 
     #[test]

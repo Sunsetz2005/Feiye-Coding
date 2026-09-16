@@ -129,6 +129,36 @@ pub fn is_edit_tool(tool_name: &str) -> bool {
         || t.contains("replace")
 }
 
+/// Conservative denylist for commands that discard work or escalate scope,
+/// even when the user has granted AlwaysApprove. False negatives are
+/// acceptable; false positives on common safe usage are not.
+pub fn is_destructive_command(command: &str) -> bool {
+    let c = command.trim().to_lowercase();
+    if c.is_empty() {
+        return false;
+    }
+    let has = |needle: &str| c.contains(needle);
+    (has("rm ")
+        && (has(" -rf")
+            || has(" -fr")
+            || has(" -r -f")
+            || has(" -f -r")
+            || (has(" --recursive") && has(" --force"))))
+        || has("git reset --hard")
+        || has("git checkout -- .")
+        || c.trim_end() == "git checkout ."
+        || has("git clean -fd")
+        || has("git clean -df")
+        || has("git clean -fdx")
+        || has("git clean -xfd")
+        || (has("git push") && (has(" --force") || has(" -f")) && !has("--force-with-lease"))
+        || has("dd if=")
+        || has("mkfs")
+        || c.contains("> /dev/sd")
+        || c.contains(">/dev/sd")
+        || ((has("chmod -r") || has("chown -r")) && (has(" /") || has(" ~") || has(" *")))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PermissionRequest {
@@ -342,8 +372,13 @@ pub fn may_auto_allow(
     project_root: Option<&Path>,
     path_target: &str,
     tool_name: &str,
-    _command: &str,
+    command: &str,
 ) -> bool {
+    // Even under AlwaysApprove (YOLO), a destructive shell command still asks.
+    if matches!(policy, PermissionPolicy::AlwaysApprove) && is_destructive_command(command) {
+        return false;
+    }
+
     let outside = if path_target.is_empty() {
         false
     } else {
@@ -842,6 +877,59 @@ mod tests {
         // Policy YOLO still returns true for outside paths; the Host kernel
         // refuses escaped writes/commands before the dock or execute.
         assert!(is_outside_project(&root, "/etc/passwd"));
+    }
+
+    #[test]
+    fn always_approve_forces_ask_for_rm_rf() {
+        let c = SessionAllowCache::default();
+        let root = std::env::temp_dir().join("sunsetz-perm-host-yolo-rm");
+        let _ = std::fs::create_dir_all(&root);
+        assert!(!may_auto_allow(
+            PermissionPolicy::AlwaysApprove,
+            &c,
+            "run_command:rm -rf /tmp/x",
+            Some(&root),
+            "",
+            "run_command",
+            "rm -rf /tmp/x",
+        ));
+    }
+
+    #[test]
+    fn always_approve_forces_ask_for_git_reset_hard() {
+        let c = SessionAllowCache::default();
+        let root = std::env::temp_dir().join("sunsetz-perm-host-yolo-reset");
+        let _ = std::fs::create_dir_all(&root);
+        assert!(!may_auto_allow(
+            PermissionPolicy::AlwaysApprove,
+            &c,
+            "run_command:git reset --hard",
+            Some(&root),
+            "",
+            "run_command",
+            "git reset --hard origin/main",
+        ));
+    }
+
+    #[test]
+    fn always_approve_allows_force_with_lease() {
+        let c = SessionAllowCache::default();
+        let root = std::env::temp_dir().join("sunsetz-perm-host-yolo-lease");
+        let _ = std::fs::create_dir_all(&root);
+        assert!(may_auto_allow(
+            PermissionPolicy::AlwaysApprove,
+            &c,
+            "run_command:git push --force-with-lease",
+            Some(&root),
+            "",
+            "run_command",
+            "git push --force-with-lease",
+        ));
+    }
+
+    #[test]
+    fn is_destructive_command_empty_is_false() {
+        assert!(!is_destructive_command(""));
     }
 
     #[test]

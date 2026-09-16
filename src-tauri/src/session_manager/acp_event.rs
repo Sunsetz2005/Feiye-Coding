@@ -15,8 +15,8 @@ use crate::error::{AgentError, AgentErrorCode};
 use crate::interactions::{InteractionPayloadV1, InteractionSnapshotV1};
 use crate::journal_throttle::is_paragraph_break;
 use crate::permission::{
-    extract_path_target, extract_shell_command, may_auto_allow, may_auto_deny,
-    permission_scope_key, pick_option_id,
+    extract_path_target, extract_shell_command, is_destructive_command, may_auto_allow,
+    may_auto_deny, permission_scope_key, pick_option_id,
 };
 use crate::session_fsm::SessionState;
 use crate::store::{self, ChatMessageStored};
@@ -235,6 +235,7 @@ impl SessionManager {
                             &shell_command,
                         );
                         let auto_deny = !auto && may_auto_deny(s.policy);
+                        let destructive = is_destructive_command(&shell_command);
                         let snapshot = InteractionSnapshotV1::new(
                             &s.app_session_id,
                             &s.process_id,
@@ -246,6 +247,7 @@ impl SessionManager {
                                 preview: preview.chars().take(2000).collect(),
                                 scope_key: sk,
                                 options,
+                                destructive,
                             },
                         );
                         let pending = PendingPermission {
@@ -907,6 +909,32 @@ impl SessionManager {
                 );
                 Self::emit_state(app, &self.snapshot());
             }
+            AcpEvent::ContextCompactStart { trigger } => {
+                let app_sid = {
+                    let guard = self.inner.lock();
+                    let Some(s) = guard.as_ref() else {
+                        return;
+                    };
+                    s.app_session_id.clone()
+                };
+                let _ = app.emit(
+                    "session://context_compact_start",
+                    serde_json::json!({ "sessionId": app_sid, "trigger": trigger }),
+                );
+            }
+            AcpEvent::ContextCompactEnd { trigger, outcome } => {
+                let app_sid = {
+                    let guard = self.inner.lock();
+                    let Some(s) = guard.as_ref() else {
+                        return;
+                    };
+                    s.app_session_id.clone()
+                };
+                let _ = app.emit(
+                    "session://context_compact_end",
+                    serde_json::json!({ "sessionId": app_sid, "trigger": trigger, "outcome": outcome }),
+                );
+            }
             AcpEvent::Unknown { method, .. } => {
                 tracing::debug!("runtime event retained as unknown method={method}");
             }
@@ -1063,6 +1091,7 @@ impl SessionManager {
                             &shell_command,
                         );
                         let auto_deny = may_auto_deny(s.policy) && !auto;
+                        let destructive = is_destructive_command(&shell_command);
                         let snapshot = InteractionSnapshotV1::new(
                             &s.app_session_id,
                             &s.process_id,
@@ -1074,6 +1103,7 @@ impl SessionManager {
                                 preview: preview.chars().take(2000).collect(),
                                 scope_key: sk,
                                 options,
+                                destructive,
                             },
                         );
                         let pending = PendingPermission {
@@ -1586,6 +1616,18 @@ impl SessionManager {
                         "sessionId": app_session_id,
                         "usage": saved,
                     }),
+                );
+            }
+            AcpEvent::ContextCompactStart { trigger } => {
+                let _ = app.emit(
+                    "session://context_compact_start",
+                    serde_json::json!({ "sessionId": app_session_id, "trigger": trigger }),
+                );
+            }
+            AcpEvent::ContextCompactEnd { trigger, outcome } => {
+                let _ = app.emit(
+                    "session://context_compact_end",
+                    serde_json::json!({ "sessionId": app_session_id, "trigger": trigger, "outcome": outcome }),
                 );
             }
             _ => {

@@ -318,6 +318,7 @@ function makeProps(overrides: DockOverrides = {}): ComposerDockProps {
       remainingTokens: null,
       percentUsed: null,
       runtime: null,
+      compacting: false,
     },
     onDraftChange: vi.fn(),
     onRemoveAttachment: vi.fn(),

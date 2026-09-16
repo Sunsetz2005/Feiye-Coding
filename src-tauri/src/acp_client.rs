@@ -120,6 +120,13 @@ pub enum AcpEvent {
         summary_preview: Option<String>,
         note: Option<String>,
     },
+    /// Fired immediately before a compaction summarization call begins
+    /// (Sunsetz kernel only — no legacy-ACP analog exists upstream).
+    ContextCompactStart { trigger: String },
+    /// Terminal signal for an auto-compact attempt that produced no
+    /// `ContextCompact` (no-op or failure). Not persisted as a chat marker —
+    /// exists purely to release the frontend's transient "compacting" flag.
+    ContextCompactEnd { trigger: String, outcome: String },
     /// Provider-reported usage at the end of an agent turn.
     ///
     /// These counters are cumulative across model calls in the turn. The Host
