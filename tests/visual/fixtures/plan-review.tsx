@@ -22,6 +22,8 @@ const plan = {
     { content: "验证唯一确认入口", status: "pending" },
   ],
   rpcId: 42,
+  artifactStatus: "proposed" as const,
+  liveReview: true,
 };
 
 createRoot(document.getElementById("root")!).render(
@@ -38,6 +40,9 @@ createRoot(document.getElementById("root")!).render(
               plan: "计划",
               empty: "暂无计划内容",
               open: "查看详情",
+              approved: "已批准",
+              executing: "执行中",
+              done: "已完成",
             }}
             onOpen={noop}
           />

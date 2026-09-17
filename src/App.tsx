@@ -145,6 +145,7 @@ import {
 } from "@/hooks/useSendQueue";
 import { useComposerRecovery } from "@/hooks/useComposerRecovery";
 import { useHostedCommandJobs } from "@/hooks/useHostedCommandJobs";
+import { useStatusModals } from "@/hooks/useStatusModals";
 import { BackgroundApprovalBanner } from "@/components/BackgroundApprovalBanner";
 import {
   COMPOSER_RECOVERY_DRAFT_KEY,
@@ -439,11 +440,17 @@ export default function App() {
   const connectorStatesRef = useRef(connectorStates);
   connectorStatesRef.current = connectorStates;
   const [slashActiveIndex, setSlashActiveIndex] = useState(0);
-  const [showStatusModal, setShowStatusModal] = useState(false);
-  const [showMcpModal, setShowMcpModal] = useState(false);
-  const [mcpServers, setMcpServers] = useState<api.McpDto[]>([]);
-  const [mcpError, setMcpError] = useState<string | null>(null);
-  const [mcpLoading, setMcpLoading] = useState(false);
+  const {
+    showStatusModal,
+    showMcpModal,
+    mcpServers,
+    mcpError,
+    mcpLoading,
+    openStatusModal,
+    closeStatusModal,
+    openMcpModal,
+    closeMcpModal,
+  } = useStatusModals();
   const [showCompactModal, setShowCompactModal] = useState(false);
   const [compactNote, setCompactNote] = useState("");
   const compactNoteRef = useRef<HTMLInputElement>(null);
@@ -4975,22 +4982,6 @@ export default function App() {
     });
   }, [composerMenuEntries.length]);
 
-  const openMcpModal = useCallback(async () => {
-    setShowMcpModal(true);
-    setMcpLoading(true);
-    setMcpError(null);
-    try {
-      const res = await api.inspectMcp(activeProject?.path ?? null);
-      setMcpServers(res.servers ?? []);
-      if (res.error) setMcpError(res.error);
-    } catch (e) {
-      setMcpServers([]);
-      setMcpError(String(e));
-    } finally {
-      setMcpLoading(false);
-    }
-  }, [activeProject?.path]);
-
   const showToast = useCallback((msg: string, ms = 3200) => {
     setToast(msg);
     window.setTimeout(() => {
@@ -5543,10 +5534,10 @@ export default function App() {
             openDoctor();
             return;
           case "status":
-            setShowStatusModal(true);
+            openStatusModal();
             return;
           case "mcp":
-            void openMcpModal();
+            void openMcpModal(activeProject?.path ?? null);
             return;
           case "compact":
             if (composerSettingsLocked) return;
@@ -5581,8 +5572,10 @@ export default function App() {
       mode,
       policy,
       activeProject?.id,
+      activeProject?.path,
       session.sessionId,
       tr,
+      openStatusModal,
       openMcpModal,
       onPolicy,
       setModeRaw,
@@ -8997,7 +8990,7 @@ export default function App() {
         policy={policy}
         projectPath={activeProject?.path}
         messageCount={transcriptMeta.length}
-        onClose={() => setShowStatusModal(false)}
+        onClose={closeStatusModal}
       />
       <McpStatusModal
         open={showMcpModal}
@@ -9005,7 +8998,7 @@ export default function App() {
         servers={mcpServers}
         error={mcpError}
         loading={mcpLoading}
-        onClose={() => setShowMcpModal(false)}
+        onClose={closeMcpModal}
         onManage={() => navigateSettings("extensions")}
       />
       {rewindTimeline && (

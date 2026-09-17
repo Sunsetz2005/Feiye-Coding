@@ -878,6 +878,7 @@ describe("SidebarNavigator", () => {
     await advanceTimers(450);
     const preview = projectPreview();
     expect(preview).not.toBeNull();
+    expect(screen.getAllByRole("tooltip")).toHaveLength(1);
     expect(Number.parseFloat(preview!.style.left)).toBeGreaterThanOrEqual(248);
     const actions = row.querySelector(".tree-l2__actions");
     expect(actions).toBeTruthy();

@@ -44,6 +44,7 @@ test("project preview is available from keyboard focus", async ({ page }) => {
   await page.getByRole("button", { name: "Sunsetz" }).focus();
   const preview = page.locator('.sidebar-preview[data-kind="project"]');
   await expect(preview).toBeVisible();
+  await expect(page.getByRole("tooltip")).toHaveCount(1);
   await expect(preview).toContainText("2 个任务");
   await expect(preview).toContainText("/Users/Shared/Coding/Sunsetz");
 

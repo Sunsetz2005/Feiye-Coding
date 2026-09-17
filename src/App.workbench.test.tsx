@@ -87,6 +87,9 @@ const apiListenerCapture = vi.hoisted(() => ({
     items: [] as SkillMetadataRankingResultV1["items"],
   })),
   sessionAutoTitle: vi.fn(async () => null),
+  inspectMcp: vi.fn(async () => ({
+    servers: [{ name: "filesystem", transport: "stdio" }],
+  })),
   pathsClassify: vi.fn(async (paths: string[]) =>
     paths.map((path) => ({
       path,
@@ -217,6 +220,7 @@ vi.mock("@/lib/api", async (importOriginal) => {
     skillInventoryV1: apiListenerCapture.skillInventory,
     skillMetadataRankV1: apiListenerCapture.skillRank,
     sessionAutoTitle: apiListenerCapture.sessionAutoTitle,
+    inspectMcp: apiListenerCapture.inspectMcp,
     pathsClassify: apiListenerCapture.pathsClassify,
     automationClaimBindV1: apiListenerCapture.automationBind,
     automationClaimCompleteV1: apiListenerCapture.automationComplete,
@@ -392,6 +396,9 @@ beforeEach(() => {
     requiresExplicitAcceptance: true,
     items: [] as SkillMetadataRankingResultV1["items"],
   });
+  apiListenerCapture.inspectMcp.mockReset().mockResolvedValue({
+    servers: [{ name: "filesystem", transport: "stdio" }],
+  });
   recoveryCapture.get.mockReset().mockResolvedValue(null);
   recoveryCapture.put.mockReset().mockImplementation(
     async (key: string, _state: unknown, revision: number) => ({
@@ -435,6 +442,7 @@ afterEach(() => {
   apiListenerCapture.sessionSend.mockClear();
   apiListenerCapture.sessionSendV2.mockClear();
   apiListenerCapture.sessionAutoTitle.mockClear();
+  apiListenerCapture.inspectMcp.mockClear();
   apiListenerCapture.pathsClassify.mockClear();
   apiListenerCapture.automationBind.mockClear();
   apiListenerCapture.automationComplete.mockClear();
@@ -1435,6 +1443,64 @@ describe("App workbench integration", () => {
       await waitFor(() => {
         expect(composerCapture.current?.preferences.mode).toBe("ask");
       });
+    },
+    20_000,
+  );
+
+  it(
+    "wires /status and /mcp to the active project",
+    async () => {
+      apiListenerCapture.tauri = true;
+      apiListenerCapture.projects = [
+        {
+          id: "project-1",
+          name: "Sunsetz",
+          path: "/workspace/sunsetz",
+          trusted: true,
+          pathOk: true,
+        },
+      ];
+      const { default: App } = await import("./App");
+      render(<App />);
+      await waitFor(() => {
+        expect(composerCapture.current?.project.active?.path).toBe(
+          "/workspace/sunsetz",
+        );
+      });
+
+      act(() => {
+        composerCapture.current?.menu.onSelectSlash({
+          id: "status",
+          kind: "action",
+          name: "status",
+          action: "status",
+        });
+      });
+      const statusDialog = await screen.findByRole("dialog", {
+        name: /Session status|会话状态/,
+      });
+      expect(within(statusDialog).getByText("/workspace/sunsetz")).toBeTruthy();
+      fireEvent.click(
+        within(statusDialog).getAllByRole("button", { name: /Close|关闭/ })[0]!,
+      );
+
+      act(() => {
+        composerCapture.current?.menu.onSelectSlash({
+          id: "mcp",
+          kind: "action",
+          name: "mcp",
+          action: "mcp",
+        });
+      });
+      await waitFor(() => {
+        expect(apiListenerCapture.inspectMcp).toHaveBeenCalledWith(
+          "/workspace/sunsetz",
+        );
+      });
+      const mcpDialog = await screen.findByRole("dialog", {
+        name: /MCP servers|MCP 服务器/,
+      });
+      expect(within(mcpDialog).getByText("filesystem")).toBeTruthy();
     },
     20_000,
   );

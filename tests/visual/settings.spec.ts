@@ -8,9 +8,25 @@ test("settings shell is dense, searchable, and capability honest", async ({
   const settingsNav = page.getByRole("complementary", { name: "设置" });
   await expect(settingsNav).toBeVisible();
   await expect(
+    settingsNav.getByRole("button", { name: "返回应用" }),
+  ).toBeVisible();
+  await expect(
     settingsNav.getByRole("button", { name: "常规" }),
   ).toHaveAttribute("aria-current", "page");
-  await expect(settingsNav.getByRole("button")).toHaveCount(8);
+  for (const section of [
+    "常规",
+    "外观",
+    "账户",
+    "我的模型",
+    "已归档会话",
+    "扩展",
+    "运行时",
+    "关于",
+  ]) {
+    await expect(
+      settingsNav.getByRole("button", { name: section, exact: true }),
+    ).toBeVisible();
+  }
   await expect(settingsNav).not.toContainText("电脑控制");
   await expect(settingsNav).not.toContainText("语音");
 

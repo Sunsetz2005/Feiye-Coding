@@ -180,7 +180,7 @@ createRoot(document.getElementById("root")!).render(
           historyOpen: true,
           activeProjectId: "project-1",
           activeSessionId: "session-1",
-          busySessionId: null,
+          busySessionIds: new Set(),
           pendingAskSessionIds: new Set(),
           projects: [
             {

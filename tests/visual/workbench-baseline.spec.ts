@@ -122,11 +122,11 @@ test("active plan mode sits beside access and closes in place", async ({
     Object.assign(window, { __TAURI_INTERNALS__: internals });
   });
 
-  await page.getByRole("button", { name: "访问" }).click();
-  const accessDialog = page.getByRole("dialog", { name: "访问" });
-  await expect(accessDialog).toBeVisible();
-  await accessDialog.getByRole("button", { name: /Plan/ }).click();
-  await expect(accessDialog).toHaveCount(0);
+  await page.getByRole("button", { name: "添加", exact: true }).click();
+  const addMenu = page.getByRole("menu");
+  await expect(addMenu).toBeVisible();
+  await addMenu.getByRole("menuitem", { name: /计划模式/ }).click();
+  await expect(addMenu).toHaveCount(0);
 
   const planButton = page.getByRole("button", { name: "计划模式" });
   await expect(planButton).toBeVisible();

@@ -35,6 +35,7 @@ Agent 与贡献者的**可执行知识库**。改产品行为或 UI 文案前，
 - Build 目录：`src/lib/grokCatalog.ts`
 - 模型/effort/mode/policy 状态：`src/hooks/useComposerCatalog.ts`
 - 应用内确认/输入弹窗：`src/hooks/useAppDialog.ts`、`src/components/AppDialogHost.tsx`
+- 状态 / MCP 弹窗状态：`src/hooks/useStatusModals.ts`；渲染：`src/components/StatusModal.tsx`、`src/components/McpStatusModal.tsx`
 - UI 入口：`src/App.tsx`
 - 输入器：`src/components/ComposerDock.tsx`
 - 会话渲染：`src/components/lobe-chat/ConversationThread.tsx`

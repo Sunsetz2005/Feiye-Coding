@@ -1,7 +1,10 @@
 # Changelog
 
-## [UNRELEASED] — 2026-09-08 19:35
+## [UNRELEASED] — 2026-09-17
 
+- `StatusModal` / `McpStatusModal` 的开关与 MCP 探测状态从 `App.tsx` 抽到独立 `useStatusModals` hook，并补齐成功、Host 错误、异常与关闭语义测试，行为不变。
+- 视觉夹具重新对齐生产组件契约并纳入 TypeScript 检查；45 个视觉行为/几何用例通过，42 张既有像素基线中 41 张已重生成并逐张人工审阅。
+- 项目预览显示时停用同一路径 tooltip，避免路径提示与预览卡重叠。
 - 模型/推理强度/模式/权限策略状态从 `App.tsx` 抽到独立的 `useComposerCatalog` hook，行为不变。
 - 应用内确认/输入/编辑项目弹窗从 `App.tsx` 抽到独立的 `useAppDialog` hook 与 `AppDialogHost` 组件，行为不变。
 - 自动压缩开始时上下文环显示进行中态，不再只在压缩完成后才有反馈；压缩无操作或失败也会给出终止信号，避免进行中态卡死。

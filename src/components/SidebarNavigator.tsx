@@ -1169,7 +1169,13 @@ export function SidebarNavigator({
                   }
                   onMouseLeave={scheduleClosePreview}
                 >
-                  <Tip label={project.path}>
+                  <Tip
+                    label={project.path}
+                    disabled={
+                      preview?.kind === "project" &&
+                      preview.project.id === project.id
+                    }
+                  >
                     <button
                       type="button"
                       className="tree-l2__select"
