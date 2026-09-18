@@ -146,6 +146,7 @@ import {
 import { useComposerRecovery } from "@/hooks/useComposerRecovery";
 import { useHostedCommandJobs } from "@/hooks/useHostedCommandJobs";
 import { useStatusModals } from "@/hooks/useStatusModals";
+import { useCompactModal } from "@/hooks/useCompactModal";
 import { BackgroundApprovalBanner } from "@/components/BackgroundApprovalBanner";
 import {
   COMPOSER_RECOVERY_DRAFT_KEY,
@@ -172,6 +173,7 @@ import {
 import { StatusModal } from "@/components/StatusModal";
 import { AppDialogHost } from "@/components/AppDialogHost";
 import { McpStatusModal } from "@/components/McpStatusModal";
+import { CompactModal } from "@/components/CompactModal";
 import {
   IconSearch,
   IconAlertTriangle,
@@ -451,9 +453,14 @@ export default function App() {
     openMcpModal,
     closeMcpModal,
   } = useStatusModals();
-  const [showCompactModal, setShowCompactModal] = useState(false);
-  const [compactNote, setCompactNote] = useState("");
-  const compactNoteRef = useRef<HTMLInputElement>(null);
+  const {
+    showCompactModal,
+    compactNote,
+    setCompactNote,
+    compactNoteRef,
+    openCompactModal,
+    closeCompactModal,
+  } = useCompactModal();
   /** Rewind timeline picker (session menu / status). */
   const [rewindTimeline, setRewindTimeline] = useState<{
     sessionId: string;
@@ -556,25 +563,6 @@ export default function App() {
   const openingSessionIdRef = useRef<string | null>(null);
 
   // ContextMenu handles outside click + Escape for sidebar menus.
-
-  // Compact context modal: focus note field on open; Escape dismisses.
-  useEffect(() => {
-    if (!showCompactModal) return;
-    const t = window.setTimeout(() => {
-      compactNoteRef.current?.focus();
-    }, 0);
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        setShowCompactModal(false);
-        setCompactNote("");
-      }
-    };
-    document.addEventListener("keydown", onKey);
-    return () => {
-      window.clearTimeout(t);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [showCompactModal]);
 
   useEffect(() => {
     if (!showSearch) return;
@@ -5541,8 +5529,7 @@ export default function App() {
             return;
           case "compact":
             if (composerSettingsLocked) return;
-            setCompactNote("");
-            setShowCompactModal(true);
+            openCompactModal();
             return;
           case "newChat":
             void newChat();
@@ -5577,6 +5564,7 @@ export default function App() {
       tr,
       openStatusModal,
       openMcpModal,
+      openCompactModal,
       onPolicy,
       setModeRaw,
       composerSettingsLocked,
@@ -8726,8 +8714,7 @@ export default function App() {
               onAtQueryChange={onAtQueryChange}
               onCompact={() => {
                 if (composerSettingsLocked) return;
-                setCompactNote("");
-                setShowCompactModal(true);
+                openCompactModal();
               }}
               onSend={send}
               onStop={stop}
@@ -9085,87 +9072,30 @@ export default function App() {
         </div>
       )}
 
-      {showCompactModal && (
-        <div
-          className="overlay"
-          role="presentation"
-          onClick={() => {
-            setShowCompactModal(false);
-            setCompactNote("");
-          }}
-        >
-          <form
-            className="modal compact-modal"
-            onClick={(e) => e.stopPropagation()}
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="compact-modal-title"
-            onSubmit={(e) => {
-              e.preventDefault();
-              if (composerSettingsLocked) return;
-              const note = compactNote;
-              setShowCompactModal(false);
-              setCompactNote("");
-              void (async () => {
-                const cmd = note.trim()
-                  ? `/compact ${note.trim()}`
-                  : "/compact";
-                try {
-                  const sid = await ensureConnected();
-                  if (!sid) return;
-                  await api.sessionSend(cmd);
-                } catch (err) {
-                  setLocalError(String(err));
-                }
-              })();
-            }}
-          >
-            <header className="modal-head">
-              <h2 id="compact-modal-title" className="modal-title">
-                {tr("slash.compact")}
-              </h2>
-              <button
-                type="button"
-                className="icon-btn modal-close"
-                onClick={() => {
-                  setShowCompactModal(false);
-                  setCompactNote("");
-                }}
-                aria-label={tr("common.close")}
-              >
-                <IconClose size={16} />
-              </button>
-            </header>
-            <p className="compact-modal__msg">
-              {tr("slash.compactConfirm")}
-            </p>
-            <input
-              ref={compactNoteRef}
-              className="compact-modal__field"
-              value={compactNote}
-              onChange={(e) => setCompactNote(e.target.value)}
-              placeholder={tr("slash.compactNote")}
-              autoFocus
-              autoComplete="off"
-            />
-            <div className="modal-actions">
-              <button
-                type="button"
-                className="btn btn--ghost"
-                onClick={() => {
-                  setShowCompactModal(false);
-                  setCompactNote("");
-                }}
-              >
-                {tr("slash.compactConfirmCancel")}
-              </button>
-              <button type="submit" className="btn btn--solid">
-                {tr("slash.compactConfirmOk")}
-              </button>
-            </div>
-          </form>
-        </div>
-      )}
+      <CompactModal
+        open={showCompactModal}
+        locale={locale}
+        note={compactNote}
+        noteRef={compactNoteRef}
+        onNoteChange={setCompactNote}
+        onClose={closeCompactModal}
+        onSubmit={(note) => {
+          if (composerSettingsLocked) return;
+          closeCompactModal();
+          void (async () => {
+            const command = note.trim()
+              ? `/compact ${note.trim()}`
+              : "/compact";
+            try {
+              const sessionId = await ensureConnected();
+              if (!sessionId) return;
+              await api.sessionSend(command);
+            } catch (error) {
+              setLocalError(String(error));
+            }
+          })();
+        }}
+      />
 
       {/* Search / command palette (Codex-style) */}
       {showSearch && (

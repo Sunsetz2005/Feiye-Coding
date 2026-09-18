@@ -15,7 +15,7 @@ UI 只展示 `models_list_available` 返回的可用模型。官方目录与已�
 | `AvailableModel.capabilities` | 当前模型真实支持的推理档位；未声明则不显示 |
 | 静态兜底 | 缓存不可用时使用已知可工作的 `grok-4.5` |
 
-Host：`models_list_available`。连接参数为：
+Host：`models_list_available`。默认内建 `agent_loop` 直接调用当前渠道的 OpenAI 兼容接口，不启动 CLI。下面的进程参数和 `session/set_model` 只属于显式启用的 legacy `grok_acp` 适配器：
 
 ```text
 grok agent --model <id> --reasoning-effort <e> [--always-approve] stdio

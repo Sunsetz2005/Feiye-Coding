@@ -155,19 +155,19 @@
 
 ### 6.1 通用
 
-- `decorations: false`（Tauri）；自绘圆角；透明或匹配 `--bg-app`。  
+- 窗口 chrome 按平台配置：macOS 使用原生 Overlay，Windows 使用无系统标题栏与自绘窗控；内容背景匹配 `--bg-app`。
 - 顶部 `--titlebar-height` 区域 `data-tauri-drag-region`。  
 - 双击顶栏：最大化/还原（Win/mac 习惯对齐）。  
 
 ### 6.2 macOS
 
-- **A01 优先：** `decorations: false` 无系统标题栏（与 §6.1 一致）。  
-- 在 `decorations: false` 下，系统红黄绿交通灯**不可用**（Overlay 需 decorations）；顶栏保留 ≥ `72px` 左安全区，避免内容顶边；A02 原生交通灯需后续在不破坏无边框前提下单独 spike（或平台私有 API），P0 壳阶段以无边框为准。  
+- `tauri.macos.conf.json` 使用 `decorations: true`、`titleBarStyle: Overlay` 和透明窗口，保留原生红黄绿交通灯。
+- 顶栏保留交通灯安全区；交互按钮不得进入拖动区域。
 - 全屏时圆角可为 0。  
 
 ### 6.3 Windows
 
-- 自绘 min / max / close；close hover 用 `--danger`。  
+- `tauri.windows.conf.json` 使用 `decorations: false` 和非透明窗口；自绘 min / max / close，close hover 用 `--danger`。
 - 注意 snap、DPI 缩放、最大化时圆角收为 0。  
 - hit-test：按钮区不可拖，其余顶栏可拖。  
 

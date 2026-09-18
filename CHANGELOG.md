@@ -1,7 +1,10 @@
 # Changelog
 
-## [UNRELEASED] — 2026-09-17
+## [UNRELEASED] — 2026-09-18 09:36
 
+## [1.0.2] — 2026-09-08 00:30
+
+- Compact 弹窗的开关、备注、焦点与 Escape 关闭状态从 `App.tsx` 抽到 `useCompactModal`，原有 DOM/CSS 抽到 `CompactModal`；`/compact` Host 发送仍由 `App.tsx` 协调，行为不变。
 - `StatusModal` / `McpStatusModal` 的开关与 MCP 探测状态从 `App.tsx` 抽到独立 `useStatusModals` hook，并补齐成功、Host 错误、异常与关闭语义测试，行为不变。
 - 视觉夹具重新对齐生产组件契约并纳入 TypeScript 检查；45 个视觉行为/几何用例通过，42 张既有像素基线中 41 张已重生成并逐张人工审阅。
 - 项目预览显示时停用同一路径 tooltip，避免路径提示与预览卡重叠。
@@ -13,9 +16,6 @@
 - Full Access（YOLO）权限策略新增危险命令拦截：`rm -rf`、`git reset --hard`、`git clean -f*`、非 `--force-with-lease` 的强制推送等仍会弹出确认，不再无条件自动放行；权限卡片对危险命令加醒目提示。
 - 权限卡片里过长的命令预览可展开查看完整内容，不再只能在 3 行小窗口里滚动。
 - `wait_commands` / `command_output` 的 `timeout_ms` 增加 1 小时上限，避免模型传入超大值导致单次工具调用长时间阻塞。
-
-## [1.0.2] — 2026-09-08 00:30
-
 - 输入器显示当前会话正在跑的后台命令数量；其他会话有待批准请求时顶部出现横幅，点击直接跳过去。
 - 对话里可用 loop_start 开一个绑定当前会话的循环，每隔至少 60 秒无用户气泡地唤醒自己继续任务，7 天后自动过期，也可 loop_cancel 提前停止。
 - 设置会标明开发模拟或环境变量盖过了已保存的内核偏好；Grok ACP 适配器仍留在显式开关后。

@@ -1506,6 +1506,70 @@ describe("App workbench integration", () => {
   );
 
   it(
+    "opens compact from both entry points and sends trimmed or empty notes",
+    async () => {
+      apiListenerCapture.tauri = true;
+      apiListenerCapture.sessionState = {
+        sessionId: "compact-session",
+        agentSessionId: "compact-agent",
+        state: "ready",
+        lastError: null,
+        streamingMessageId: null,
+        backend: "sunsetz",
+        title: "Compact",
+      };
+      const { default: App } = await import("./App");
+      render(<App />);
+      await waitFor(() => expect(composerCapture.current).not.toBeNull());
+
+      act(() => {
+        composerCapture.current?.menu.onSelectSlash({
+          id: "compact",
+          kind: "action",
+          name: "compact",
+          action: "compact",
+        });
+      });
+      let dialog = await screen.findByRole("dialog", {
+        name: /Compact context|压缩上下文/,
+      });
+      fireEvent.change(
+        within(dialog).getByPlaceholderText(/Optional note|可选备注/),
+        { target: { value: "  keep decisions  " } },
+      );
+      fireEvent.submit(dialog);
+      await waitFor(() => {
+        expect(apiListenerCapture.sessionSend).toHaveBeenCalledWith(
+          "/compact keep decisions",
+        );
+      });
+
+      act(() => composerCapture.current?.onCompact());
+      dialog = await screen.findByRole("dialog", {
+        name: /Compact context|压缩上下文/,
+      });
+      const note = within(dialog).getByPlaceholderText(
+        /Optional note|可选备注/,
+      );
+      expect((note as HTMLInputElement).value).toBe("");
+      fireEvent.submit(dialog);
+
+      await waitFor(() => {
+        expect(apiListenerCapture.sessionSend).toHaveBeenLastCalledWith(
+          "/compact",
+        );
+        expect(apiListenerCapture.sessionSend).toHaveBeenCalledTimes(2);
+      });
+      expect(
+        screen.queryByRole("dialog", {
+          name: /Compact context|压缩上下文/,
+        }),
+      ).toBeNull();
+    },
+    20_000,
+  );
+
+  it(
     "dispatches remaining slash/composer-plus action-switch cases",
     async () => {
       Object.assign(window, {

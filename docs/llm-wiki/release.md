@@ -119,7 +119,7 @@ open /Applications/Sunsetz.app
 - **安装版** NSIS + **绿色版** zip（解压即用）均上传到同一 Release。  
 - SmartScreen 可能提示未知发布者 →「更多信息」→「仍要运行」。  
 - 需 **WebView2**（Win10/11 多已预装）。  
-- 真 Agent 需本机 **Grok Build CLI**（`grok.exe`）。
+- 默认内建 Agent 不需要 Grok Build CLI；真实对话需要在「设置 → 我的模型」配置可用的 OpenAI 兼容渠道。只有显式启用 legacy `grok_acp` 时才需要 `grok.exe`。
 
 ## Linux 说明
 

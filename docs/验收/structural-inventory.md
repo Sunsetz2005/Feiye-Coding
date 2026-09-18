@@ -4,7 +4,7 @@
 
 ## Shell
 
-- Frameless：`src-tauri/tauri.conf.json` → `decorations: false`
+- 平台窗口 chrome：macOS `decorations: true` + `titleBarStyle: Overlay` 保留原生交通灯；Windows `decorations: false` 使用自绘窗控
 - Sunsetz 语义令牌：`src/styles/tokens.css` + `src/styles/workbench.css`
 - 三栏布局根：`WorkbenchShell`；状态和 Host 协调仍由 `App.tsx` 持有
 - 面板关闭：`WorkbenchShell` 将焦点恢复到对应顶部栏按钮；会话中栏保持挂载，滚动位置不因面板切换重建

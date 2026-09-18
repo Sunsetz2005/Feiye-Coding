@@ -50,6 +50,8 @@ import { GlassModal } from "@/components/GlassModal";
 
 `StatusModal` / `McpStatusModal` 的开关状态，以及 MCP inspect 的 `loading` / `error` / `servers`，由 `useStatusModals` 集中管理；`App.tsx` 只传当前项目路径并渲染组件。
 
+Compact 弹窗的开关、备注、输入焦点和 Escape 关闭由 `useCompactModal` 管理，原有 DOM/CSS 由 `CompactModal` 渲染；`App.tsx` 仍负责连接会话并发送 `/compact`，避免把 Host 协调塞进展示组件。
+
 存量也可用同一 DOM/CSS（不强制立刻迁组件）：
 
 ```html
@@ -101,7 +103,7 @@ setAppDialog({
 | 类型 | 选择器 / 组件 |
 |------|----------------|
 | App 确认/输入 | `.modal.app-dialog` · `setAppDialog` |
-| Compact / Doctor / Status / MCP | `.modal` · `GlassModal` · `DoctorModal` · `useStatusModals` |
+| Compact / Doctor / Status / MCP | `.modal` · `CompactModal` · `DoctorModal` · `GlassModal` · `useCompactModal` · `useStatusModals` |
 | 文件详情 | `.modal.file-path-details` |
 | 搜索面板 | `.search-panel` |
 | 模型 / 权限 / 项目 / 用户 / 斜杠 / + | `.cmm__pop` · `.menu-panel` · `.slash-palette` · `.composer-plus` |
@@ -135,6 +137,8 @@ setAppDialog({
 - `src/hooks/useAppDialog.ts` — `AppDialog` 类型、状态、Escape/Enter 键盘处理  
 - `src/components/AppDialogHost.tsx` — portal 渲染（confirm/prompt/edit-project 三种表单）  
 - `src/hooks/useStatusModals.ts` — Status / MCP 开关及 MCP 探测状态；保持 Host 调用与组件接口不变
+- `src/hooks/useCompactModal.ts` — Compact 开关、备注、焦点与 Escape 关闭状态
+- `src/components/CompactModal.tsx` — Compact 原有 DOM/CSS 和提交表单；Host 发送仍上抛给 `App.tsx`
 - `src/App.tsx` — 调用 `useAppDialog()` 并渲染 `<AppDialogHost />`；24 处 `setAppDialog(...)` 调用点仍在此文件  
 - `src/styles/tokens.css` — `--menu-*` / `--modal-*` / 可选 `--glass-*`  
 - `src/styles/app.css` — modal / menu / cmm 布局  

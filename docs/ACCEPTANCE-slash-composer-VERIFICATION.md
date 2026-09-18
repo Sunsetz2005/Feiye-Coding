@@ -1,7 +1,7 @@
 ---
 verified: 2026-07-23T12:00:00Z
 doc: docs/ACCEPTANCE-slash-composer.md
-status: gaps_found
+status: historical_snapshot
 score: static review complete; shell suite not executed in this agent session
 gaps:
   - id: H1
@@ -27,6 +27,8 @@ gaps:
 ---
 
 # Acceptance Verification · Slash / Skills / Goal / Doctor
+
+> **Historical snapshot (2026-07-23).** This file preserves the static review performed on that date; it is not the current acceptance result. H1 was later resolved by `UserMessageBody` in `src/components/lobe-chat/ConversationThread.tsx`, and all Plan/Goal entry points now clear the opposite mode in `src/App.tsx`. Current behavior is documented in [`llm-wiki/slash-composer.md`](./llm-wiki/slash-composer.md) and covered by the current frontend suite. The tables below remain unchanged as evidence of the original review.
 
 **Source:** [ACCEPTANCE-slash-composer.md](./ACCEPTANCE-slash-composer.md)  
 **Verified:** 2026-07-23  

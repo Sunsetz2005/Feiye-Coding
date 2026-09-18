@@ -178,6 +178,7 @@ cp src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/rpm/* dist-installer
 - macOS ARM64  
 - macOS x64  
 - Windows x64  
+- Linux x64（AppImage / deb / rpm）
 
 Release body 只取该版本的 CHANGELOG 章节；安装包由 GitHub 作为 Release assets 单独展示，安装说明保留在 README。
 
@@ -203,4 +204,4 @@ Tag 格式：`v0.1.1`（前缀 `v` + semver）。
 | cargo-xwin 首次很慢 | 正常：在拉 CRT/SDK；缓存目录 `~/.cache/cargo-xwin` |
 | Windows 本机无法交叉 | 用 `pnpm build:win`（cargo-xwin）或 CI |
 | macOS 下载后打不开 | 未签名：系统设置 → 隐私与安全性 → 仍要打开；或 `xattr -cr /path/to/Sunsetz.app` |
-| Windows 找不到 grok CLI | 安装 Grok Build 并确保 `%USERPROFILE%\.grok\bin` 或 PATH 上有 `grok.exe` |
+| Windows 在 legacy `grok_acp` 模式找不到 grok CLI | 默认内建 Agent 不需要 CLI；若明确启用 legacy 模式，再安装 Grok Build 并确保 `%USERPROFILE%\.grok\bin` 或 PATH 上有 `grok.exe` |

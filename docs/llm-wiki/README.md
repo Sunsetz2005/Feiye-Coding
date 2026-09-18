@@ -18,6 +18,7 @@ Agent 与贡献者的**可执行知识库**。改产品行为或 UI 文案前，
 | [runtime-backend.md](./runtime-backend.md) | **内核选择**：内建 agent loop 是产品路径；Grok ACP 只在显式 legacy 开关后保留；mock/环境变量盖过设置时必须标明 |
 | [account.md](./account.md) | 官方登录 / 会员额度 / 热力图 / 调用日志 |
 | [providers.md](./providers.md) | 自定义中转、agent GROK_HOME、编辑器探测 |
+| [git-worktrees.md](./git-worktrees.md) | 项目 worktree 列表、切换、创建与安全删除边界 |
 | [setup.md](./setup.md) | 首次初始化门禁：登录 Sunsetz 或跳过进入工作台 |
 | [release.md](./release.md) | **发版 / Release 强制流程**：CHANGELOG、tag、三端 CI、macOS 损坏处理 |
 | [maintain.md](./maintain.md) | **开源维护**：Issue 分拣、PR 审核、社区反馈入库、修复闭环 |
@@ -36,6 +37,7 @@ Agent 与贡献者的**可执行知识库**。改产品行为或 UI 文案前，
 - 模型/effort/mode/policy 状态：`src/hooks/useComposerCatalog.ts`
 - 应用内确认/输入弹窗：`src/hooks/useAppDialog.ts`、`src/components/AppDialogHost.tsx`
 - 状态 / MCP 弹窗状态：`src/hooks/useStatusModals.ts`；渲染：`src/components/StatusModal.tsx`、`src/components/McpStatusModal.tsx`
+- Compact 弹窗状态与渲染：`src/hooks/useCompactModal.ts`、`src/components/CompactModal.tsx`
 - UI 入口：`src/App.tsx`
 - 输入器：`src/components/ComposerDock.tsx`
 - 会话渲染：`src/components/lobe-chat/ConversationThread.tsx`
